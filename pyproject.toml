@@ -1,0 +1,63 @@
+[project]
+name = "silk-agent"
+version = "0.1.0"
+description = "Slack bot that runs Claude Agent SDK agents in session-scoped GKE Agent Sandboxes"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "claude-agent-sdk>=0.2.165",
+  "slack-bolt>=1.21",
+  "slack-sdk>=3.33",
+  "google-genai>=1.0",
+  "google-cloud-modelarmor>=0.2",
+  "google-cloud-aiplatform>=1.100",
+  "google-cloud-storage>=2.18",
+  "google-cloud-secret-manager>=2.20",
+  "streamlit>=1.40",
+  "pydantic>=2.11,<3",
+  "PyYAML>=6.0.2,<7",
+  "aiohttp>=3.10",
+  "gke-session-sandbox>=0.1.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4",
+  "pytest-asyncio>=1.0",
+  "ruff>=0.8",
+  "pyright>=1.1.380",
+]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# gke-session-sandbox is developed in a sibling repository; use the local checkout.
+[tool.uv.sources]
+gke-session-sandbox = { path = "../test-google-cloud-agent-platform/20261010-gke-agent-sandbox-with-sandboxd", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-m 'not integration'"
+markers = [
+  "integration: calls real external services (Agent Platform, Model Armor, ...); run with -m integration",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.pyright]
+include = ["src", "apps"]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"

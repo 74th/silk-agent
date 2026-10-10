@@ -1,0 +1,49 @@
+slack:
+  app_token_secret: projects/nnyn-dev/secrets/silk-agent-slack-app-token
+  bot_token_secret: projects/nnyn-dev/secrets/silk-agent-slack-bot-token
+  stop_words: ["停止", "中止", "中断", "STOP"]
+  interrupt_mode: interrupt        # interrupt | queue
+  progress:
+    heartbeat_interval_seconds: 60
+    timezone: Asia/Tokyo
+    max_tools_shown: 20
+    tool_display: summary          # name | summary | verbose
+filter:
+  allowed_teams: [T000]
+  allowed_channels: []             # 空 = 全チャンネル
+  max_message_chars: 8000
+input_guard:
+  provider: gemini
+  model: gemini-3.8-flash
+  location: global
+  policy_file: policies/input-guard.md
+  on_error: block
+output_sanitizer:
+  provider: model_armor
+  template: projects/nnyn-dev/locations/us-central1/templates/simple
+  endpoint: modelarmor.us-central1.rep.googleapis.com
+  on_sdp_match: mask               # mask | block
+  on_other_match: block
+  on_error: block
+session_store:
+  provider: agent_platform
+  project: nnyn-dev
+  location: us-central1
+  agent_runtime: projects/nnyn-dev/locations/us-central1/reasoningEngines/<id>
+  ttl_seconds: 2592000
+agent:
+  provider: agent_platform         # CLAUDE_CODE_USE_VERTEX=1
+  project: nnyn-dev
+  region: global                   # Claudeの提供リージョン
+  model: claude-opus-5-5           # テストでは claude-haiku-5-5
+  max_turns: 50
+  max_budget_usd_per_turn: 2.0
+  idle_client_timeout_seconds: 600
+mcp:
+  config_file: config/mcp.json
+skills:
+  source: gs://nnyn-dev-silk-agent-skills/skills
+  sync_interval_seconds: 300
+sandbox:
+  runtime: gke_session_sandbox     # gke_session_sandbox | local_process (開発専用)
+  config_file: config/sandbox-config.yaml   # gke-session-sandboxの設定
