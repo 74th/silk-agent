@@ -71,7 +71,7 @@ variable "artifact_repository_id" {
 }
 
 variable "node_machine_type" {
-  description = "Machine type used by both fixed-size node pools."
+  description = "Machine type used by both autoscaling node pools."
   type        = string
   default     = "e2-standard-2"
 }

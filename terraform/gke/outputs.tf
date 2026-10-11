@@ -19,7 +19,7 @@ output "region" {
 }
 
 output "node_pool_names" {
-  description = "Fixed-size node pool names."
+  description = "Autoscaling node pool names."
   value       = [google_container_node_pool.system.name, google_container_node_pool.gvisor.name]
 }
 

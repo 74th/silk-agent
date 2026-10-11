@@ -13,12 +13,16 @@ silk-agent の検証用 GKE をこのリポジトリの管理下で再現し、�
 - **WHEN** 運用者が既定の入力で Terraform の plan を作成する
 - **THEN** クラスタの location はリージョン内の 1 ゾーンになり、リージョナルクラスタや複数ゾーンに分散したノードプールは計画されない
 
-### Requirement: 用途別に 1 ノードずつ配置する
-システムは、通常ワークロード用の `system` と gVisor Sandbox 用の `gvisor` の 2 ノードプールを用意し、それぞれの定常ノード数を 1 としなければならない (SHALL)。`gvisor` プールでは Sandbox Pod が gVisor で実行できなければならない (SHALL)。
+### Requirement: 用途別のノードプールを自動調整する
+システムは、通常ワークロード用の `system` と gVisor Sandbox 用の `gvisor` の 2 ノードプールを用意し、それぞれ最小 1 ノード、最大 10 ノードで自動調整しなければならない (SHALL)。`gvisor` プールでは Sandbox Pod が gVisor で実行できなければならない (SHALL)。
 
 #### Scenario: クラスタを作成する
 - **WHEN** Terraform によりクラスタとノードプールを作成する
-- **THEN** `system` と `gvisor` が同じ指定ゾーンに存在し、各プールの目標ノード数は 1 で、`gvisor` RuntimeClass を使用できる
+- **THEN** `system` と `gvisor` が同じ指定ゾーンに存在し、各プールで 1～10 ノードの自動調整が有効になり、`gvisor` RuntimeClass を使用できる
+
+#### Scenario: ワークロードの需要が減る
+- **WHEN** ワークロードの Pod を各プールのより少ないノードへ収容できるようになる
+- **THEN** 各プールは自動的にスケールインし、1 ノードより少なくはならない
 
 ### Requirement: Sandbox の稼働に必要なクラウド基盤を提供する
 システムは、クラスタ用ネットワーク、Pod と Service の IP 範囲、プライベートノードの外向き通信、永続ディスクを使うための機能、ノードのイメージ pull 権限、およびイメージの保存先を同じ Terraform 構成で提供しなければならない (SHALL)。クラスタ制御面へのアクセスは設定された CIDR に制限しなければならない (SHALL)。

@@ -1,6 +1,6 @@
 # silk-agent zonal GKE runbook
 
-This runbook provisions the dedicated validation cluster from `terraform/gke/`. Its local Terraform state is independent of the application resources in `terraform/`. The default cluster is `silk-agent-gke` in `us-central1-a`, with one `system` node and one gVisor `gvisor` node. This is a single-zone test environment and has no node autoscaling.
+This runbook provisions the dedicated validation cluster from `terraform/gke/`. Its local Terraform state is independent of the application resources in `terraform/`. The default cluster is `silk-agent-gke` in `us-central1-a`. Its `system` and gVisor `gvisor` node pools each autoscale from one to ten nodes (two to twenty nodes total).
 
 ## Configure and review Terraform
 
@@ -16,7 +16,7 @@ terraform -chdir=terraform/gke plan -var-file=terraform.tfvars -out=environment.
 terraform -chdir=terraform/gke show environment.tfplan
 ```
 
-Review the project, zone, all CIDRs, authorized control-plane ranges, resource names, and the two one-node pools. This plan must contain only resources from the dedicated root. Apply only the reviewed plan:
+Review the project, zone, all CIDRs, authorized control-plane ranges, resource names, and the autoscaling bounds of both node pools. Each pool scales down to one node when its workloads can fit there; the cluster never scales below two nodes. This plan must contain only resources from the dedicated root. Apply only the reviewed plan:
 
 ```sh
 terraform -chdir=terraform/gke apply environment.tfplan

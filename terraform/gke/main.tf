@@ -138,11 +138,15 @@ resource "google_container_cluster" "gke" {
 }
 
 resource "google_container_node_pool" "system" {
-  project    = var.project_id
-  name       = "system"
-  location   = var.zone
-  cluster    = google_container_cluster.gke.name
-  node_count = 1
+  project  = var.project_id
+  name     = "system"
+  location = var.zone
+  cluster  = google_container_cluster.gke.name
+
+  autoscaling {
+    min_node_count = 1
+    max_node_count = 10
+  }
 
   depends_on = [google_project_iam_member.node_roles]
   management {
@@ -164,11 +168,15 @@ resource "google_container_node_pool" "system" {
 }
 
 resource "google_container_node_pool" "gvisor" {
-  project    = var.project_id
-  name       = "gvisor"
-  location   = var.zone
-  cluster    = google_container_cluster.gke.name
-  node_count = 1
+  project  = var.project_id
+  name     = "gvisor"
+  location = var.zone
+  cluster  = google_container_cluster.gke.name
+
+  autoscaling {
+    min_node_count = 1
+    max_node_count = 10
+  }
 
   depends_on = [google_project_iam_member.node_roles]
   management {
