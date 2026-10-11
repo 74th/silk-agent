@@ -1,10 +1,10 @@
-# Spec Delta
+# output-sanitizer Specification
 
 ## Purpose
 
 エージェントの出力をユーザへ表示する前にModel Armorで検査し、個人情報はマスクして表示し、それ以外の有害な出力は表示しない。
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: 表示する出力はすべて検査する
 システムは、チャネルへ表示するエージェント由来のテキスト（エージェントの応答、ツールの引数・結果の要約、アップロードするテキストファイル）を、表示する前にModel Armorのテンプレート`projects/nnyn-dev/locations/us-central1/templates/simple`で検査しなければならない (SHALL)。検査前のテキストをチャネルへ表示してはならない (SHALL NOT)。
@@ -25,11 +25,18 @@
 - **THEN** メールアドレスがマスクされたテキストが表示される
 
 ### Requirement: 個人情報以外のフィルタに該当した出力は表示しない
-システムは、検査で個人情報以外のフィルタ（有害コンテンツ、jailbreak、悪性URL、CSAMなど）に該当した出力を表示してはならない (SHALL NOT)。代わりに、ポリシーにより表示できなかったことを出力イベントで返さなければならない (SHALL)。
+システムは、検査で個人情報とjailbreak以外のフィルタ（有害コンテンツ、悪性URL、CSAMなど）に該当した出力を表示してはならない (SHALL NOT)。代わりに、ポリシーにより表示できなかったことを出力イベントで返さなければならない (SHALL)。
 
 #### Scenario: 悪性URLを含む応答
 - **WHEN** エージェントの応答が悪性URLのフィルタに該当する
 - **THEN** 応答は表示されず、ポリシーにより表示できなかったことが通知される
+
+### Requirement: jailbreakの判定では出力を止めない
+システムは、出力の検査で、プロンプトインジェクション・jailbreakのフィルタだけに該当した出力を、該当しなかったものとして表示しなければならない (SHALL)。無視するフィルタは設定で変更できなければならない (SHALL)。
+
+#### Scenario: シェルコマンドの要約
+- **WHEN** ツールの要約`echo hello > a.txt && cat a.txt && whoami`がjailbreakのフィルタだけに該当する
+- **THEN** 要約はそのまま表示される
 
 ### Requirement: 長い出力は分割して検査する
 システムは、Model Armorの1回の検査上限を超える長さの出力を、段落またはコードブロックの境界で分割して、すべての部分を検査しなければならない (SHALL)。
