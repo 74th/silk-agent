@@ -12,11 +12,12 @@ from typing import Any, Protocol
 
 from silk_agent.app import Services, build_services
 from silk_agent.channels.slack import SlackChannel
+from silk_agent.channels.slack_users import UserDirectory
 from silk_agent.config import Config
-from silk_agent.core.events import InboundEvent, UserMessage
+from silk_agent.core.clock import SystemClock
+from silk_agent.core.events import InboundEvent
 from silk_agent.core.lifecycle import DEFAULT_SHUTDOWN_GRACE_SECONDS, recover_interrupted
-from silk_agent.core.ports import Clock
-from silk_agent.testing.fakes import SystemClock
+from silk_agent.core.ports import AGENT_USER_EMAIL_ENV, Clock
 
 log = logging.getLogger(__name__)
 
@@ -58,61 +59,44 @@ def check_config(config: Config) -> None:
         )
 
 
-class UserDirectory:
-    """Resolves a Slack user id to an e-mail address (needs `users:read.email`)."""
-
-    def __init__(self, client: Any) -> None:
-        self._client = client
-        self._cache: dict[str, str] = {}
-
-    async def email(self, user_id: str) -> str:
-        if user_id in self._cache:
-            return self._cache[user_id]
-        try:
-            res = await self._client.users_info(user=user_id)
-            email = res["user"]["profile"].get("email", "")
-        except Exception:
-            log.warning("could not resolve the e-mail address of %s", user_id)
-            email = ""
-        self._cache[user_id] = email
-        return email
-
-
 class SlackBot:
     def __init__(
         self,
         config: Config,
         *,
-        root: Path,
         work_dir: Path,
         app: Any,
         socket_handler: SocketHandler,
         clock: Clock | None = None,
         bot_user_id: str = "",
+        workspace_team: str = "",
+        workspace_enterprise: str = "",
         shutdown_grace_seconds: float = DEFAULT_SHUTDOWN_GRACE_SECONDS,
     ) -> None:
         self._config = config
-        self._root, self._work_dir = root, work_dir
+        self._work_dir = work_dir
         self._app = app
         self._socket = socket_handler
         self._clock = clock or SystemClock()
         self._bot_user_id = bot_user_id
+        self._workspace_team = workspace_team
+        self._workspace_enterprise = workspace_enterprise
         self._grace = shutdown_grace_seconds
         self._stop = asyncio.Event()
-        self._users = UserDirectory(app.client)
-        self._last_user: dict[str, str] = {}
+        self._users = UserDirectory(app.client, self._clock)
         self.services: Services | None = None
         self.channel: SlackChannel | None = None
         self.recovered: list[str] = []
 
     async def _env(self, key: str) -> Mapping[str, str]:
-        user = self._last_user.get(key)
-        email = await self._users.email(user) if user else ""
-        return {"USER_EMAIL": email} if email else {}
+        """Sandbox creation env: the e-mail address of the user who started the conversation.
+        A conversation without a recorded owner gets no env (an existing Sandbox is reused)."""
+        assert self.services is not None
+        state = await self.services.state_store.get(key)
+        email = state.owner_email if state is not None else None
+        return {AGENT_USER_EMAIL_ENV: email} if email else {}
 
     async def _handle(self, event: InboundEvent) -> None:
-        if isinstance(event, UserMessage) and event.user:
-            self._last_user[event.conversation_key] = event.user
         assert self.services is not None
         await self.services.orchestrator.handle(event)
 
@@ -124,19 +108,20 @@ class SlackBot:
             self._clock,
             self._config.slack.progress,
             bot_user_id=self._bot_user_id,
+            users=self._users,
+            workspace_team=self._workspace_team,
+            workspace_enterprise=self._workspace_enterprise,
         )
         self.services = await build_services(
             self._config,
             self.channel,
-            root=self._root,
             work_dir=self._work_dir,
             clock=self._clock,
             env_provider=self._env,
             runtime=runtime,
         )
         # The channel needs the state store (participation, progress message position).
-        self.channel._state_store = self.services.state_store
-        self.channel.output._state_store = self.services.state_store
+        self.channel.attach_state_store(self.services.state_store)
         self.channel.register()
         # Turns that were running under a previous Bot instance were interrupted.
         self.recovered = await recover_interrupted(
@@ -173,7 +158,7 @@ class SlackBot:
             await self.services.aclose(self._grace)
 
 
-async def run_from_environment(config: Config, root: Path) -> None:  # pragma: no cover
+async def run_from_environment(config: Config) -> None:  # pragma: no cover
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
     from slack_bolt.async_app import AsyncApp
 
@@ -185,10 +170,11 @@ async def run_from_environment(config: Config, root: Path) -> None:  # pragma: n
     await asyncio.to_thread(work_dir.mkdir, parents=True, exist_ok=True)
     bot = SlackBot(
         config,
-        root=root,
         work_dir=work_dir,
         app=app,
         socket_handler=AsyncSocketModeHandler(app, app_token),
         bot_user_id=str(auth["user_id"]),
+        workspace_team=str(auth.get("team_id") or ""),
+        workspace_enterprise=str(auth.get("enterprise_id") or ""),
     )
     await bot.run()

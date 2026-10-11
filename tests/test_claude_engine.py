@@ -420,3 +420,104 @@ async def test_skill_update_applies_from_next_turn(clock, tmp_path):
     assert (Path(c2.options.cwd) / ".claude/skills/report/SKILL.md").read_text() == "v2"
     assert c2.options.resume == "sid-1"
     assert copied == [("conv", "g1"), ("conv", "g2")]
+
+
+async def test_tool_hook_events_carry_the_raw_input_and_result(clock, tmp_path):
+    seen = []
+    eng = make(clock, tmp_path, lambda n: [], on_hook_event=seen.append)
+    client = await eng._ensure_client()
+    eng._turn_id = "t1"
+    eng._queue = asyncio.Queue()
+    await client.hook(
+        "PreToolUse",
+        tool_name="mcp__sandbox__bash",
+        tool_input={"command": "ls -la\nsecond"},
+        tool_use_id="a",
+    )
+    await clock.advance(2)
+    await client.hook(
+        "PostToolUse",
+        tool_name="mcp__sandbox__bash",
+        tool_input={},
+        tool_response="total 0",
+        tool_use_id="a",
+    )
+    await client.hook(
+        "PreToolUse", tool_name="mcp__docs__search", tool_input={"query": "x"}, tool_use_id="b"
+    )
+    await client.hook(
+        "PostToolUseFailure",
+        tool_name="mcp__docs__search",
+        tool_input={},
+        error="not found",
+        tool_use_id="b",
+        is_interrupt=False,
+    )
+    start, end, start2, end2 = seen
+    assert (start.kind, start.tool_name, start.tool_use_id, start.turn_id) == (
+        "tool_start",
+        "mcp__sandbox__bash",
+        "a",
+        "t1",
+    )
+    assert start.tool_input == {"command": "ls -la\nsecond"}  # raw, not the one-line summary
+    assert (end.kind, end.status, end.tool_response, end.duration_seconds) == (
+        "tool_end",
+        "success",
+        "total 0",
+        2.0,
+    )
+    assert end.tool_name == "mcp__sandbox__bash"
+    assert (end2.status, end2.tool_response) == ("failure", "not found")
+    assert start2.conversation_key == "conv"
+
+
+async def test_a_background_tool_is_reported_as_background(clock, tmp_path):
+    from silk_agent.agent.sandbox_tools import BACKGROUND_MARKER
+
+    seen = []
+    eng = make(clock, tmp_path, lambda n: [], on_hook_event=seen.append)
+    client = await eng._ensure_client()
+    eng._queue = asyncio.Queue()
+    await client.hook("PreToolUse", tool_name="x", tool_input={}, tool_use_id="a")
+    await client.hook(
+        "PostToolUse",
+        tool_name="x",
+        tool_input={},
+        tool_response=f"{BACKGROUND_MARKER} cmd",
+        tool_use_id="a",
+    )
+    assert seen[1].status == "background"
+
+
+async def test_interrupted_tools_are_reported_as_ended(clock, tmp_path):
+    seen = []
+    script = [("pre", "mcp__sandbox__bash", {"command": "sleep 100"}, "tu1"), ("block",)]
+    eng = make(clock, tmp_path, lambda n: script, on_hook_event=seen.append)
+
+    async def consume():
+        async for _ in eng.run_turn(TurnRequest("conv", "t1", "go")):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.05)
+    await eng.interrupt()
+    await asyncio.wait_for(task, 2)
+    assert [(e.kind, getattr(e, "status", None)) for e in seen] == [
+        ("tool_start", None),
+        ("tool_end", "interrupted"),
+    ]
+
+
+async def test_a_failing_hook_handler_does_not_break_the_turn(clock, tmp_path):
+    def boom(event):
+        raise RuntimeError("handler bug")
+
+    script = [
+        ("pre", "mcp__sandbox__bash", {"command": "ls"}, "tu1"),
+        ("post", "mcp__sandbox__bash", "tu1"),
+        ("msg", result()),
+    ]
+    eng = make(clock, tmp_path, lambda n: script, on_hook_event=boom)
+    events = await run(eng)
+    assert any(isinstance(e, TurnFinished) for e in events)

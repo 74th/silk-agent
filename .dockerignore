@@ -12,3 +12,6 @@ openspec
 tests
 skills-cache
 config/silk-agent.yaml
+_sessions
+.host-config-snapshot-*
+usecases/*/.venv

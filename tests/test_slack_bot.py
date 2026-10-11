@@ -6,7 +6,7 @@ import pytest
 
 import silk_agent.app as app_module
 from silk_agent.config import Config
-from silk_agent.core.events import UserMessage
+from silk_agent.core.events import SenderInfo, UserMessage
 from silk_agent.core.ports import ConversationState
 from silk_agent.slack_app import SlackBot, check_config, load_tokens
 from silk_agent.testing.fakes import (
@@ -63,7 +63,6 @@ def make_bot(monkeypatch, clock, tmp_path, store=None, scenario=None, order=None
     monkeypatch.setattr(app_module, "build_engine_factory", fake_factory)
     bot = SlackBot(
         make_config(),
-        root=ROOT,
         work_dir=tmp_path,
         app=app,
         socket_handler=FakeSocket(order),
@@ -150,14 +149,114 @@ async def test_graceful_shutdown_order_and_interruption(monkeypatch, clock, tmp_
     assert engines[KEY].closed
 
 
-async def test_user_email_is_resolved_for_the_sandbox_env(monkeypatch, clock, tmp_path):
-    bot, client, *_ = make_bot(monkeypatch, clock, tmp_path)
+def sender(email):
+    return SenderInfo(email=email, is_guest=False, is_external=False, team="T1")
 
-    async def users_info(user):
-        return {"user": {"profile": {"email": f"{user.lower()}@example.com"}}}
 
-    client.users_info = users_info
+async def test_sandbox_env_is_the_email_of_the_user_who_started_the_conversation(
+    monkeypatch, clock, tmp_path
+):
+    bot, client, store, *_ = make_bot(monkeypatch, clock, tmp_path)
+    await bot.start(runtime=InMemoryRuntime())
+    await bot._handle(
+        UserMessage(KEY, "U1", "hi", team="T1", channel="C1", sender=sender("alice@example.com"))
+    )
+    assert await bot._env(KEY) == {"AGENT_USER_EMAIL": "alice@example.com"}
+    assert (await store.get(KEY)).owner_user == "U1"
+    assert await bot._env("slack:T1:C9:1.0") == {}  # unknown conversation
+
+
+async def test_another_user_replying_does_not_change_the_env(monkeypatch, clock, tmp_path):
+    bot, client, store, *_ = make_bot(monkeypatch, clock, tmp_path)
+    await bot.start(runtime=InMemoryRuntime())
+    await bot._handle(
+        UserMessage(KEY, "U1", "hi", team="T1", channel="C1", sender=sender("alice@example.com"))
+    )
+    await clock.advance(1)
+    await bot._handle(
+        UserMessage(KEY, "U2", "me too", team="T1", channel="C1", sender=sender("bob@example.com"))
+    )
+    await clock.advance(1)
+    assert await bot._env(KEY) == {"AGENT_USER_EMAIL": "alice@example.com"}
+
+
+async def test_env_survives_a_bot_restart_with_another_user_replying(monkeypatch, clock, tmp_path):
+    store = InMemoryStateStore()
+    bot, *_ = make_bot(monkeypatch, clock, tmp_path, store=store)
+    await bot.start(runtime=InMemoryRuntime())
+    await bot._handle(
+        UserMessage(KEY, "U1", "hi", team="T1", channel="C1", sender=sender("alice@example.com"))
+    )
+    await clock.advance(1)
+    # A new Bot process (the state store is the durable part) sees bob's reply first.
+    bot2, *_ = make_bot(monkeypatch, clock, tmp_path, store=store)
+    await bot2.start(runtime=InMemoryRuntime())
+    await bot2._handle(
+        UserMessage(KEY, "U2", "hello", team="T1", channel="C1", sender=sender("bob@example.com"))
+    )
+    assert await bot2._env(KEY) == {"AGENT_USER_EMAIL": "alice@example.com"}
+
+
+async def test_existing_conversation_without_an_owner_gets_no_env(monkeypatch, clock, tmp_path):
+    store = InMemoryStateStore()
+    await store.put(ConversationState(KEY, status="idle"))  # recorded before owners existed
+    bot, *_ = make_bot(monkeypatch, clock, tmp_path, store=store)
+    await bot.start(runtime=InMemoryRuntime())
+    await bot._handle(
+        UserMessage(KEY, "U2", "hi", team="T1", channel="C1", sender=sender("bob@example.com"))
+    )
+    assert await bot._env(KEY) == {}
+    assert (await store.get(KEY)).owner_email is None
+
+
+async def test_shutdown_delivers_the_interruption_to_hooks_before_closing_them(
+    monkeypatch, clock, tmp_path
+):
+    log = []
+
+    class Hooks:
+        async def on_event(self, event):
+            log.append(event.kind if event.kind != "turn_end" else (event.kind, event.reason))
+
+        async def aclose(self):
+            log.append("closed")
+
+    monkeypatch.setattr(app_module, "load_hooks", lambda config: [Hooks()])
+    bot, client, store, engines, order = make_bot(
+        monkeypatch, clock, tmp_path, scenario=[Tool("bash", "sleep", duration=600)]
+    )
+    await bot.start(runtime=InMemoryRuntime())
+    await bot._handle(UserMessage(KEY, "U1", "long job", team="T1", channel="C1"))
+    await clock.advance(1)
+    task = asyncio.create_task(bot.shutdown())
+    await clock.advance(30)
+    await asyncio.wait_for(task, 3)
+    assert log[0] == "user_input" and log[1] == "turn_start"
+    assert log[-2:] == [("turn_end", "shutdown"), "closed"]
+
+
+async def test_json_lines_hook_writes_events_to_stdout(monkeypatch, clock, tmp_path, capsys):
+    import json
+
+    bot, client, store, engines, order = make_bot(monkeypatch, clock, tmp_path)
+    bot._config.hooks = ["silk_agent.hooks:json_lines"]
     await bot.start(runtime=InMemoryRuntime())
     await bot._handle(UserMessage(KEY, "U1", "hi", team="T1", channel="C1"))
-    assert await bot._env(KEY) == {"USER_EMAIL": "u1@example.com"}
-    assert await bot._env("slack:T1:C9:1.0") == {}
+    await clock.advance(1)
+    await bot.shutdown()
+    events = [
+        json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")
+    ]
+    kinds = [e["kind"] for e in events]
+    assert kinds[:2] == ["user_input", "turn_start"] and "turn_end" in kinds
+    assert all(e["conversation_key"] == KEY and "at" in e for e in events)
+    assert "text" not in events[0]  # content is excluded by default
+
+
+async def test_a_hook_that_cannot_be_loaded_stops_the_start_up(monkeypatch, clock, tmp_path):
+    from silk_agent.hooks import HookLoadError
+
+    bot, *_ = make_bot(monkeypatch, clock, tmp_path)
+    bot._config.hooks = ["not_installed.hooks:create"]
+    with pytest.raises(HookLoadError, match="not_installed.hooks:create"):
+        await bot.start(runtime=InMemoryRuntime())

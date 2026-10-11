@@ -254,6 +254,7 @@ runtime:
   rest_port: 8080
   grpc_port: 9090
   tracker_port: 8081
+  ready_timeout_seconds: 180   # 作成・再開で準備完了（Ready）を待つ上限。起動スクリプトが長いなら増やす
 lifecycle:
   idle_timeout_seconds: 300
   suspended_ttl_seconds: 604800
@@ -296,7 +297,7 @@ spec:
 
 設定側の`runtime.image`を指定した場合は、このcontainerのimageを上書きする。未指定ならテンプレートのimageをそのまま使う。
 
-`ensure(key, env={"USER_EMAIL": "user@example.com"})`で文字列mapを渡せる。初回作成時にPod templateの対象containerの`env`配列へmergeし、その世代の再開でも同じ値を使う。Kubernetesのcontainer envとして渡すため、runtimeと実行commandから参照可能とする。[Container環境変数の設定](https://kubernetes.io/docs/tasks/inject-data-application/define-environment-variable-container/)
+`ensure(key, env={"AGENT_USER_EMAIL": "user@example.com"})`で文字列mapを渡せる。初回作成時にPod templateの対象containerの`env`配列へmergeし、その世代の再開でも同じ値を使う。Kubernetesのcontainer envとして渡すため、runtimeと実行commandから参照可能とする。[Container環境変数の設定](https://kubernetes.io/docs/tasks/inject-data-application/define-environment-variable-container/)
 
 - 優先順位はimageのENV < テンプレートのenv < 作成時env < commandごとのenv。作成時envは同名のtemplate env / valueFromを置換する。
 - `SESSION_SANDBOX_` prefix等の内部envはreservedとし、上書きは拒否する。env名と文字列型を検証し、暗黙の型変換はしない。
@@ -304,6 +305,19 @@ spec:
 - 終了後の新世代は、テンプレートとそのensureに渡されたenvから作成する。ユーザ固有envが必要なら新世代作成時にも呼び出し元が渡す。
 - ユーザメールはPod specへ保存される。debug出力・イベント・annotationsにはenv値を転載しない。Secretは`secretKeyRef`等の参照形式で別途渡す。
 - commandごとのenvはそのprocessだけに適用し、SandboxのPod templateを書き換えない。
+
+### 起動スクリプト（startup.sh）
+
+ユースケースは、imageに`/opt/session-runtime/startup.sh`を置くと、コンテナの起動のたび（Sandboxの作成時と、停止からの再開時）にsupervisorが**sandboxdを起動する前**に実行する。ファイルのダウンロード、初期設定、キャッシュの準備などを、エージェントの最初のコマンドより前に済ませるためのもの。ファイルがなければ何もしない。
+
+- 実行環境: コンテナと同じユーザ、作業ディレクトリ`/workspace`（`SANDBOXD_ROOT_DIR`）、コンテナの環境変数（作成時envの`AGENT_USER_EMAIL`を含む）。実行権限がなければ`/bin/sh`で実行する。標準出力・標準エラーはコンテナのログに出る。
+- `SANDBOX_STARTUP_FIRST_RUN`: Sandboxの最初の起動は`1`、停止からの再開以降は`0`。判定は`/workspace/.session-runtime/startup-done`の有無（スクリプトが成功したときだけ作る）。workspaceのPVCが作り直されると再び`1`になる。再開のたびに実行されるので、スクリプトは**冪等**に書き、初回だけの処理は`SANDBOX_STARTUP_FIRST_RUN`で分ける。
+- 上限時間: `SANDBOX_STARTUP_TIMEOUT_SECONDS`（既定300）。超えるとプロセスグループごと`SIGTERM`、5秒後に`SIGKILL`。
+- 失敗時: 0以外の終了、または上限時間超過では、既定（`SANDBOX_STARTUP_ON_ERROR=fail`）でsandboxdを起動せずコンテナを異常終了させる（Podは再起動を繰り返し、管理側は`ready_timeout_seconds`で打ち切ってエラーにする）。`SANDBOX_STARTUP_ON_ERROR=continue`なら失敗をログに出して起動を続ける。
+- 実行中に`SIGTERM`を受けるとスクリプトを止めて終了する。
+- 上の環境変数は、テンプレートの`env`またはimageの`ENV`で設定する（`SESSION_SANDBOX_`は予約済みなので使わない）。
+- 外部への通信は`network.allowed_fqdns`に許可した宛先だけなので、ダウンロード先を許可リストに加える。
+- 準備完了は起動スクリプトの終了後なので、スクリプトに数分かかる場合は`runtime.ready_timeout_seconds`（既定180）を増やす。
 
 ## 8. sandboxd操作と接続
 
@@ -377,7 +391,7 @@ from gke_session_sandbox import SandboxManager, SessionKey
 async with SandboxManager.from_config("sandbox-config.yaml") as manager:
     session = await manager.ensure(
         SessionKey(tenant_id="slack-workspace-id", session_id="channel/thread"),
-        env={"USER_EMAIL": "user@example.com"},
+        env={"AGENT_USER_EMAIL": "user@example.com"},
     )
 
     # pending通知はBot側の永続コンテキストへ反映してからackする。
@@ -473,7 +487,7 @@ Kubernetes APIを実際に呼ぶテストは**integration / E2Eテスト**とし
 8. allow対象のHTTPS、deny対象のHTTPS、DNS、client→sandboxd、他session→sandboxdの通信を実測する。denyは制御用endpointへの到達性を別に確認し、DNS失敗や相手障害をpolicy成功と誤認しない。
 9. workerを作成 / 停止 / 削除の途中で落とし、再起動後に同じoperationが収束する。期限直前のresumeと削除競合、API一時障害、watch切断でも二重作成・早期削除がない。
 10. 管理者によるSandbox / PVC削除、finalizerによる削除遅延、command送信後の接続断を試し、消失通知・CleanupIncompleteError・ExecutionOutcomeUnknownを正しく返す。
-11. テンプレートで指定した自作imageが使われ、作成時USER_EMAILがcommandから取得できる。template envとの衝突、同一世代のenv変更拒否、再開後のenv保持を確認する。
+11. テンプレートで指定した自作imageが使われ、作成時AGENT_USER_EMAILがcommandから取得できる。template envとの衝突、同一世代のenv変更拒否、再開後のenv保持を確認する。
 12. session ID・0件確認時刻・最終終了時刻がSandboxのannotationsへ反映され、Pod削除後も残る。tracker再起動・状態照会失敗・command受付と停止の競合で、実行中commandを誤停止しない。
 13. 呼出元だけの切断ではtrackerがcommandを継続する。tracker停止でsandboxd streamが切れた場合はprocess groupが終了し、再起動後に不在を確認したcommandを結果不明 / 出力不完全として記録する。生死を確定できない場合はunknownとして停止を保留する。
 14. clientがstreamを読まない・切断する・遅く読む場合でも出力を消費できる。大量stdout / stderr、保存上限超過、PVC書込み失敗でもメモリが増え続けず、停止理由と出力欠落を報告する。出力の保持期限・cursorによる再取得も確認する。

@@ -13,6 +13,7 @@ from pydantic import (
     Field,
     SecretStr,
     StrictBool,
+    StrictFloat,
     StrictInt,
     StrictStr,
     field_validator,
@@ -107,6 +108,9 @@ class RuntimeSettings(StrictSettings):
     cpu_limit: StrictStr = "1"
     memory_request: StrictStr = "128Mi"
     memory_limit: StrictStr = "1Gi"
+    # How long creating / resuming a Sandbox waits for it to become Ready (the image's startup
+    # script runs before that).
+    ready_timeout_seconds: StrictInt | StrictFloat = Field(default=180, gt=0)
 
     @field_validator("cpu_request", "cpu_limit", "memory_request", "memory_limit")
     @classmethod

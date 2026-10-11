@@ -10,6 +10,16 @@ from typing import Literal
 
 
 @dataclass(frozen=True)
+class SenderInfo:
+    """Who sent a message, as far as the channel could find out. `None` = could not tell."""
+
+    email: str = ""
+    is_guest: bool | None = None
+    is_external: bool | None = None
+    team: str = ""
+
+
+@dataclass(frozen=True)
 class UserMessage:
     conversation_key: str
     user: str
@@ -21,6 +31,9 @@ class UserMessage:
     team: str = ""
     channel: str = ""
     sender_is_bot: bool = False
+    # A direct message to the Bot (as opposed to a channel / group conversation).
+    is_direct: bool = False
+    sender: SenderInfo | None = None
     # "message" for a normal user post; anything else (edit, join, ...) is a system event.
     kind: str = "message"
 

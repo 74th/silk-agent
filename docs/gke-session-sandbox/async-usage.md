@@ -25,7 +25,7 @@ async def run_agent_turn() -> None:
     async with SandboxManager.from_config("examples/sandbox-config.yaml") as manager:
         session = await manager.ensure(
             SessionKey(tenant_id="workspace-id", session_id="channel/thread"),
-            env={"USER_EMAIL": "user@example.com"},
+            env={"AGENT_USER_EMAIL": "user@example.com"},
         )
         async with session.commands as commands:
             result = await commands.run(

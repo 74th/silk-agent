@@ -70,6 +70,9 @@ class SlackOutput:
         self._interval = update_interval
         self._convs: dict[str, _Conv] = {}
 
+    def attach_state_store(self, store: SessionStateStore) -> None:
+        self._state_store = store
+
     # ------------------------------------------------------------ dispatch
 
     async def send(self, event: OutboundEvent) -> None:

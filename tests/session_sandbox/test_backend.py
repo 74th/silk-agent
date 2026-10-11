@@ -238,3 +238,10 @@ async def test_annotation_patch_preserves_other_owners_and_checks_sandbox_uid() 
         "session-sandbox.example.com/state": "ready",
     }
     assert custom.last_patch[0] == {"op": "test", "path": "/metadata/uid", "value": ref.uid}
+
+
+def test_wait_ready_defaults_to_180_seconds_and_takes_a_timeout() -> None:
+    import inspect
+
+    params = inspect.signature(CoreSandboxBackend.wait_ready).parameters
+    assert params["timeout_seconds"].default == 180

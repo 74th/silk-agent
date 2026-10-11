@@ -7,6 +7,7 @@ Slackから指示を受けて作業するエージェントのBot。Claude Agent
 - 会話の保存: Agent Platform Sessions
 - 入出力の検査: Gemini 3.8 Flash（入力）、Model Armor（出力）
 - 動作環境: GKE上の1 Pod（Slack Socket Mode）。開発用にStreamlitのチャット画面もある
+- ユースケースごとのプロンプト・Skills・フック・Sandboxイメージ・設定は、本体を変更せずに別パッケージとして用意できる（[docs/usecase-guide.md](docs/usecase-guide.md)、テンプレートは`usecases/template/`）
 
 ## 1. Slackでの使い方
 
@@ -84,10 +85,12 @@ flowchart LR
   R --> EM[外部MCPサーバ]
   R --> SK[Skills]
   O --> OG[出力の検査 / Model Armor]
+  O -.-> HK[フック / 監査・イベントログ]
+  R -.-> HK
 ```
 
 1. チャネル（Slack / Streamlit）が受け取ったメッセージを、チャネルに依存しないイベントに変換する。
-2. ルールのフィルタで対象外を除き（Bot自身やほかのBotの投稿、許可外のワークスペース・チャンネル・ユーザ、長すぎるメッセージ、送信頻度）、停止語ならここで止める。
+2. ルールのフィルタで対象外を除き（Bot自身やほかのBotの投稿、許可外のワークスペース・チャンネル・ユーザ、DM・ゲスト・外部ユーザ（設定したとき）、長すぎるメッセージ、送信頻度）、停止語ならここで止める。
 3. Gemini 3.8 Flashで、指示違反（システム指示の上書き要求、認証情報の取得要求など）がないか判定する。
 4. 会話ごとの`AgentSession`へ渡す。実行中ならその処理に追加し、そうでなければ新しいturnを始める。
 5. エージェントの返答とツールの実行状況を、Model Armorで検査してからチャネルへ送る。
@@ -103,9 +106,12 @@ flowchart LR
 | `src/silk_agent/stores/` | Agent Platform SessionsへのSessionStoreと管理情報の保存 |
 | `src/silk_agent/sandbox/` | `gke_session_sandbox`を使うruntimeと、開発用のローカルruntime |
 | `src/silk_agent/skills/` | Skillsの読み込み（GCS / ローカル） |
+| `src/silk_agent/hooks.py` | フック（会話の出来事を観測して監査ログなどへ送る）のイベント、基底クラス、配信、標準のJSON Linesフック |
+| `src/silk_agent/resources/` | 汎用のシステムプロンプトと入力ガードの基準（設定がないときの既定） |
+| `src/silk_agent/cli.py` | `silk-agent`コマンド（`silk-agent slack`） |
 | `src/gke_session_sandbox/` | GKE Agent Sandboxのセッション管理ライブラリ（作成・停止・再開・削除、コマンド・ファイル操作、idle停止） |
-| `apps/` | Slack Bot（`slack_bot.py`）とStreamlit（`streamlit_app.py`）の起動スクリプト |
-| `policies/` | エージェントのシステムプロンプトと、入力ガードの判定基準 |
+| `apps/` | Slack Bot（`slack_bot.py`、`silk-agent slack`と同じ）とStreamlit（`streamlit_app.py`）の起動スクリプト |
+| `usecases/template/` | ユースケースのテンプレート（プロンプト、Skills、フック、Sandboxイメージと`startup.sh`、設定、k8s） |
 
 外部につながる部分（チャネル、エージェント、Sandbox、保存先、ガード、Skills、時計）はportにしてあり、テストでは偽物に差し替えて外部に接続せずに動かす。
 
@@ -123,7 +129,7 @@ flowchart LR
 | `command_status` / `command_output` | コマンドの状態と出力（結果が不明なコマンドの確認にも使う） |
 | `cancel_command` | バックグラウンドのコマンドを止める |
 
-- MCPサーバは`config/mcp.json`に書いたもの（HTTP / SSEのみ、`${ENV}`を展開）だけを読む。
+- システムプロンプトは、設定の`agent.system_prompt_file`のファイル（なければ本体の汎用のプロンプト）。MCPサーバは設定の`mcp.config_file`に書いたもの（HTTP / SSEのみ、`${ENV}`を展開）だけを読む。
 - Skillsは設定した場所（GCS、またはローカルのディレクトリ）から定期的に同期し、turnの途中では切り替えない。付属のファイルはSandboxの`/workspace/.skills/`にもコピーする。
 - 実行中に送ったメッセージは、CLIが処理したことを`--replay-user-messages`の応答で数え、turnの終わり際に送ったものも取りこぼさないようにしている。
 
@@ -131,9 +137,9 @@ flowchart LR
 
 - 会話（Slackのスレッド）ごとに1つのSandboxを作る。Pod上のgVisorで動き、作業ファイルは専用のPVC（`/workspace`）に置く。
 - 最後のコマンドから5分たつと自動で停止し、次に使うときに同じファイルのまま再開する。停止から7日で削除し、その後に話しかけると新しい作業環境を作って、そのことをエージェントに伝える。
-- Sandboxからの外部への通信は、DNS以外すべて止めている（`k8s/config/sandbox-config.yaml`の`network.allowed_fqdns`で許可先を追加できる）。
-- Sandboxの作成時に、Slackユーザのメールアドレスを環境変数`USER_EMAIL`として渡す。
-- Sandbox Podのイメージ（sandboxd + CommandTracker）は`runtime/session-runtime.Dockerfile`。sandboxdはkubernetes-sigs/agent-sandbox v1.0.6のソースをビルド時に取得する（`scripts/build-session-runtime-image.sh`）。
+- Sandboxからの外部への通信は、DNS以外すべて止めている（`k8s/overlays/dev/config/sandbox-config.yaml`の`network.allowed_fqdns`で許可先を追加できる）。
+- Sandboxの作成時に、**その会話を始めたSlackユーザ**のメールアドレスを環境変数`AGENT_USER_EMAIL`として渡す（スレッドに別のユーザが書き込んでも変わらない）。コンテナの環境変数なので、起動スクリプトとエージェントのコマンド（フォアグラウンド・バックグラウンド・再開後）から参照できる。
+- Sandbox Podのイメージ（sandboxd + CommandTracker）は`runtime/session-runtime.Dockerfile`。sandboxdはkubernetes-sigs/agent-sandbox v1.0.6のソースをビルド時に取得する（`scripts/build-session-runtime-image.sh`。タグは`<agent-sandboxの版>-session-runtime-<silk-agentの版>`）。ユースケースはこれを`FROM`でベースにして、ツールと**`/opt/session-runtime/startup.sh`**（Sandboxの起動のたび、sandboxdより前に実行する初期化スクリプト）を足せる。準備完了を待つ上限は`runtime.ready_timeout_seconds`（既定180秒）。
 
 ## 3. 安全対策
 
@@ -141,9 +147,20 @@ flowchart LR
 
 ルールのフィルタは、Bot自身やほかのBotの投稿、編集・参加通知などのイベント、許可リストにないワークスペース・チャンネル・ユーザ、空・長すぎる（既定8,000文字）メッセージ、ユーザごとの送信頻度（既定1分20件）を除外する。停止語はこの後に判定し、Geminiの判定は通さない。
 
+応答範囲は`filter`の設定で絞れる（詳細は[docs/usecase-guide.md](docs/usecase-guide.md)の「Slackの応答範囲」）。
+
+| 設定 | 内容 |
+| --- | --- |
+| `allowed_teams` / `allowed_channels` / `allowed_users` | 許可するworkspace・チャンネル・ユーザ（空なら制限なし）。ユーザの許可リストは返信・DM・停止語にも効く。チャンネルの許可リストはDMには効かない |
+| `allow_direct_messages`（既定`true`） | `false`でDMを受け付けない |
+| `deny_guests`（既定`false`） | `true`でゲストを除外する |
+| `deny_external_users`（既定`false`） | `true`でSlackコネクトなどの別workspaceのユーザを除外する |
+
+ゲスト・外部ユーザの判定には`users.info`を使い（10分キャッシュ）、判定できなければ除外する。除外したメッセージには返信しない。
+
 ### 3.2 入力ガード（Gemini 3.8 Flash）
 
-- Agent Platform上の`gemini-3.8-flash`（リージョン`global`）が、`policies/input-guard.md`の基準と直前5件のメッセージをもとに「許可」「ブロック」「要確認」を返す。
+- Agent Platform上の`gemini-3.8-flash`（リージョン`global`）が、入力ガードの基準（設定の`input_guard.policy_file`。なければ本体の汎用の基準）と直前5件のメッセージをもとに「許可」「ブロック」「要確認」を返す。
 - 「ブロック」「要確認」のメッセージはエージェントに渡さず、理由を返信する。
 - Geminiの呼び出しに失敗したときは、既定では処理しない。
 
@@ -167,6 +184,18 @@ flowchart LR
 - 全行に一致する再帰検索（`grep -r '' .`、`rg '.*'`）
 
 `cat a.txt`、`grep -rn 'def main' .`、`tar xzf` などは通常どおり実行できる。多くのファイルを読む方法をすべて防ぐものではない。
+
+### 3.5 フック（監査とイベントログ）
+
+ユーザの入力（本文、送信者、フィルタとガードの判定。ブロック・除外された入力も）、turnの開始・終了、ツールの入力と結果、エージェントの返答（出力の検査の前の本文と検査の結果）、システムの通知を、設定した**フック**に非同期で渡す。フックは観測専用で、遅くても例外を出しても会話に影響しない（配信待ちが上限を超えると古いものを捨ててログに出す）。
+
+```yaml
+hooks:
+  - my_usecase.hooks:create            # ユースケースのフック（BaseHooksを継承）
+  - silk_agent.hooks:json_lines        # 標準: 1イベント1行のJSONを標準出力へ（Cloud Loggingが集める）
+```
+
+フックには**生の内容**（認証情報や個人情報を含みうる）が渡る。ログ基盤へ出す前のマスクはフックで行う（`json_lines`は本文を`options.include_content`（既定`false`）で出すか選ぶ）。読み込めないフックがあるとBotは起動しない。書き方は[docs/usecase-guide.md](docs/usecase-guide.md)。
 
 ## 4. 保存するものと再起動
 
@@ -205,32 +234,34 @@ SLACK_APP_TOKEN=xapp-...
 
 ### 5.3 GKEへのデプロイ
 
-BotはGKEクラスタ`research-gke-agent-sandbox-with-sandboxd`（us-central1）の`session-sandbox-system` namespaceで1 Podだけ動かす。クラスタ、Agent Sandbox controller、namespace、Sandbox操作用のRoleなどは、ライブラリの移管元（`test-google-cloud-agent-platform/20261010-gke-agent-sandbox-with-sandboxd`）のterraformとmanifestで用意してある。
+Botはこのリポジトリの`terraform/gke/`で管理する単一ゾーンGKEの`session-sandbox-system` namespaceで1 Podだけ動かす。初期値は`silk-agent-gke` / `us-central1-a`。構築、controller / platform適用、イメージpush、preflight、Sandbox受け入れ、破棄手順は[ゾーンクラスタrunbook](docs/gke-session-sandbox/zonal-cluster-runbook.md)を参照する。
 
 ```bash
-gcloud container clusters get-credentials research-gke-agent-sandbox-with-sandboxd --region us-central1 --project nnyn-dev
+terraform -chdir=terraform/gke output  # 表示された get_credentials_command を確認して実行
+kubectl kustomize k8s/platform | kubectl apply -f -
 ./k8s/grant-iam.sh   # Workload Identityで aiplatform.user / modelarmor.user を付与（初回のみ）
-./k8s/deploy.sh      # イメージのビルド・push、Secretの作成、apply、rollout待ち
+export SANDBOX_RUNTIME_IMAGE="$(scripts/build-session-runtime-image.sh | sed -n 's/^SESSION_RUNTIME_IMAGE=//p')"
+./k8s/deploy.sh      # Botイメージのビルド・push、Secret作成、apply、rollout待ち
+#   ユースケースをデプロイするには: KUSTOMIZE_DIR=usecases/<名前>/k8s ./k8s/deploy.sh
 kubectl -n session-sandbox-system logs deploy/silk-agent -f
 ```
 
 | ファイル | 内容 |
 | --- | --- |
-| `k8s/config/silk-agent.yaml` | Botの設定（モデル、ガード、Sessions、Sandbox、停止語など）。ConfigMapになる |
-| `k8s/config/sandbox-config.yaml` | `gke_session_sandbox`の設定（runtimeイメージ、idle停止・保持期限、外部通信の許可先） |
-| `k8s/config/mcp.json` | 使うMCPサーバ |
-| `k8s/deployment.yaml` | replicas 1、`Recreate`、`terminationGracePeriodSeconds: 45` |
-| `k8s/pvc.yaml`, `k8s/storageclass.yaml` | Sandbox管理情報（SQLite）のPVC（Retain） |
-| `k8s/serviceaccount.yaml`, `k8s/rbac.yaml` | KSA `silk-agent`と、Sandbox namespaceのRoleへの紐付け |
+| `k8s/base/` | ユースケースに依存しない部分。`deployment.yaml`（replicas 1、`Recreate`、`terminationGracePeriodSeconds: 45`）、`pvc.yaml`・`storageclass.yaml`（Sandbox管理情報（SQLite）のPVC、Retain）、`serviceaccount.yaml`・`rbac.yaml`（KSA `silk-agent`と、Sandbox namespaceのRoleへの紐付け） |
+| `k8s/overlays/dev/` | このリポジトリの検証用デプロイ。`kustomization.yaml`（ConfigMapとイメージ名）と`config/` |
+| `k8s/overlays/dev/config/silk-agent.yaml` | Botの設定（モデル、ガード、Sessions、Sandbox、停止語など）。ConfigMapになる |
+| `k8s/overlays/dev/config/sandbox-config.yaml` | `gke_session_sandbox`の設定（runtimeイメージ、idle停止・保持期限、外部通信の許可先） |
+| `k8s/overlays/dev/config/mcp.json` | 使うMCPサーバ |
 
 - Secret `silk-agent-slack`: `.env`の`SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN`だけが入る。トークンを変えたら`./k8s/deploy.sh`を再実行する。
-- Secret `silk-agent-sandbox`: Sandbox作成時の環境変数（`USER_EMAIL`）の同一性を判定するHMAC鍵。`deploy.sh`が初回だけ作る。変えると既存のSandboxと矛盾するので作り直さない。
-- Sandbox Podのイメージを変えるときは`scripts/build-session-runtime-image.sh`でビルドし、`k8s/config/sandbox-config.yaml`の`runtime.image`にdigestを書く。
+- Secret `silk-agent-sandbox`: Sandbox作成時の環境変数（`AGENT_USER_EMAIL`）の同一性を判定するHMAC鍵。`deploy.sh`が初回だけ作る。変えると既存のSandboxと矛盾するので作り直さない。
+- Sandbox Podのイメージを変えるときは`scripts/build-session-runtime-image.sh`でビルドし、そのdigestを`SANDBOX_RUNTIME_IMAGE`に渡す。
 - 会話の保存には既存のAgent Runtimeインスタンス（`claude-session-store-verification`）を使っている。
 
 ### 5.4 GCPリソース（terraform）
 
-`terraform/`に、このBot用のリソース（API、Agent Runtimeインスタンス、Model Armorテンプレートと個人情報マスク用のDLPテンプレート、Skills用のGCSバケット、Secret Manager、Google サービスアカウント）を定義している。適用済みなのはAPI、DLPテンプレート、Model Armorテンプレートで、それ以外は現在のデプロイでは使っていない（既存のAgent Runtimeと、KSAへの直接のIAM付与を使っている）。`terraform plan`で内容を確認してから適用する。
+`terraform/`はBot用のAgent Runtime、Model Armor、DLP、GCS、Secret Managerなどを管理する。GKEとArtifact Registryは独立stateの`terraform/gke/`で管理する。GKEだけを確認・破棄する場合は必ず`terraform -chdir=terraform/gke`を使い、[runbook](docs/gke-session-sandbox/zonal-cluster-runbook.md)のplan手順を確認する。
 
 ### 5.5 ローカルで動かす
 
@@ -242,7 +273,8 @@ uv run streamlit run apps/streamlit_app.py
 #   SILK_AGENT_SKILLS=/path/to/skills   ローカルのSkillsを読む
 
 # Slack Bot（設定は config/silk-agent.example.yaml を config/silk-agent.yaml にコピーして編集）
-uv run --env-file .env python apps/slack_bot.py
+uv run --env-file .env silk-agent slack --config config/silk-agent.yaml
+#   --config の代わりに環境変数 SILK_AGENT_CONFIG でも指定できる。設定内の相対パスは設定ファイルの場所が基準
 ```
 
 Slack BotはローカルのSandbox（`local_process`）では起動しない。GKE上のSandboxを使うには、Bot自体をクラスタ内で動かす（§5.3）。
@@ -263,8 +295,10 @@ SILK_AGENT_TEST_RUNTIME=projects/<project>/locations/us-central1/reasoningEngine
 | --- | --- |
 | `tests/` | silk-agentのユニットテスト（`tests/integration/`は実サービスに接続するテスト） |
 | `tests/session_sandbox/` | `gke_session_sandbox`のユニットテスト |
+| `usecases/template/` | ユースケースのテンプレート（[docs/usecase-guide.md](docs/usecase-guide.md)） |
 | `templates/`, `examples/` | Sandboxのテンプレートと、ライブラリの使用例 |
 | `runtime/`, `scripts/` | Sandbox Podのイメージ定義、そのビルドとprotobufコードの生成 |
+| `docs/usecase-guide.md` | ユースケースへの適用手順（Sandboxイメージと`startup.sh`、Skillsとプロンプト、フック、Slackの応答範囲、ビルドとデプロイ、設定の移行） |
 | `docs/gke-session-sandbox/` | `gke_session_sandbox`の仕様と検証記録 |
 | `openspec/` | 変更の提案・仕様・設計・タスク（OpenSpec） |
 
@@ -284,5 +318,5 @@ SILK_AGENT_TEST_RUNTIME=projects/<project>/locations/us-central1/reasoningEngine
   - 予算や同時実行数の上限
   - `!reset` / `!status`などの会話コマンド
   - Slackの添付ファイルとSandboxの間のファイルの受け渡し
-  - 監査ログとトレース
+  - トレース（監査用のフックは実装済み。§3.5）
   - Botの死活監視

@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from silk_agent.channels.slack_events import SlackEventRouter
+from silk_agent.channels.slack_users import UserDirectory
 from silk_agent.config import ProgressConfig
 from silk_agent.core.events import InboundEvent, OutboundEvent
 from silk_agent.core.ports import Clock, SessionStateStore
@@ -29,6 +30,9 @@ class SlackChannel:
         *,
         state_store: SessionStateStore | None = None,
         bot_user_id: str = "",
+        users: UserDirectory | None = None,
+        workspace_team: str = "",
+        workspace_enterprise: str = "",
     ) -> None:
         from silk_agent.channels.slack_output import SlackOutput
 
@@ -41,8 +45,16 @@ class SlackChannel:
             bot_user_id=bot_user_id,
             is_participating=self._is_participating,
             mark_participating=self._participating.add,
+            users=users,
+            workspace_team=workspace_team,
+            workspace_enterprise=workspace_enterprise,
         )
         self.output = SlackOutput(app.client, clock, progress, state_store=state_store)
+
+    def attach_state_store(self, store: SessionStateStore) -> None:
+        """Late-bind the state store (it is built after the channel, which the services need)."""
+        self._state_store = store
+        self.output.attach_state_store(store)
 
     # ------------------------------------------------------------ inbound
 

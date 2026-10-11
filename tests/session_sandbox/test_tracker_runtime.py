@@ -354,6 +354,43 @@ async def test_tracker_resolves_virtual_process_id_to_os_pid(tmp_path):
     }
 
 
+@pytest.mark.asyncio
+async def test_tracker_passes_only_the_marker_and_the_callers_env_to_the_process(
+    monkeypatch, tmp_path
+):
+    """The container's own environment (AGENT_USER_EMAIL, set when the Sandbox is created) is
+    inherited by sandboxd's child process; the tracker must not override it."""
+    monkeypatch.setenv("AGENT_USER_EMAIL", "alice@example.com")
+    journal = CommandJournal(tmp_path / "commands.json")
+    record, _ = await journal.reserve(
+        {"command_id": "c1", "command": ["true"], "env": {"CALLER_VAR": "x"}}
+    )
+    started = []
+
+    class Stream:
+        async def __aiter__(self):
+            return
+            yield  # pragma: no cover - an empty stream
+
+    class Stub:
+        def Start(self, request):
+            started.append(request)
+            return Stream()
+
+    tracker = Tracker(journal, Stub(), generation=1)
+
+    async def consume(command_id, call, marker):
+        return None
+
+    monkeypatch.setattr(tracker, "_consume", consume)
+    await tracker.execute(record["command_id"])
+    (request,) = started
+    env = dict(request.config.env_vars)
+    assert set(env) == {"CALLER_VAR", tracker_module._TRACKER_MARKER_ENV}
+    assert env["CALLER_VAR"] == "x"
+    assert "AGENT_USER_EMAIL" not in env
+
+
 async def _identity_missing(_pid, _marker):
     return None
 

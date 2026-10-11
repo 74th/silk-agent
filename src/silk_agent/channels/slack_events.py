@@ -8,7 +8,8 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from silk_agent.core.events import InboundEvent, UserMessage
+from silk_agent.channels.slack_users import UserDirectory
+from silk_agent.core.events import InboundEvent, SenderInfo, UserMessage
 
 log = logging.getLogger(__name__)
 
@@ -59,11 +60,19 @@ class SlackEventRouter:
         bot_user_id: str,
         is_participating: Callable[[str], Awaitable[bool]],
         mark_participating: Callable[[str], None] | None = None,
+        users: UserDirectory | None = None,
+        workspace_team: str = "",
+        workspace_enterprise: str = "",
     ) -> None:
+        # `workspace_*`: the workspace (and Enterprise Grid org) the Bot is installed in
+        # (`auth.test`); used to tell external users apart.
         self._handle = handle
         self._bot_user_id = bot_user_id
         self._is_participating = is_participating
         self._mark = mark_participating
+        self._users = users
+        self._team = workspace_team
+        self._enterprise = workspace_enterprise
         self._event_ids = RecentIds()
         self._messages = RecentIds()
 
@@ -115,6 +124,32 @@ class SlackEventRouter:
         message_id = f"{event.get('channel', '')}:{event.get('ts', '')}"
         return not self._messages.seen(message_id)
 
+    async def _sender(self, event: dict[str, Any]) -> SenderInfo | None:
+        user = event.get("user", "")
+        if self._users is None or not user:
+            return None
+        info = await self._users.lookup(user)
+        user_team = event.get("user_team") or (info.team_id if info else "")
+        return SenderInfo(
+            email=info.email if info else "",
+            is_guest=info.is_guest if info else None,
+            is_external=self._is_external(user_team, info.enterprise_id if info else None),
+            team=user_team,
+        )
+
+    def _is_external(self, user_team: str, user_enterprise: str | None) -> bool | None:
+        """True for a user of another workspace (e.g. Slack Connect). Users of the same
+        Enterprise Grid organization are not external. `None` = could not tell."""
+        if not self._team or not user_team:
+            return None
+        if user_team == self._team:
+            return False
+        if not self._enterprise:
+            return True
+        if user_enterprise is None:  # the lookup failed
+            return None
+        return user_enterprise != self._enterprise
+
     async def _emit(self, key: str, team: str, event: dict[str, Any]) -> None:
         text = slack_unescape(_MENTION.sub("", event.get("text", ""))).strip()
         message = UserMessage(
@@ -126,6 +161,8 @@ class SlackEventRouter:
             team=team,
             channel=event.get("channel", ""),
             sender_is_bot=bool(event.get("bot_id")),
+            is_direct=event.get("channel_type") == "im",
+            sender=await self._sender(event),
             kind=event.get("subtype") or "message",
         )
         await self._handle(message)

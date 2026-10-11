@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from silk_agent.core.events import UserMessage
@@ -16,6 +16,8 @@ class FilterDecision:
     allowed: bool
     # Shown to the user when set; None means "ignore silently".
     reply: str | None = None
+    # Name of the filter that excluded the message (set by FilterChain).
+    reason: str = ""
 
 
 ALLOW = FilterDecision(True)
@@ -33,7 +35,7 @@ class FilterChain:
         for f in self._filters:
             decision = f.check(message)
             if not decision.allowed:
-                return decision
+                return replace(decision, reason=type(f).__name__)
         return ALLOW
 
 
@@ -47,7 +49,8 @@ class SenderFilter:
 
 
 class AllowListFilter:
-    """Empty list = allow all."""
+    """Empty list = allow all. The channel list does not apply to direct messages (see
+    DirectMessageFilter)."""
 
     def __init__(
         self,
@@ -60,9 +63,38 @@ class AllowListFilter:
     def check(self, message: UserMessage) -> FilterDecision:
         if self._teams and message.team not in self._teams:
             return FilterDecision(False)
-        if self._channels and message.channel not in self._channels:
+        if self._channels and not message.is_direct and message.channel not in self._channels:
             return FilterDecision(False)
         if self._users and message.user not in self._users:
+            return FilterDecision(False)
+        return ALLOW
+
+
+class DirectMessageFilter:
+    """Drops direct messages when they are not accepted."""
+
+    def __init__(self, allow: bool = True) -> None:
+        self._allow = allow
+
+    def check(self, message: UserMessage) -> FilterDecision:
+        if message.is_direct and not self._allow:
+            return FilterDecision(False)
+        return ALLOW
+
+
+class SenderKindFilter:
+    """Drops guests / external users. A sender that could not be classified is dropped too
+    (only for the kinds that are denied)."""
+
+    def __init__(self, deny_guests: bool = False, deny_external_users: bool = False) -> None:
+        self._deny_guests = deny_guests
+        self._deny_external = deny_external_users
+
+    def check(self, message: UserMessage) -> FilterDecision:
+        sender = message.sender
+        if self._deny_guests and (sender is None or sender.is_guest is not False):
+            return FilterDecision(False)
+        if self._deny_external and (sender is None or sender.is_external is not False):
             return FilterDecision(False)
         return ALLOW
 
@@ -109,6 +141,9 @@ def default_chain(
     teams: Sequence[str] = (),
     channels: Sequence[str] = (),
     users: Sequence[str] = (),
+    allow_direct_messages: bool = True,
+    deny_guests: bool = False,
+    deny_external_users: bool = False,
     max_chars: int = 8000,
     per_minute: int = 20,
 ) -> FilterChain:
@@ -116,6 +151,8 @@ def default_chain(
         [
             SenderFilter(),
             AllowListFilter(teams, channels, users),
+            DirectMessageFilter(allow_direct_messages),
+            SenderKindFilter(deny_guests, deny_external_users),
             LengthFilter(max_chars),
             RateLimitFilter(clock, per_minute),
         ]

@@ -124,7 +124,7 @@ class FileClient:
                     raise FileTransferLimitExceeded(
                         f"streamed read exceeds {self._transfer_limit} bytes"
                     )
-                writer = sink if callable(sink) else sink.write
+                writer = sink if callable(sink) else sink.write  # type: ignore[missing-attribute]
                 result = writer(chunk)
                 if inspect.isawaitable(result):
                     await result

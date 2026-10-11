@@ -3,7 +3,6 @@ and Claude (claude-haiku-5-5). Run with `-m integration`."""
 
 import asyncio
 import uuid
-from pathlib import Path
 
 import pytest
 
@@ -14,10 +13,15 @@ from silk_agent.sandbox.local import LocalProcessRuntime
 from silk_agent.stores.agent_platform import AgentPlatformSessions, AgentPlatformSessionStore
 from silk_agent.testing.fakes import SystemClock
 from silk_agent.wiring import build_engine_factory
+from tests.integration.conftest import PROJECT
 
 pytestmark = pytest.mark.integration
 
-ROOT = Path(__file__).resolve().parents[2]
+
+def _config() -> Config:
+    config = Config()
+    config.agent.project = PROJECT
+    return config
 
 
 def engine_for(tmp_path, sessions_api, key, process: str):
@@ -25,10 +29,9 @@ def engine_for(tmp_path, sessions_api, key, process: str):
     config_dir = tmp_path / f"claude-config-{process}"
     config_dir.mkdir(exist_ok=True)
     factory = build_engine_factory(
-        Config(),
+        _config(),
         LocalProcessRuntime(tmp_path / "sandbox"),
         SystemClock(),
-        root=ROOT,
         work_root=tmp_path / "work",  # same work_root -> same cwd -> same SessionStore key
         session_store=AgentPlatformSessionStore(sessions_api),
         model="claude-haiku-5-5",
@@ -132,10 +135,9 @@ class AlwaysFailingStore:
 
 async def test_failing_store_adds_warning_to_turn(tmp_path):
     factory = build_engine_factory(
-        Config(),
+        _config(),
         LocalProcessRuntime(tmp_path / "sandbox"),
         SystemClock(),
-        root=ROOT,
         work_root=tmp_path / "work",
         session_store=AlwaysFailingStore(),
         model="claude-haiku-5-5",

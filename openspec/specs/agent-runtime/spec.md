@@ -2,12 +2,12 @@
 
 ## Purpose
 
-エージェント（Claude Agent SDK）を、Agent Platform上のClaudeで動かし、ツールを会話専用のSandboxで実行する。MCPサーバとGCS上のSkillsを読み込み、ツールの実行を出力イベントとして通知する。
+エージェント（Claude Agent SDK）を、Agent Platform上のClaudeで動かし、ツールを会話専用のSandboxで実行する。MCPサーバと設定した場所のSkillsを読み込み、ツールの実行を出力イベントとして通知する。
 
 ## Requirements
 
 ### Requirement: Agent Platform上のClaudeを使う
-システムは、エージェントのモデル呼出しを、Agent Platform（プロジェクト`nnyn-dev`）上のClaudeで行わなければならない (SHALL)。モデルは設定で指定できなければならない (SHALL)。Anthropic APIキーを必要としてはならない (SHALL NOT)。
+システムは、エージェントのモデル呼出しを、設定したプロジェクトのAgent Platform上のClaudeで行わなければならない (SHALL)。プロジェクトとモデルは設定で指定できなければならない (SHALL)。Anthropic APIキーを必要としてはならない (SHALL NOT)。
 
 #### Scenario: 設定したモデルで実行
 - **WHEN** 設定のモデルが`claude-haiku-5-5`でturnを実行する
@@ -64,8 +64,8 @@
 - **WHEN** 作業ディレクトリに`.mcp.json`があり、そこにMCPサーバ`other`が書かれている
 - **THEN** エージェントは`other`のツールを使えない
 
-### Requirement: GCS上のSkillsの読み込み
-システムは、設定したGCSの場所にあるSkillsをエージェントに読み込ませなければならない (SHALL)。GCS上のSkillsが更新された場合、同期間隔（既定5分）以内に、以後に始まるturnへ反映しなければならない (SHALL)。実行中のturnが参照するSkillsを、turnの途中で入れ替えてはならない (SHALL NOT)。Skillに付属するファイルは、エージェントのSandboxからも参照できなければならない (SHALL)。
+### Requirement: Skillsの読み込み
+システムは、設定した場所（GCS、またはBotのイメージに含めたローカルのディレクトリ）にあるSkillsをエージェントに読み込ませなければならない (SHALL)。読み込み元のSkillsが更新された場合、同期間隔（既定5分）以内に、以後に始まるturnへ反映しなければならない (SHALL)。実行中のturnが参照するSkillsを、turnの途中で入れ替えてはならない (SHALL NOT)。Skillに付属するファイルは、エージェントのSandboxからも参照できなければならない (SHALL)。
 
 #### Scenario: Skillの利用
 - **WHEN** GCSに`report`というSkillがある状態でturnを実行する
@@ -74,6 +74,21 @@
 #### Scenario: Skillの更新
 - **WHEN** GCS上の`report`を更新し、同期間隔が経過した後に新しいturnを始める
 - **THEN** 新しいturnでは更新後の`report`が使われる
+
+#### Scenario: イメージに含めたSkill
+- **WHEN** 設定の`skills.source`に、Botのイメージ内のディレクトリ`/app/usecase/skills`を指定し、そこに`report`というSkillがある状態でturnを実行する
+- **THEN** エージェントは`report`を使え、そのSkillに付属するスクリプトをSandboxで実行できる
+
+### Requirement: システムプロンプトを設定したファイルから読む
+システムは、エージェントのシステムプロンプトを、設定の`agent.system_prompt_file`に指定したファイルから読まなければならない (SHALL)。指定がない場合は、本体に含まれる汎用のシステムプロンプト（Sandboxツールの使い方、`<system-notice>`の扱い、バックグラウンド実行の扱いを含む）を使わなければならない (SHALL)。
+
+#### Scenario: ユースケースのプロンプト
+- **WHEN** `agent.system_prompt_file`に「回答は英語で書く」と書いたファイルを指定してturnを実行する
+- **THEN** エージェントはそのファイルの内容をシステムプロンプトとして受け取る
+
+#### Scenario: 指定がない
+- **WHEN** `agent.system_prompt_file`を設定せずにturnを実行する
+- **THEN** エージェントは本体の汎用のシステムプロンプトを受け取る
 
 ### Requirement: 時間のかかるコマンドのバックグラウンド実行
 システムは、シェルコマンドの実行ツールで、コマンドが一定時間（既定20秒）以内に終わらない場合、コマンドを止めずにバックグラウンドで実行し続け、コマンドIDをすぐにエージェントへ返さなければならない (SHALL)。エージェントが最初からバックグラウンドで実行するよう指定した場合は、待たずに返さなければならない (SHALL)。バックグラウンドのコマンドが終了したら、終了コードと出力の末尾を含む通知をその会話に送らなければならない (SHALL)。エージェントがコマンドIDを指定して、バックグラウンドのコマンドを止められなければならない (SHALL)。turnの中断でツール呼出しが取り消されても、バックグラウンドのコマンドを止めてはならない (SHALL NOT)。

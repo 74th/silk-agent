@@ -434,7 +434,9 @@ class LifecycleReconciler:
             await self._mark_lost(token, stored)
             return
         await self.manager.backend.resume(record.sandbox_ref)
-        ready = await self.manager.backend.wait_ready(record.sandbox_ref)
+        ready = await self.manager.backend.wait_ready(
+            record.sandbox_ref, timeout_seconds=self.manager._ready_timeout
+        )
         await self.manager._open_tracker_gate(record.sandbox_ref)
         ready_record = record.model_copy(
             update={

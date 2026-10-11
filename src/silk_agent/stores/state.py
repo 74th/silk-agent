@@ -24,6 +24,8 @@ def state_to_dict(state: ConversationState) -> dict[str, Any]:
         "progress_ref": state.progress_ref,
         "running_command_ids": state.running_command_ids,
         "updated_at": state.updated_at.isoformat() if state.updated_at else None,
+        "owner_user": state.owner_user,
+        "owner_email": state.owner_email,
     }
 
 
@@ -38,6 +40,8 @@ def state_from_dict(data: dict[str, Any]) -> ConversationState:
         progress_ref=dict(data.get("progress_ref") or {}),
         running_command_ids=list(data.get("running_command_ids") or []),
         updated_at=datetime.fromisoformat(updated) if updated else None,
+        owner_user=data.get("owner_user"),
+        owner_email=data.get("owner_email"),
     )
 
 

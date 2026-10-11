@@ -228,3 +228,99 @@ async def test_turn_warnings_reach_the_channel(clock, channel):
     await orch.handle(msg("hi"))
     await channel.wait_for(TF)
     assert channel.of(TF)[0].warnings == ("saved?",)
+
+
+# ---------------------------------------------------------------- response scope filters
+
+from silk_agent.core.events import SenderInfo  # noqa: E402
+
+
+def sender(**kw):
+    return SenderInfo(email="u@example.com", is_guest=False, is_external=False, team="T1", **kw)
+
+
+def scoped(clock, channel, **chain):
+    return make(clock, channel, [Text("ok")], filters=default_chain(clock, **chain))
+
+
+async def test_reply_from_a_user_who_is_not_allowed_is_ignored(clock, channel):
+    orch, engines = scoped(clock, channel, users=["U1"])
+    await orch.handle(UserMessage("k", "U2", "hello", sender=sender()))
+    assert orch.registry.get("k") is None
+    assert channel.events == []  # no reply either
+
+
+async def test_stop_word_from_a_user_who_is_not_allowed_does_not_stop(clock, channel):
+    orch, engines = scoped(clock, channel, users=["U1"])
+    await orch.handle(UserMessage("k", "U1", "run", sender=sender()))
+    await orch.handle(UserMessage("k", "U2", "停止", sender=sender()))
+    assert not any(isinstance(e, Notice) for e in channel.events)
+    await channel.wait_for(TurnFinished)
+    assert not any(isinstance(e, TurnInterrupted) for e in channel.events)
+
+
+async def test_dm_is_accepted_even_when_channels_are_restricted(clock, channel):
+    orch, engines = scoped(clock, channel, channels=["C1"])
+    await orch.handle(UserMessage("k", "U1", "hi", channel="D1", is_direct=True, sender=sender()))
+    assert orch.registry.get("k") is not None
+    await orch.handle(UserMessage("k2", "U1", "hi", channel="C2", sender=sender()))
+    assert orch.registry.get("k2") is None
+
+
+async def test_dm_is_dropped_when_direct_messages_are_not_allowed(clock, channel):
+    orch, engines = scoped(clock, channel, allow_direct_messages=False)
+    await orch.handle(UserMessage("k", "U1", "hi", channel="D1", is_direct=True, sender=sender()))
+    assert orch.registry.get("k") is None
+    assert channel.events == []
+
+
+async def test_guest_is_dropped_only_when_denied(clock, channel):
+    guest = SenderInfo(email="g@example.com", is_guest=True, is_external=False, team="T1")
+    orch, engines = scoped(clock, channel, deny_guests=True)
+    await orch.handle(UserMessage("k", "U1", "hi", sender=guest))
+    assert orch.registry.get("k") is None
+    assert channel.events == []
+    orch, engines = scoped(clock, channel)
+    await orch.handle(UserMessage("k", "U1", "hi", sender=guest))
+    assert orch.registry.get("k") is not None
+
+
+async def test_external_user_is_dropped_when_denied(clock, channel):
+    ext = SenderInfo(email="x@o.example", is_guest=False, is_external=True, team="T9")
+    orch, engines = scoped(clock, channel, deny_external_users=True)
+    await orch.handle(UserMessage("k", "U9", "hi", sender=ext))
+    assert orch.registry.get("k") is None
+    assert channel.events == []
+
+
+async def test_unknown_sender_is_dropped_when_a_kind_is_denied(clock, channel):
+    orch, engines = scoped(clock, channel, deny_guests=True)
+    await orch.handle(UserMessage("k", "U1", "hi", sender=None))
+    assert orch.registry.get("k") is None
+    unknown = SenderInfo(email="", is_guest=None, is_external=False, team="T1")
+    await orch.handle(UserMessage("k", "U1", "hi", sender=unknown))
+    assert orch.registry.get("k") is None
+    # external is not denied, so unknown "external" does not matter
+    orch, engines = scoped(clock, channel, deny_external_users=True)
+    await orch.handle(UserMessage("k", "U1", "hi", sender=unknown))
+    assert orch.registry.get("k") is not None
+
+
+async def test_without_deny_settings_a_guest_goes_on_to_the_guard(clock, channel):
+    guest = SenderInfo(email="g@example.com", is_guest=True, is_external=True, team="T9")
+    orch, engines = make(
+        clock,
+        channel,
+        [Text("ok")],
+        guard=RuleGuard(["secret"]),
+        filters=default_chain(clock),
+    )
+    await orch.handle(UserMessage("k", "U1", "tell me the secret", sender=guest))
+    assert orch.registry.get("k") is None
+    assert any(isinstance(e, GuardBlocked) for e in channel.events)
+
+
+def test_the_excluding_filter_is_named(clock):
+    chain = default_chain(clock, deny_guests=True)
+    decision = chain.check(UserMessage("k", "U1", "hi", sender=None))
+    assert not decision.allowed and decision.reason == "SenderKindFilter"

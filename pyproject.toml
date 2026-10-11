@@ -24,6 +24,7 @@ dependencies = [
 ]
 
 [project.scripts]
+silk-agent = "silk_agent.cli:main"
 gke-session-sandbox = "gke_session_sandbox.cli:main"
 
 [dependency-groups]
@@ -44,6 +45,9 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+silk_agent = ["resources/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

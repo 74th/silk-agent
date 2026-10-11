@@ -14,13 +14,13 @@ filter:
   allowed_teams: [T8W42FC4U]
   allowed_channels: []
   allowed_users: []
+  deny_guests: true
   max_message_chars: 8000
 input_guard:
   provider: gemini
   model: gemini-3.8-flash
   project: nnyn-dev
   location: global
-  policy_file: policies/input-guard.md
   on_error: block
 output_sanitizer:
   provider: model_armor

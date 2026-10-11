@@ -32,6 +32,7 @@ def _config():
     config = load_config(path)
     config.filter.allowed_teams = []  # no Slack workspace here
     config.filter.allowed_channels = []
+    config.filter.deny_guests = config.filter.deny_external_users = False  # Slack-only
     if os.environ.get("SILK_AGENT_SANDBOX", "local_process") == "local_process":
         config.sandbox.runtime = "local_process"
     config.skills.source = os.environ.get("SILK_AGENT_SKILLS") or None
@@ -52,9 +53,7 @@ class _Backend:
         self.thread = threading.Thread(target=self.loop.run_forever, daemon=True)
         self.thread.start()
         work = Path(os.environ.get("SILK_AGENT_WORKDIR") or tempfile.mkdtemp(prefix="silk-agent-"))
-        self.services: Services = self.call(
-            build_services(_config(), self.channel, root=ROOT, work_dir=work)
-        )
+        self.services: Services = self.call(build_services(_config(), self.channel, work_dir=work))
 
     def call(self, coro, timeout: float = 120):
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout)

@@ -1,24 +1,27 @@
 """Calls the real Gemini and Model Armor (project nnyn-dev). Run with `-m integration`."""
 
 import os
-from pathlib import Path
 
 import pytest
 
 from silk_agent.config import Config
 from silk_agent.guards.gemini import GeminiPolicyGuard
 from silk_agent.guards.model_armor import ModelArmorSanitizer
+from silk_agent.resources import read_resource
+from tests.integration.conftest import PROJECT
 
 pytestmark = pytest.mark.integration
 
-ROOT = Path(__file__).resolve().parents[2]
 CFG = Config()
+CFG.input_guard.project = PROJECT
+CFG.output_sanitizer.template = f"projects/{PROJECT}/locations/us-central1/templates/simple"
+CFG.output_sanitizer.endpoint = "modelarmor.us-central1.rep.googleapis.com"
 
 
 @pytest.fixture
 def guard() -> GeminiPolicyGuard:
     return GeminiPolicyGuard(
-        policy_file=ROOT / CFG.input_guard.policy_file,
+        policy=read_resource("input-guard.md"),
         model=CFG.input_guard.model,
         project=CFG.input_guard.project,
         location=CFG.input_guard.location,

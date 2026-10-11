@@ -37,6 +37,7 @@ from silk_agent.core.events import (
     Usage,
 )
 from silk_agent.core.ports import Clock, SkillGeneration, SkillSource, TurnRequest
+from silk_agent.hooks import HookEvent, ToolEnd, ToolStart
 from silk_agent.skills.sources import link_skills
 
 log = logging.getLogger(__name__)
@@ -80,6 +81,8 @@ class ClaudeEngineSettings:
     # skills generation (used to copy the skills into the sandbox).
     on_skills_generation: Callable[[str, SkillGeneration], Awaitable[None]] | None = None
     on_session_id: Callable[[str, str], None] | None = None
+    # Receives ToolStart / ToolEnd hook events (raw tool input and result).
+    on_hook_event: Callable[[HookEvent], None] | None = None
     extra_env: dict[str, str] = field(default_factory=dict)
 
 
@@ -117,7 +120,8 @@ class ClaudeAgentEngine:
         self._sent, self._echoed, self._closing = 0, 0, False
         self._queue: asyncio.Queue[Any] | None = None
         self._turn_id = ""
-        self._running: dict[str, tuple[Any, str, str]] = {}  # tool_use_id -> (start, name, summary)
+        # tool_use_id -> (start, display name, summary, raw tool name)
+        self._running: dict[str, tuple[Any, str, str, str]] = {}
 
     # ------------------------------------------------------------ options
 
@@ -183,7 +187,17 @@ class ClaudeAgentEngine:
         name = display_name(hook_input["tool_name"])
         summary = summarize(hook_input["tool_name"], hook_input.get("tool_input") or {})
         started = self._clock.now()
-        self._running[tool_id] = (started, name, summary)
+        self._running[tool_id] = (started, name, summary, hook_input["tool_name"])
+        self._hook(
+            ToolStart(
+                conversation_key=self._key,
+                turn_id=self._turn_id,
+                at=started,
+                tool_use_id=tool_id,
+                tool_name=hook_input["tool_name"],
+                tool_input=hook_input.get("tool_input"),
+            )
+        )
         await self._emit(ToolStarted(self._key, self._turn_id, tool_id, name, summary, started))
         return {}
 
@@ -205,9 +219,43 @@ class ClaudeAgentEngine:
             await self._s.on_skills_generation(self._key, generation)
             self._sandbox_generation = gen_id
 
-    async def _finish_tool(self, tool_id: str, status: str) -> None:
-        started, name, summary = self._running.pop(tool_id, (self._clock.now(), "", ""))
+    def _hook(self, event: HookEvent) -> None:
+        if self._s.on_hook_event is None:
+            return
+        try:
+            self._s.on_hook_event(event)
+        except Exception:
+            log.exception("hook event handler failed")
+
+    def _hook_tool_end(
+        self,
+        tool_id: str,
+        raw_name: str,
+        status: str,
+        response: Any,
+        started: Any,
+        finished: Any,
+        turn_id: str,
+    ) -> None:
+        self._hook(
+            ToolEnd(
+                conversation_key=self._key,
+                turn_id=turn_id,
+                at=finished,
+                tool_use_id=tool_id,
+                tool_name=raw_name,
+                status=status,  # type: ignore[arg-type]
+                tool_response=response,
+                duration_seconds=(finished - started).total_seconds(),
+            )
+        )
+
+    async def _finish_tool(self, tool_id: str, status: str, response: Any = None) -> None:
+        started, name, summary, raw_name = self._running.pop(
+            tool_id, (self._clock.now(), "", "", "")
+        )
         finished = self._clock.now()
+        self._hook_tool_end(tool_id, raw_name, status, response, started, finished, self._turn_id)
         await self._emit(
             ToolFinished(
                 self._key,
@@ -226,14 +274,20 @@ class ClaudeAgentEngine:
         status = (
             "background" if BACKGROUND_MARKER in str(hook_input.get("tool_response")) else "success"
         )
-        await self._finish_tool(tool_use_id or hook_input.get("tool_use_id", ""), status)
+        await self._finish_tool(
+            tool_use_id or hook_input.get("tool_use_id", ""),
+            status,
+            hook_input.get("tool_response"),
+        )
         return {}
 
     async def _on_tool_failure(
         self, hook_input: Any, tool_use_id: str | None, context: Any
     ) -> HookJSONOutput:
         status = "interrupted" if hook_input.get("is_interrupt") else "failure"
-        await self._finish_tool(tool_use_id or hook_input.get("tool_use_id", ""), status)
+        await self._finish_tool(
+            tool_use_id or hook_input.get("tool_use_id", ""), status, hook_input.get("error")
+        )
         return {}
 
     # ------------------------------------------------------------ run
@@ -326,8 +380,11 @@ class ClaudeAgentEngine:
         events: list[OutboundEvent] = []
         # Tools still marked running at the result were cancelled (e.g. by interrupt).
         for tool_id in list(self._running):
-            started, _, summary = self._running.pop(tool_id)
+            started, _, summary, raw_name = self._running.pop(tool_id)
             finished = self._clock.now()
+            self._hook_tool_end(
+                tool_id, raw_name, "interrupted", None, started, finished, request.turn_id
+            )
             events.append(
                 ToolFinished(
                     self._key,

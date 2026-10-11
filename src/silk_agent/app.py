@@ -12,8 +12,9 @@ from typing import Any
 
 import yaml
 
-from silk_agent.config import Config
+from silk_agent.config import Config, ConfigError
 from silk_agent.core.background import BackgroundCommands
+from silk_agent.core.clock import SystemClock
 from silk_agent.core.commands import CommandTracker
 from silk_agent.core.filters import FilterChain, default_chain
 from silk_agent.core.lifecycle import new_bot_instance_id
@@ -21,9 +22,10 @@ from silk_agent.core.orchestrator import ConversationOrchestrator
 from silk_agent.core.ports import ChatChannel, Clock, SandboxRuntime, SessionStateStore, SkillSource
 from silk_agent.core.session import SessionSettings
 from silk_agent.core.stopwords import StopWords
+from silk_agent.hooks import HookDispatcher, load_hooks
 from silk_agent.sandbox.local import LocalProcessRuntime
 from silk_agent.skills.sources import GcsSkillSource, LocalDirSkillSource, run_skill_sync
-from silk_agent.testing.fakes import InMemoryStateStore, SystemClock
+from silk_agent.stores.memory import InMemoryStateStore
 from silk_agent.wiring import build_engine_factory, build_input_guard, build_output_sanitizer
 
 log = logging.getLogger(__name__)
@@ -36,12 +38,17 @@ class Services:
     state_store: SessionStateStore
     bot_instance_id: str
     skills: SkillSource | None = None
+    hooks: HookDispatcher | None = None
+    hook_shutdown_timeout_seconds: float = 10.0
     background: list[asyncio.Task[None]] = field(default_factory=list)
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
 
     async def aclose(self, grace_seconds: float = 25.0) -> None:
         self._stop.set()
         await self.orchestrator.shutdown(grace_seconds)
+        if self.hooks is not None:
+            # After the shutdown above, so the interruption of running turns is delivered.
+            await self.hooks.aclose(self.hook_shutdown_timeout_seconds)
         for task in self.background:
             task.cancel()
         await asyncio.gather(*self.background, return_exceptions=True)
@@ -53,7 +60,7 @@ class Services:
 def build_state_store(config: Config) -> tuple[SessionStateStore, Any | None]:
     """(SessionStateStore, SDK SessionStore or None)."""
     cfg = config.session_store
-    if cfg.provider == "memory" or not cfg.agent_runtime or "<id>" in cfg.agent_runtime:
+    if cfg.provider == "memory":
         return InMemoryStateStore(), None
     from silk_agent.stores.agent_platform import AgentPlatformSessions, AgentPlatformSessionStore
     from silk_agent.stores.state import AgentPlatformStateStore
@@ -73,7 +80,7 @@ def build_skill_source(config: Config, cache_dir: Path) -> SkillSource | None:
     return LocalDirSkillSource(source, cache_dir)  # type: ignore[return-value]
 
 
-# HMAC key the library needs when `ensure` receives env (USER_EMAIL). It must stay the
+# HMAC key the library needs when `ensure` receives env (AGENT_USER_EMAIL). It must stay the
 # same for the life of the sandboxes, so it comes from a Secret, not the ConfigMap.
 FINGERPRINT_KEY_ENV = "SILK_AGENT_SANDBOX_FINGERPRINT_KEY"
 
@@ -93,15 +100,15 @@ def with_fingerprint_key(config_file: Path, key: str, out: Path) -> Path:
     return out
 
 
-async def build_runtime(
-    config: Config, root: Path, work_dir: Path, env_provider: Any
-) -> SandboxRuntime:
+async def build_runtime(config: Config, work_dir: Path, env_provider: Any) -> SandboxRuntime:
     if config.sandbox.runtime == "local_process":
         return LocalProcessRuntime(work_dir / "sandbox")
     from gke_session_sandbox import SandboxManager
     from silk_agent.sandbox.gke import GkeSessionSandboxRuntime
 
-    config_file = root / (config.sandbox.config_file or "config/sandbox-config.yaml")
+    if not config.sandbox.config_file:
+        raise ConfigError("missing required settings: sandbox.config_file")
+    config_file = config.resolve(config.sandbox.config_file)
     key = os.environ.get(FINGERPRINT_KEY_ENV, "")
     if key:
         config_file = await asyncio.to_thread(
@@ -115,7 +122,6 @@ async def build_services(
     config: Config,
     channel: ChatChannel,
     *,
-    root: Path,
     work_dir: Path,
     clock: Clock | None = None,
     filters: FilterChain | None = None,
@@ -124,29 +130,38 @@ async def build_services(
     start_background: bool = True,
 ) -> Services:
     clock = clock or SystemClock()
+    # Load the hooks first: a hook that cannot be loaded stops the start-up.
+    delivery = config.hook_delivery
+    dispatcher = HookDispatcher(
+        load_hooks(config),
+        clock,
+        queue_size=delivery.queue_size,
+        hook_timeout_seconds=delivery.timeout_seconds,
+    )
     state_store, session_store = build_state_store(config)
     built_runtime = runtime is None
-    runtime = runtime or await build_runtime(config, root, work_dir, env_provider)
+    runtime = runtime or await build_runtime(config, work_dir, env_provider)
     skills = build_skill_source(config, work_dir / "skills-cache")
     bot_instance_id = new_bot_instance_id()
 
-    background = BackgroundCommands(runtime, CommandTracker(state_store))
+    tracker = CommandTracker(state_store)
+    background = BackgroundCommands(runtime, tracker)
     engine_factory = build_engine_factory(
         config,
         runtime,
         clock,
-        root=root,
         work_root=work_dir / "work",
         session_store=session_store,
         skills=skills,
-        state_store=state_store,
+        tracker=tracker,
         background=background,
+        on_hook_event=dispatcher.publish,
     )
     orchestrator = ConversationOrchestrator(
         engine_factory,
         channel,
         clock,
-        guard=build_input_guard(config, root),
+        guard=build_input_guard(config),
         sanitizer=build_output_sanitizer(config),
         stop_words=StopWords(config.slack.stop_words),
         filters=filters
@@ -155,6 +170,9 @@ async def build_services(
             teams=config.filter.allowed_teams,
             channels=config.filter.allowed_channels,
             users=config.filter.allowed_users,
+            allow_direct_messages=config.filter.allow_direct_messages,
+            deny_guests=config.filter.deny_guests,
+            deny_external_users=config.filter.deny_external_users,
             max_chars=config.filter.max_message_chars,
             per_minute=config.filter.rate_limit_per_minute,
         ),
@@ -171,10 +189,19 @@ async def build_services(
         notice_source=runtime.pop_notices,
         notice_ack=runtime.ack_notices,
         sandbox_ready=runtime.is_ready,
+        hooks=dispatcher,
     )
     # A backgrounded command reports its completion to its conversation.
     background.on_finished = orchestrator.notify
-    services = Services(orchestrator, runtime, state_store, bot_instance_id, skills)
+    services = Services(
+        orchestrator,
+        runtime,
+        state_store,
+        bot_instance_id,
+        skills,
+        dispatcher,
+        delivery.shutdown_timeout_seconds,
+    )
     if (
         built_runtime
         and start_background

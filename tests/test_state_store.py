@@ -73,3 +73,18 @@ async def test_list_running_only_returns_running_conversations():
     running = await fresh.list_running()
     assert [s.conversation_key for s in running] == ["a"]
     assert running[0].bot_instance_id == "old"
+
+
+async def test_owner_is_saved_and_read_back():
+    store, *_ = make()
+    await store.put(state("slack:T:C:1", "idle", owner_user="U1", owner_email="a@example.com"))
+    fresh = AgentPlatformStateStore(store._api)  # a restarted Bot reads it from the log
+    got = await fresh.get("slack:T:C:1")
+    assert (got.owner_user, got.owner_email) == ("U1", "a@example.com")
+
+
+async def test_state_without_an_owner_field_reads_as_no_owner():
+    from silk_agent.stores.state import state_from_dict
+
+    got = state_from_dict({"conversation_key": "k", "status": "idle"})
+    assert got.owner_user is None and got.owner_email is None

@@ -1,4 +1,7 @@
-"""In-process fakes for unit tests and local development (no external services)."""
+"""In-process fakes for unit tests and local development (no external services).
+
+SystemClock, InMemoryStateStore, AllowAllGuard and NoopSanitizer live in production modules and
+are re-exported here."""
 
 from __future__ import annotations
 
@@ -11,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from silk_agent.core.clock import SystemClock
 from silk_agent.core.events import (
     AssistantText,
     OutboundEvent,
@@ -21,12 +25,14 @@ from silk_agent.core.events import (
 )
 from silk_agent.core.ports import (
     CommandResult,
-    ConversationState,
     FileEntry,
     GuardVerdict,
     SanitizeResult,
     TurnRequest,
 )
+from silk_agent.guards.noop import AllowAllGuard, NoopSanitizer
+from silk_agent.hooks import HookEvent, ToolEnd, ToolStart
+from silk_agent.stores.memory import InMemoryStateStore
 
 # ---------------------------------------------------------------- Clock
 
@@ -70,14 +76,6 @@ class FakeClock:
         await self._settle()
 
 
-class SystemClock:
-    def now(self) -> datetime:
-        return datetime.now(UTC)
-
-    async def sleep(self, seconds: float) -> None:
-        await asyncio.sleep(seconds)
-
-
 # ---------------------------------------------------------------- Channel
 
 
@@ -113,6 +111,26 @@ class ScriptedChannel:
                 await self._cond.wait_for(lambda: len(self.of(kind)) >= count)
 
         await asyncio.wait_for(_wait(), timeout_seconds)
+
+
+# ---------------------------------------------------------------- Hooks
+
+
+class RecordingHooks:
+    """Hooks that keep every event they receive."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+        self.closed = False
+
+    async def on_event(self, event: Any) -> None:
+        self.events.append(event)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+    def kinds(self) -> list[str]:
+        return [e.kind for e in self.events]
 
 
 # ---------------------------------------------------------------- Agent engine
@@ -151,7 +169,10 @@ class FakeAgentEngine:
         self,
         clock: Any,
         scenarios: Scenario | Callable[[TurnRequest], Scenario] | None = None,
+        *,
+        on_hook_event: Callable[[HookEvent], None] | None = None,
     ) -> None:
+        self._on_hook_event = on_hook_event
         self._clock = clock
         self._scenarios = scenarios if scenarios is not None else [Text("ok")]
         self._interrupt = asyncio.Event()
@@ -162,6 +183,10 @@ class FakeAgentEngine:
         self.reset_count = 0
         self.closed = False
         self.created_at_turn: list[int] = []
+
+    def _hook(self, event: HookEvent) -> None:
+        if self._on_hook_event is not None:
+            self._on_hook_event(event)
 
     def _scenario(self, request: TurnRequest) -> Scenario:
         if callable(self._scenarios):
@@ -202,11 +227,37 @@ class FakeAgentEngine:
                 tool_n += 1
                 tool_id = f"{turn_id}-t{tool_n}"
                 started = self._clock.now()
+                self._hook(
+                    ToolStart(
+                        conversation_key=key,
+                        turn_id=turn_id,
+                        at=started,
+                        tool_use_id=tool_id,
+                        tool_name=f"mcp__sandbox__{item.name}",
+                        tool_input={"command": item.summary},
+                    )
+                )
                 yield ToolStarted(key, turn_id, tool_id, item.name, item.summary, started)
                 interrupted = (
                     await self._sleep_or_interrupt(item.duration) if item.duration else False
                 )
                 finished = self._clock.now()
+                self._hook(
+                    ToolEnd(
+                        conversation_key=key,
+                        turn_id=turn_id,
+                        at=finished,
+                        tool_use_id=tool_id,
+                        tool_name=f"mcp__sandbox__{item.name}",
+                        status="interrupted"
+                        if interrupted
+                        else "failure"
+                        if item.fail
+                        else "success",
+                        tool_response=item.result,
+                        duration_seconds=(finished - started).total_seconds(),
+                    )
+                )
                 if interrupted:
                     yield ToolFinished(
                         key,
@@ -350,40 +401,7 @@ class InMemoryRuntime:
 # ---------------------------------------------------------------- State store
 
 
-class InMemoryStateStore:
-    def __init__(self) -> None:
-        self.states: dict[str, ConversationState] = {}
-
-    async def get(self, conversation_key: str) -> ConversationState | None:
-        s = self.states.get(conversation_key)
-        return None if s is None else _copy(s)
-
-    async def put(self, state: ConversationState) -> None:
-        self.states[state.conversation_key] = _copy(state)
-
-    async def list_running(self) -> list[ConversationState]:
-        return [_copy(s) for s in self.states.values() if s.status == "running"]
-
-
-def _copy(s: ConversationState) -> ConversationState:
-    return ConversationState(
-        s.conversation_key,
-        s.agent_session_id,
-        s.status,
-        s.turn_id,
-        s.bot_instance_id,
-        dict(s.progress_ref),
-        list(s.running_command_ids),
-        s.updated_at,
-    )
-
-
 # ---------------------------------------------------------------- Guards
-
-
-class AllowAllGuard:
-    async def check(self, text: str, history: list[str]) -> GuardVerdict:
-        return GuardVerdict("allow")
 
 
 class RuleGuard:
@@ -397,11 +415,6 @@ class RuleGuard:
             if b in text:
                 return GuardVerdict("block", f"'{b}' is not allowed")
         return GuardVerdict("allow")
-
-
-class NoopSanitizer:
-    async def sanitize(self, text: str) -> SanitizeResult:
-        return SanitizeResult("pass", text)
 
 
 class FakeSanitizer:
@@ -428,3 +441,21 @@ class FakeSanitizer:
         for w in self.mask_words:
             masked = masked.replace(w, "[MASKED]")
         return SanitizeResult("masked" if masked != text else "pass", masked)
+
+
+__all__ = [
+    "AllowAllGuard",
+    "FakeAgentEngine",
+    "FakeClock",
+    "FakeSanitizer",
+    "InMemoryRuntime",
+    "InMemoryStateStore",
+    "NoopSanitizer",
+    "RecordingHooks",
+    "RuleGuard",
+    "ScriptedChannel",
+    "SystemClock",
+    "Text",
+    "Tool",
+    "Wait",
+]

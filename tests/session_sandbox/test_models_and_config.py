@@ -125,3 +125,21 @@ def test_config_accepts_normal_overrides_and_has_lifecycle_defaults() -> None:
 
     assert config.lifecycle.idle_timeout_seconds == 300
     assert config.lifecycle.retention_seconds == 604800
+
+
+def test_ready_timeout_defaults_to_180_seconds_and_can_be_set() -> None:
+    assert ManagerConfig(runtime=runtime_settings()).runtime.ready_timeout_seconds == 180
+    config = ManagerConfig(runtime=runtime_settings(ready_timeout_seconds=600))
+    assert config.runtime.ready_timeout_seconds == 600
+    assert (
+        ManagerConfig(
+            runtime=runtime_settings(ready_timeout_seconds=1.5)
+        ).runtime.ready_timeout_seconds
+        == 1.5
+    )
+
+
+@pytest.mark.parametrize("value", [0, -1, "600", None])
+def test_ready_timeout_must_be_a_positive_number(value: object) -> None:
+    with pytest.raises(ValidationError):
+        ManagerConfig(runtime=runtime_settings(ready_timeout_seconds=value))

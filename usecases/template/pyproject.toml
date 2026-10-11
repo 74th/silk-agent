@@ -1,0 +1,22 @@
+[project]
+name = "silk-usecase-template"
+version = "0.1.0"
+description = "A silk-agent use case: prompts, Skills, hooks, and settings for one deployment"
+requires-python = ">=3.12"
+dependencies = ["silk-agent"]
+
+# Inside the silk-agent repository the use case builds against the checkout. When the use case
+# lives in its own repository, point at a release tag instead (see docs/usecase-guide.md):
+#   silk-agent = { git = "https://github.com/<org>/silk-agent", tag = "v0.1.0" }
+[tool.uv.sources]
+silk-agent = { path = "../..", editable = true }
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

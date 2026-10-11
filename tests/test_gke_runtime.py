@@ -132,14 +132,14 @@ def test_session_key_mapping():
 
 
 async def test_ensure_with_user_email_env_and_command_mapping():
-    rt, mgr = make({"USER_EMAIL": "taro@example.com"})
+    rt, mgr = make({"AGENT_USER_EMAIL": "taro@example.com"})
     started = []
 
     async def on_started(cid):
         started.append(cid)
 
     res = await rt.run_command("slack:T1:C1:1.0", "ls -la", cwd="src", on_started=on_started)
-    assert mgr.ensured[0] == (("T1", "C1:1.0"), {"USER_EMAIL": "taro@example.com"})
+    assert mgr.ensured[0] == (("T1", "C1:1.0"), {"AGENT_USER_EMAIL": "taro@example.com"})
     argv, cwd, timeout, command_id = mgr.handles[("T1", "C1:1.0")].commands.runs[0]
     assert argv == ["bash", "-lc", "ls -la"] and cwd == "src" and timeout == 120
     assert (res.outcome, res.exit_code, res.stdout, res.command_id) == (

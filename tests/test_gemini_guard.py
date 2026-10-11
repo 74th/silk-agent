@@ -1,11 +1,9 @@
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from silk_agent.guards.gemini import GeminiPolicyGuard, InputVerdict
-
-POLICY = Path(__file__).resolve().parent.parent / "policies" / "input-guard.md"
+from silk_agent.resources import read_resource
 
 
 class FakeModels:
@@ -21,7 +19,7 @@ class FakeModels:
 
 def guard(models) -> GeminiPolicyGuard:
     client = SimpleNamespace(aio=SimpleNamespace(models=models))
-    return GeminiPolicyGuard(policy_file=POLICY, client=client)
+    return GeminiPolicyGuard(policy=read_resource("input-guard.md"), project="p", client=client)
 
 
 async def test_allow():

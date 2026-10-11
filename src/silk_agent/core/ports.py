@@ -153,6 +153,15 @@ class ConversationState:
     progress_ref: dict[str, Any] = field(default_factory=dict)
     running_command_ids: list[str] = field(default_factory=list)
     updated_at: datetime | None = None
+    # Who started the conversation (set once, when its first message is accepted). `None`
+    # for conversations that were started before this was recorded.
+    owner_user: str | None = None
+    owner_email: str | None = None
+
+
+# Environment variable that carries the e-mail address of the user who started the
+# conversation into the Sandbox (container env, so startup.sh and agent commands see it).
+AGENT_USER_EMAIL_ENV = "AGENT_USER_EMAIL"
 
 
 class SessionStateStore(Protocol):

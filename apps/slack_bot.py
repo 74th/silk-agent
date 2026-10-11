@@ -1,25 +1,19 @@
-"""Slack bot entry point: `uv run python apps/slack_bot.py` (config: SILK_AGENT_CONFIG)."""
+"""Slack bot entry point: `uv run python apps/slack_bot.py` (same as `silk-agent slack`).
+
+Config: SILK_AGENT_CONFIG, or config/silk-agent.yaml in this repository if it exists."""
 
 from __future__ import annotations
 
-import asyncio
-import logging
 import os
+import sys
 from pathlib import Path
 
-from silk_agent.config import load_config
-from silk_agent.slack_app import run_from_environment
+from silk_agent.cli import CONFIG_ENV, main
 
 ROOT = Path(__file__).resolve().parent.parent
 
-
-def main() -> None:
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
-    path = Path(os.environ.get("SILK_AGENT_CONFIG", ROOT / "config" / "silk-agent.yaml"))
-    if not path.exists():
-        raise SystemExit(f"config file not found: {path} (copy config/silk-agent.example.yaml)")
-    asyncio.run(run_from_environment(load_config(path), ROOT))
-
-
 if __name__ == "__main__":
-    main()
+    default = ROOT / "config" / "silk-agent.yaml"
+    if CONFIG_ENV not in os.environ and default.exists():
+        os.environ[CONFIG_ENV] = str(default)
+    main(["slack", *sys.argv[1:]])

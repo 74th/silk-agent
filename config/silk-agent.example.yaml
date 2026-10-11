@@ -13,15 +13,16 @@ filter:
   allowed_channels: []             # 空 = 全チャンネル
   max_message_chars: 8000
 input_guard:
-  provider: gemini
+  provider: gemini                 # gemini | allow_all
   model: gemini-3.8-flash
+  project: nnyn-dev                # provider: gemini では必須
   location: global
-  policy_file: policies/input-guard.md
+  # policy_file: policies/input-guard.md   # 設定ファイルからの相対パス。省略すると本体の汎用の基準
   on_error: block
 output_sanitizer:
   provider: model_armor
-  template: projects/nnyn-dev/locations/us-central1/templates/simple
-  endpoint: modelarmor.us-central1.rep.googleapis.com
+  template: projects/nnyn-dev/locations/us-central1/templates/simple   # provider: model_armor では必須
+  # endpoint: modelarmor.us-central1.rep.googleapis.com   # 省略するとtemplateのlocationから決める
   on_sdp_match: mask               # mask | block
   on_other_match: block
   on_error: block
@@ -29,21 +30,22 @@ session_store:
   provider: agent_platform
   project: nnyn-dev
   location: us-central1
-  agent_runtime: projects/nnyn-dev/locations/us-central1/reasoningEngines/<id>
+  agent_runtime: projects/nnyn-dev/locations/us-central1/reasoningEngines/1234567890   # 必須
   ttl_seconds: 2592000
 agent:
   provider: agent_platform         # CLAUDE_CODE_USE_VERTEX=1
-  project: nnyn-dev
+  project: nnyn-dev                # 必須
   region: global                   # Claudeの提供リージョン
   model: claude-opus-5-5           # テストでは claude-haiku-5-5
   max_turns: 50
   max_budget_usd_per_turn: 2.0
   idle_client_timeout_seconds: 600
+  # system_prompt_file: prompts/agent-system.md   # 設定ファイルからの相対パス。省略すると本体の汎用のプロンプト
 mcp:
-  config_file: config/mcp.json
+  config_file: mcp.json            # 設定ファイルからの相対パス
 skills:
   source: gs://nnyn-dev-silk-agent-skills/skills
   sync_interval_seconds: 300
 sandbox:
   runtime: gke_session_sandbox     # gke_session_sandbox | local_process (開発専用)
-  config_file: config/sandbox-config.yaml   # gke-session-sandboxの設定
+  config_file: sandbox-config.yaml   # gke-session-sandboxの設定（設定ファイルからの相対パス）

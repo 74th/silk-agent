@@ -22,13 +22,18 @@ class GeminiPolicyGuard:
     def __init__(
         self,
         *,
-        policy_file: str | Path,
+        policy_file: str | Path | None = None,
+        policy: str | None = None,
         model: str = "gemini-3.8-flash",
-        project: str = "nnyn-dev",
+        project: str,
         location: str = "global",
         client: Any | None = None,
     ) -> None:
-        self._policy = Path(policy_file).read_text(encoding="utf-8")
+        if policy is None:
+            if policy_file is None:
+                raise ValueError("either policy or policy_file is required")
+            policy = Path(policy_file).read_text(encoding="utf-8")
+        self._policy = policy
         self._model = model
         self._project = project
         self._location = location

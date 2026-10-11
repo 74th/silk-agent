@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
@@ -18,6 +19,10 @@ from silk_agent.core.events import (
     StopRequest,
     ToolFinished,
     ToolStarted,
+    TurnFailed,
+    TurnFinished,
+    TurnInterrupted,
+    TurnStarted,
     UserMessage,
 )
 from silk_agent.core.filters import FilterChain
@@ -25,6 +30,7 @@ from silk_agent.core.ports import (
     AgentEngineFactory,
     ChatChannel,
     Clock,
+    ConversationState,
     InputGuard,
     OutputSanitizer,
     SanitizeResult,
@@ -32,6 +38,16 @@ from silk_agent.core.ports import (
 )
 from silk_agent.core.session import AgentSessionRegistry, SessionSettings
 from silk_agent.core.stopwords import StopWords
+from silk_agent.hooks import (
+    AgentReply,
+    HookDispatcher,
+    HookEvent,
+    InputDecision,
+    SystemNotice,
+    TurnEnd,
+    TurnStart,
+    UserInput,
+)
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +82,10 @@ class ConversationOrchestrator:
         notice_source: Callable[[str], Awaitable[list[str]]] | None = None,
         notice_ack: Callable[[str], Awaitable[None]] | None = None,
         sandbox_ready: Callable[[str], Awaitable[bool]] | None = None,
+        hooks: HookDispatcher | None = None,
     ) -> None:
+        self._clock = clock
+        self._hooks = hooks
         self._registry = AgentSessionRegistry(
             engine_factory,
             self.emit,
@@ -86,6 +105,8 @@ class ConversationOrchestrator:
         self._stop_words = stop_words
         self._filters = filters
         self._guard_on_error = guard_on_error
+        self._state_store = state_store
+        self._owner_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._history: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=HISTORY_FOR_GUARD))
 
     @property
@@ -117,11 +138,13 @@ class ConversationOrchestrator:
         if self._filters is not None:
             decision = self._filters.check(message)
             if not decision.allowed:
+                self._input(message, "filtered", filter=decision.reason)
                 if decision.reply:
                     await self._channel.send(Notice(key, decision.reply))
                 return
 
         if self._stop_words.matches(message.text):
+            self._input(message, "stop_word")
             await self._handle_stop(StopRequest(key, message.user))
             return
 
@@ -133,16 +156,40 @@ class ConversationOrchestrator:
             if self._guard_on_error == "allow":
                 verdict = None
             else:
+                self._input(message, "guard_failed", reason="input guard failed")
                 await self._channel.send(GuardBlocked(key, "input", INPUT_CHECK_FAILED))
                 return
         if verdict is not None and verdict.decision != "allow":
             reason = verdict.reason or "入力がポリシーに違反している可能性があります。"
+            self._input(
+                message, "review" if verdict.decision == "review" else "blocked", reason=reason
+            )
             await self._channel.send(GuardBlocked(key, "input", reason))
             return
 
+        self._input(message, "accepted")
         self._history[key].append(message.text)
+        await self._record_owner(message)
         session = await self._registry.get_or_create(key)
         await session.submit(message)
+
+    async def _record_owner(self, message: UserMessage) -> None:
+        """The user of the first accepted message owns the conversation (it is saved before
+        the Sandbox is created, which takes AGENT_USER_EMAIL from it). A conversation that
+        already has a record but no owner predates this and stays without one."""
+        if self._state_store is None:
+            return
+        key = message.conversation_key
+        async with self._owner_locks[key]:
+            try:
+                if await self._state_store.get(key) is not None:
+                    return
+                email = message.sender.email if message.sender else ""
+                await self._state_store.put(
+                    ConversationState(key, owner_user=message.user, owner_email=email)
+                )
+            except Exception:
+                log.exception("could not record the owner of %s", key)
 
     async def _handle_stop(self, request: StopRequest) -> None:
         key = request.conversation_key
@@ -163,6 +210,7 @@ class ConversationOrchestrator:
     async def notify(self, key: str, text: str) -> None:
         """A system notice for the agent (e.g. a background command finished). It joins the
         running turn, or starts a turn so the agent can report to the user."""
+        self._publish(SystemNotice(conversation_key=key, at=self._clock.now(), text=text))
         session = await self._registry.get_or_create(key)
         await session.notify(text)
 
@@ -170,8 +218,18 @@ class ConversationOrchestrator:
 
     async def emit(self, event: OutboundEvent) -> None:
         """Sink for AgentSession: sanitize anything that shows agent-derived text."""
+        self._publish_outbound(event)
         if isinstance(event, AssistantText):
             result = await self._sanitize(event.text)
+            self._publish(
+                AgentReply(
+                    conversation_key=event.conversation_key,
+                    turn_id=event.turn_id,
+                    at=self._clock.now(),
+                    text=event.text,
+                    sanitize_status=result.status,
+                )
+            )
             if result.status in ("pass", "masked"):
                 await self._channel.send(replace(event, text=result.text))
             else:
@@ -188,6 +246,75 @@ class ConversationOrchestrator:
                 await self._channel.send(replace(event, summary="（表示できません）"))
         else:
             await self._channel.send(event)
+
+    # ------------------------------------------------------------ hooks
+
+    def _publish(self, event: HookEvent) -> None:
+        if self._hooks is not None:
+            self._hooks.publish(event)
+
+    def _input(
+        self, message: UserMessage, decision: InputDecision, *, reason: str = "", filter: str = ""
+    ) -> None:
+        if self._hooks is None:
+            return
+        self._hooks.publish(
+            UserInput(
+                conversation_key=message.conversation_key,
+                at=self._clock.now(),
+                user=message.user or None,
+                user_email=(message.sender.email if message.sender else "") or None,
+                text=message.text,
+                message_id=message.message_id,
+                attachments=message.attachments,
+                decision=decision,
+                reason=reason,
+                filter=filter,
+            )
+        )
+
+    def _publish_outbound(self, event: OutboundEvent) -> None:
+        """Turn boundaries. (Tool events come from the engine, which has the raw input and
+        result; the reply is published after its output check.)"""
+        if self._hooks is None:
+            return
+        key = event.conversation_key if hasattr(event, "conversation_key") else ""
+        if isinstance(event, TurnStarted):
+            self._publish(
+                TurnStart(conversation_key=key, turn_id=event.turn_id, at=event.started_at)
+            )
+        elif isinstance(event, TurnFinished):
+            self._publish(
+                TurnEnd(
+                    conversation_key=key,
+                    turn_id=event.turn_id,
+                    at=event.finished_at or self._clock.now(),
+                    outcome="completed",
+                    input_tokens=event.usage.input_tokens,
+                    output_tokens=event.usage.output_tokens,
+                    cost_usd=event.usage.cost_usd,
+                )
+            )
+        elif isinstance(event, TurnFailed):
+            self._publish(
+                TurnEnd(
+                    conversation_key=key,
+                    turn_id=event.turn_id,
+                    at=self._clock.now(),
+                    outcome="failed",
+                    reason=event.error,
+                )
+            )
+        elif isinstance(event, TurnInterrupted):
+            self._publish(
+                TurnEnd(
+                    conversation_key=key,
+                    turn_id=event.turn_id,
+                    at=event.at or self._clock.now(),
+                    outcome="interrupted",
+                    reason=event.reason,
+                )
+            )
 
     async def _sanitize(self, text: str) -> SanitizeResult:
         try:

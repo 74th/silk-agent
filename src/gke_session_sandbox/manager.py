@@ -255,7 +255,9 @@ class SandboxManager:
                     return await self._continue_creation_locked(token, key, stored, env)
                 if stored.record.state is SessionState.RESUMING and stored.record.sandbox_ref:
                     await self.backend.resume(stored.record.sandbox_ref)
-                    ready = await self.backend.wait_ready(stored.record.sandbox_ref)
+                    ready = await self.backend.wait_ready(
+                        stored.record.sandbox_ref, timeout_seconds=self._ready_timeout
+                    )
                     await self._open_tracker_gate(stored.record.sandbox_ref)
                     return await self._save_ready(token, key, stored, ready)
                 if stored.record.state in {SessionState.TERMINATED, SessionState.LOST}:
@@ -516,7 +518,7 @@ class SandboxManager:
             stored = await self.repository.compare_and_swap(
                 token, creating, expected_resource_version=stored.resource_version
             )
-        ready = await self.backend.wait_ready(ref)
+        ready = await self.backend.wait_ready(ref, timeout_seconds=self._ready_timeout)
         return await self._save_ready(token, key, stored, ready)
 
     async def _resume_locked(
@@ -540,7 +542,9 @@ class SandboxManager:
             token, intent, expected_resource_version=stored.resource_version
         )
         await self.backend.resume(record.sandbox_ref)
-        ready = await self.backend.wait_ready(record.sandbox_ref)
+        ready = await self.backend.wait_ready(
+            record.sandbox_ref, timeout_seconds=self._ready_timeout
+        )
         await self._open_tracker_gate(record.sandbox_ref)
         return await self._save_ready(token, key, stored, ready)
 
@@ -859,6 +863,10 @@ class SandboxManager:
 
     def _handle(self, key: SessionKey, record: SessionRecord) -> SessionHandle:
         return SessionHandle(self, key, record.generation, record)
+
+    @property
+    def _ready_timeout(self) -> float:
+        return float(self.config.runtime.ready_timeout_seconds)
 
     def _check_open(self) -> None:
         if self._closed:

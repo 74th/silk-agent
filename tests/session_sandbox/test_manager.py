@@ -131,6 +131,7 @@ class FakeBackend:
         self.deleted: list[str] = []
         self.suspended: list[str] = []
         self.started: list[str] = []
+        self.ready_timeouts: list[object] = []
         self.api_client = None
         self.endpoint = ""
         self.endpoint_refs: list[ResourceRef] = []
@@ -151,6 +152,7 @@ class FakeBackend:
         return ref, ()
 
     async def wait_ready(self, ref, **kwargs):
+        self.ready_timeouts.append(kwargs.get("timeout_seconds"))
         return {"metadata": {"uid": ref.uid}, "status": {"podUID": f"pod-{ref.uid}"}}
 
     async def start(self, ref):
@@ -187,9 +189,9 @@ class FakeBackend:
         return self.endpoint
 
 
-def config() -> ManagerConfig:
+def config(**runtime: object) -> ManagerConfig:
     return ManagerConfig(
-        runtime={"image": "example.invalid/sandbox:v1"},
+        runtime={"image": "example.invalid/sandbox:v1", **runtime},
         environment_fingerprint_key="a-stable-secret-key-with-at-least-32-bytes",
     )
 
@@ -471,3 +473,27 @@ async def test_terminate_and_stale_generation_handle() -> None:
     )
     with pytest.raises(StaleGenerationError):
         await manager.resume(handle)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runtime", "expected"), [({}, 180.0), ({"ready_timeout_seconds": 600}, 600.0)]
+)
+async def test_create_and_resume_wait_for_the_configured_ready_timeout(runtime, expected) -> None:
+    async def gate(request):
+        body = await request.json()
+        return web.json_response({"accepting": body["accepting"], "active_commands": 0})
+
+    app = web.Application()
+    app.router.add_put("/v1/commands/gate", gate)
+    server = TestServer(app)
+    await server.start_server()
+    repository, backend = MemoryRepository(), FakeBackend()
+    backend.endpoint = str(server.make_url("/")).rstrip("/")
+    manager = SandboxManager(config(**runtime), repository, backend, template=template())
+    handle = await manager.ensure(SessionKey(tenant_id="tenant", session_id="slow-start"))
+    await manager.resume(await manager.suspend(handle))
+    await manager.close()
+    await server.close()
+
+    assert backend.ready_timeouts == [expected, expected]

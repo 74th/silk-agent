@@ -1,0 +1,12 @@
+# Deployment of this use case: ../config (silk-agent's k8s/base + this use case's ConfigMap) with this use case's Bot image. Deploy from the silk-agent checkout with
+#   KUSTOMIZE_DIR=usecases/<name>/k8s k8s/deploy.sh
+# or `kubectl kustomize . | kubectl apply -f -` from this directory.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../config
+images:
+  # The Deployment's image is the placeholder `silk-agent`: use this use case's Bot image.
+  - name: silk-agent
+    newName: us-central1-docker.pkg.dev/your-gcp-project/your-repository/usecase-bot
+    newTag: 0.1.0

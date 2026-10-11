@@ -2,7 +2,6 @@
 Run with `-m integration`."""
 
 import asyncio
-from pathlib import Path
 
 import pytest
 
@@ -18,19 +17,20 @@ from silk_agent.core.ports import TurnRequest
 from silk_agent.sandbox.local import LocalProcessRuntime
 from silk_agent.testing.fakes import SystemClock
 from silk_agent.wiring import build_engine_factory
+from tests.integration.conftest import PROJECT
 
 pytestmark = pytest.mark.integration
 
-ROOT = Path(__file__).resolve().parents[2]
 MODEL = "claude-haiku-5-5"
 
 
 @pytest.fixture
 def setup(tmp_path):
     config = Config()
+    config.agent.project = PROJECT
     runtime = LocalProcessRuntime(tmp_path / "sandbox")
     factory = build_engine_factory(
-        config, runtime, SystemClock(), root=ROOT, work_root=tmp_path / "work", model=MODEL
+        config, runtime, SystemClock(), work_root=tmp_path / "work", model=MODEL
     )
     return runtime, factory
 

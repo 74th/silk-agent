@@ -18,25 +18,46 @@ from silk_agent.core.ports import (
     InputGuard,
     OutputSanitizer,
     SandboxRuntime,
-    SessionStateStore,
     SkillGeneration,
     SkillSource,
 )
-from silk_agent.testing.fakes import AllowAllGuard, NoopSanitizer
+from silk_agent.guards.noop import AllowAllGuard, NoopSanitizer
+from silk_agent.hooks import HookEvent
+from silk_agent.resources import read_resource
 
 
-def build_input_guard(config: Config, root: Path) -> InputGuard:
+def build_input_guard(config: Config) -> InputGuard:
     cfg = config.input_guard
     if cfg.provider == "allow_all":
         return AllowAllGuard()
     from silk_agent.guards.gemini import GeminiPolicyGuard
 
+    # A configured file that does not exist stops the start-up (no silent fallback).
+    policy = (
+        config.resolve(cfg.policy_file).read_text(encoding="utf-8")
+        if cfg.policy_file
+        else read_resource("input-guard.md")
+    )
     return GeminiPolicyGuard(
-        policy_file=root / cfg.policy_file,
+        policy=policy,
         model=cfg.model,
         project=cfg.project,
         location=cfg.location,
     )
+
+
+def model_armor_endpoint(template: str) -> str | None:
+    """`projects/P/locations/L/templates/T` -> `modelarmor.L.rep.googleapis.com`."""
+    parts = template.split("/")
+    if len(parts) >= 4 and parts[2] == "locations":
+        return f"modelarmor.{parts[3]}.rep.googleapis.com"
+    return None
+
+
+def build_system_prompt(config: Config) -> str:
+    if config.agent.system_prompt_file:
+        return config.resolve(config.agent.system_prompt_file).read_text(encoding="utf-8")
+    return read_resource("agent-system.md")
 
 
 def build_output_sanitizer(config: Config) -> OutputSanitizer:
@@ -47,7 +68,7 @@ def build_output_sanitizer(config: Config) -> OutputSanitizer:
 
     return ModelArmorSanitizer(
         template=cfg.template,
-        endpoint=cfg.endpoint,
+        endpoint=cfg.endpoint or model_armor_endpoint(cfg.template),
         on_sdp_match=cfg.on_sdp_match,
         ignored_filters=cfg.ignored_filters,
     )
@@ -58,21 +79,21 @@ def build_engine_factory(
     runtime: SandboxRuntime,
     clock: Clock,
     *,
-    root: Path,
     work_root: Path,
     session_store: Any | None = None,
     skills: SkillSource | None = None,
-    state_store: SessionStateStore | None = None,
+    tracker: CommandTracker | None = None,
     on_session_id: Callable[[str, str], None] | None = None,
     model: str | None = None,
     extra_env: dict[str, str] | None = None,
     background: BackgroundCommands | None = None,
+    on_hook_event: Callable[[HookEvent], None] | None = None,
 ) -> AgentEngineFactory:
-    mcp = load_mcp_servers((root / config.mcp.config_file) if config.mcp.config_file else None)
-    prompt_path = root / "policies" / "agent-system.md"
-    system_prompt = prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
+    mcp = load_mcp_servers(
+        config.resolve(config.mcp.config_file) if config.mcp.config_file else None
+    )
+    system_prompt = build_system_prompt(config)
 
-    tracker = CommandTracker(state_store) if state_store is not None else None
     bg = background or BackgroundCommands(runtime, tracker)
 
     def servers(key: str) -> dict[str, Any]:
@@ -94,6 +115,7 @@ def build_engine_factory(
         skills=skills,
         on_skills_generation=on_skills if skills is not None else None,
         on_session_id=on_session_id,
+        on_hook_event=on_hook_event,
         extra_env=extra_env or {},
     )
 

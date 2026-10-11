@@ -1,3 +1,4 @@
+_sessions
 .venv/
 __pycache__/
 *.pyc
