@@ -2,31 +2,43 @@
 
 from __future__ import annotations
 
-import copy
 import asyncio
-from contextlib import asynccontextmanager, suppress
+import copy
 import os
 import socket
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import yaml
 import aiohttp
+import yaml
 
 from .backend import CoreSandboxBackend
 from .commands import CommandTrackerClient
 from .config import ManagerConfig
-from .kube import load_kube_client_config
-from .environments import creation_environment_fingerprint, ensure_same_creation_environment, merge_template_environment
-from .errors import ConfigurationError, ResourceOwnershipError, SandboxBusyError, SessionExpiredError, SessionLeaseHeldError, SessionLeaseLostError, StaleGenerationError
+from .environments import (
+    creation_environment_fingerprint,
+    ensure_same_creation_environment,
+    merge_template_environment,
+)
+from .errors import (
+    ConfigurationError,
+    ResourceOwnershipError,
+    SandboxBusyError,
+    SessionExpiredError,
+    SessionLeaseHeldError,
+    SessionLeaseLostError,
+    StaleGenerationError,
+)
 from .files import FileClient
+from .kube import load_kube_client_config
+from .network import build_session_network_policies, sandbox_pod_labels
 from .repository import LeaseToken, StoredSession
 from .sqlite_repository import SQLiteSessionRepository
-from .network import build_session_network_policies, sandbox_pod_labels
 from .templates import TemplateRenderer
 from .types import (
     CommandState,
@@ -48,7 +60,7 @@ PolicyFactory = Callable[[SessionKey, int, Mapping[str, Any]], Sequence[Mapping[
 class SessionHandle:
     """A generation-bound view; operations validate it against durable state."""
 
-    _manager: "SandboxManager"
+    _manager: SandboxManager
     key: SessionKey
     generation: int
     record: SessionRecord
@@ -68,6 +80,7 @@ class SessionHandle:
     @property
     def commands(self) -> CommandTrackerClient:
         """Client that ensures this session is active and resolves its current runtime on demand."""
+
         async def resolve_endpoint() -> str:
             current = await self._manager.ensure(self.key)
             if current.generation != self.generation:
@@ -90,20 +103,25 @@ class SessionHandle:
     @property
     def files(self) -> FileClient:
         """Client for the current sandboxd REST filesystem endpoint."""
+
         async def resolve_endpoint() -> str:
             current = await self._manager.ensure(self.key)
             if current.generation != self.generation:
                 raise StaleGenerationError("session handle refers to an older generation")
             if current.sandbox_ref is None:
                 raise ResourceOwnershipError("session has no owned Sandbox reference")
-            return await self._manager.backend.runtime_endpoint(current.sandbox_ref, tracker_port=8080)
+            return await self._manager.backend.runtime_endpoint(
+                current.sandbox_ref, tracker_port=8080
+            )
 
         return FileClient(
             resolve_endpoint,
-            activity_hook=lambda delta: self._manager._adjust_file_activity(self.key, self.generation, delta),
+            activity_hook=lambda delta: self._manager._adjust_file_activity(
+                self.key, self.generation, delta
+            ),
         )
 
-    async def refresh(self) -> "SessionHandle":
+    async def refresh(self) -> SessionHandle:
         handle = await self._manager.get(self.key)
         if handle is None:
             raise ResourceOwnershipError("session no longer exists")
@@ -134,11 +152,15 @@ class SandboxManager:
         self._renderer = renderer or TemplateRenderer()
         self._template = copy.deepcopy(dict(template)) if template is not None else None
         self._policy_factory = policy_factory or (
-            lambda key, generation, _manifest: build_session_network_policies(config, key, generation)
+            lambda key, generation, _manifest: build_session_network_policies(
+                config, key, generation
+            )
         )
         self._pvc_manager = pvc_manager
         self._api_client = api_client
-        self._holder_identity = holder_identity or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex}"
+        self._holder_identity = (
+            holder_identity or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex}"
+        )
         self._closed = False
 
     @classmethod
@@ -148,18 +170,22 @@ class SandboxManager:
         *,
         kube_context: str | None = None,
         policy_factory: PolicyFactory | None = None,
-    ) -> "SandboxManager":
-        """Load config and create async Kubernetes API adapters from kubeconfig or in-cluster config."""
+    ) -> SandboxManager:
+        """Load config; create async Kubernetes API adapters (in-cluster or kubeconfig)."""
         config_file = Path(config_path)
         try:
-            raw_config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+            raw_config = yaml.safe_load(
+                await asyncio.to_thread(config_file.read_text, encoding="utf-8")
+            )
             settings = ManagerConfig.model_validate(raw_config)
         except Exception as exc:
             raise ConfigurationError(f"cannot load manager config {config_file}: {exc}") from exc
         try:
             from kubernetes_asyncio import client
         except ImportError as exc:
-            raise ConfigurationError("install the kubernetes-asyncio dependency to connect to Kubernetes") from exc
+            raise ConfigurationError(
+                "install the kubernetes-asyncio dependency to connect to Kubernetes"
+            ) from exc
 
         await load_kube_client_config(kube_context)
         repository = SQLiteSessionRepository(
@@ -169,11 +195,18 @@ class SandboxManager:
             lease_duration_seconds=settings.session_lease_duration_seconds,
         )
         api_client = client.ApiClient()
-        core_api = client.CoreV1Api(api_client)
-        backend = CoreSandboxBackend(client.CustomObjectsApi(api_client), core_api, client.NetworkingV1Api(api_client))
+        # kubernetes_asyncio's generated clients satisfy the backend protocols at runtime.
+        core_api: Any = client.CoreV1Api(api_client)
+        custom_api: Any = client.CustomObjectsApi(api_client)
+        networking_api: Any = client.NetworkingV1Api(api_client)
+        backend = CoreSandboxBackend(custom_api, core_api, networking_api)
         template_path = Path(settings.template_file)
         if not template_path.is_absolute():
-            template_path = config_file.parent.parent / template_path if config_file.parent.name == "examples" else config_file.parent / template_path
+            template_path = (
+                config_file.parent.parent / template_path
+                if config_file.parent.name == "examples"
+                else config_file.parent / template_path
+            )
         template_renderer = TemplateRenderer()
         template = template_renderer.render_file(
             template_path,
@@ -192,7 +225,9 @@ class SandboxManager:
             api_client=api_client,
         )
 
-    async def ensure(self, key: SessionKey, *, env: Mapping[str, str] | None = None) -> SessionHandle:
+    async def ensure(
+        self, key: SessionKey, *, env: Mapping[str, str] | None = None
+    ) -> SessionHandle:
         self._check_open()
         async with self._session_lease(key) as token:
             stored = await self.repository.get(key)
@@ -201,13 +236,22 @@ class SandboxManager:
                 if stored.record.state is SessionState.READY:
                     return self._handle(key, stored.record)
                 if stored.record.state is SessionState.SUSPENDED:
-                    if stored.record.expires_at is not None and utc_now() >= stored.record.expires_at:
+                    if (
+                        stored.record.expires_at is not None
+                        and utc_now() >= stored.record.expires_at
+                    ):
                         stored = await self._expire_locked(token, key, stored)
                         return await self._create_locked(token, key, env, previous=stored)
                     return await self._resume_locked(token, key, stored)
                 if stored.record.state is SessionState.CREATING:
-                    if stored.record.creation_env_fingerprint and env is None and stored.record.sandbox_ref is None:
-                        raise ConfigurationError("resuming an interrupted initial create requires the original env map")
+                    if (
+                        stored.record.creation_env_fingerprint
+                        and env is None
+                        and stored.record.sandbox_ref is None
+                    ):
+                        raise ConfigurationError(
+                            "resuming an interrupted initial create requires the original env map"
+                        )
                     return await self._continue_creation_locked(token, key, stored, env)
                 if stored.record.state is SessionState.RESUMING and stored.record.sandbox_ref:
                     await self.backend.resume(stored.record.sandbox_ref)
@@ -216,7 +260,9 @@ class SandboxManager:
                     return await self._save_ready(token, key, stored, ready)
                 if stored.record.state in {SessionState.TERMINATED, SessionState.LOST}:
                     return await self._create_locked(token, key, env, previous=stored)
-                raise ResourceOwnershipError(f"session is in unrecoverable operation state {stored.record.state.value!r}")
+                raise ResourceOwnershipError(
+                    f"session is in unrecoverable operation state {stored.record.state.value!r}"
+                )
             return await self._create_locked(token, key, env)
 
     async def get(self, key: SessionKey) -> SessionHandle | None:
@@ -246,21 +292,30 @@ class SandboxManager:
             if record.state is SessionState.SUSPENDED:
                 return self._handle(key, record)
             if record.state is not SessionState.READY:
-                raise ResourceOwnershipError(f"session cannot suspend from state {record.state.value!r}")
+                raise ResourceOwnershipError(
+                    f"session cannot suspend from state {record.state.value!r}"
+                )
             if record.sandbox_ref is None:
                 raise ResourceOwnershipError("session has no owned Sandbox reference")
             endpoint = await self.backend.runtime_endpoint(record.sandbox_ref)
             active_count = await self._set_tracker_gate(endpoint, False)
             intent_saved = False
-            if active_count != 0 or record.active_commands or record.active_file_operations or not record.command_state_known:
+            if (
+                active_count != 0
+                or record.active_commands
+                or record.active_file_operations
+                or not record.command_state_known
+            ):
                 await self._set_tracker_gate(endpoint, True)
                 raise SandboxBusyError("session has active or unconfirmed command/file work")
-            intent = record.model_copy(update={
-                "state": SessionState.SUSPENDING,
-                "desired_state": DesiredSandboxState.SUSPENDED,
-                "operation_id": record.operation_id or uuid.uuid4().hex,
-                "operation_phase": "suspend-intent",
-            })
+            intent = record.model_copy(
+                update={
+                    "state": SessionState.SUSPENDING,
+                    "desired_state": DesiredSandboxState.SUSPENDED,
+                    "operation_id": record.operation_id or uuid.uuid4().hex,
+                    "operation_phase": "suspend-intent",
+                }
+            )
             try:
                 stored = await self.repository.compare_and_swap(
                     token, intent, expected_resource_version=stored.resource_version
@@ -274,16 +329,20 @@ class SandboxManager:
                 now = utc_now()
                 expires_at = now + timedelta(seconds=self.config.lifecycle.retention_seconds)
                 await self.backend.set_expiration(record.sandbox_ref, expires_at)
-                finished = stored.record.model_copy(update={
-                    "state": SessionState.SUSPENDED,
-                    "suspended_at": now,
-                    "expires_at": expires_at,
-                    "operation_phase": "suspended",
-                })
+                finished = stored.record.model_copy(
+                    update={
+                        "state": SessionState.SUSPENDED,
+                        "suspended_at": now,
+                        "expires_at": expires_at,
+                        "operation_phase": "suspended",
+                    }
+                )
                 saved = await self.repository.compare_and_swap(
                     token, finished, expected_resource_version=stored.resource_version
                 )
-                await self.backend.patch_annotations(record.sandbox_ref, _session_annotations(saved.record, 0))
+                await self.backend.patch_annotations(
+                    record.sandbox_ref, _session_annotations(saved.record, 0)
+                )
                 return self._handle(key, saved.record)
             except Exception:
                 if not intent_saved:
@@ -297,7 +356,9 @@ class SandboxManager:
             stored = await self._current_record(key, generation)
             return await self._resume_locked(token, key, stored)
 
-    async def terminate(self, session: SessionKey | SessionHandle, *, reason: str = "explicit") -> SessionHandle:
+    async def terminate(
+        self, session: SessionKey | SessionHandle, *, reason: str = "explicit"
+    ) -> SessionHandle:
         self._check_open()
         key, generation = _session_args(session)
         async with self._session_lease(key) as token:
@@ -305,34 +366,41 @@ class SandboxManager:
             record = stored.record
             if record.sandbox_ref is None:
                 return self._handle(key, record)
-            intent = record.model_copy(update={
-                "state": SessionState.TERMINATING,
-                "desired_state": None,
-                "operation_id": record.operation_id or uuid.uuid4().hex,
-                "operation_phase": f"terminate-intent:{reason}",
-            })
-            stored = await self.repository.compare_and_swap(token, intent, expected_resource_version=stored.resource_version)
+            intent = record.model_copy(
+                update={
+                    "state": SessionState.TERMINATING,
+                    "desired_state": None,
+                    "operation_id": record.operation_id or uuid.uuid4().hex,
+                    "operation_phase": f"terminate-intent:{reason}",
+                }
+            )
+            stored = await self.repository.compare_and_swap(
+                token, intent, expected_resource_version=stored.resource_version
+            )
             await self.backend.delete(record.sandbox_ref)
-            await self.backend.wait_deleted(record.sandbox_ref, timeout_seconds=self.config.lifecycle.reconcile_interval_seconds * 2)
-            terminated = stored.record.model_copy(update={
-                "state": SessionState.TERMINATED,
-                "operation_phase": "terminated",
-                "active_commands": (),
-                "pending_events": _append_workspace_event(
-                    stored.record, EventType.WORKSPACE_CLEARED, reason, utc_now()
-                ),
-            })
-            saved = await self.repository.compare_and_swap(token, terminated, expected_resource_version=stored.resource_version)
+            await self.backend.wait_deleted(
+                record.sandbox_ref,
+                timeout_seconds=self.config.lifecycle.reconcile_interval_seconds * 2,
+            )
+            terminated = stored.record.model_copy(
+                update={
+                    "state": SessionState.TERMINATED,
+                    "operation_phase": "terminated",
+                    "active_commands": (),
+                    "pending_events": _append_workspace_event(
+                        stored.record, EventType.WORKSPACE_CLEARED, reason, utc_now()
+                    ),
+                }
+            )
+            saved = await self.repository.compare_and_swap(
+                token, terminated, expected_resource_version=stored.resource_version
+            )
             return self._handle(key, saved.record)
 
     async def list_sessions(self, state: SessionState | None = None) -> tuple[SessionRecord, ...]:
         self._check_open()
         records = await self.repository.list_records()
-        return tuple(
-            item.record
-            for item in records
-            if state is None or item.record.state is state
-        )
+        return tuple(item.record for item in records if state is None or item.record.state is state)
 
     async def close(self) -> None:
         if self._closed:
@@ -344,7 +412,7 @@ class SandboxManager:
         if self._api_client is not None:
             await self._api_client.close()
 
-    async def __aenter__(self) -> "SandboxManager":
+    async def __aenter__(self) -> SandboxManager:
         self._check_open()
         return self
 
@@ -380,7 +448,9 @@ class SandboxManager:
                 token, record, expected_resource_version=previous.resource_version
             )
         name = f"session-{key.stable_hash()[:10]}-g{generation}"
-        return await self._continue_creation_locked(token, key, stored, env, manifest=manifest, name=name)
+        return await self._continue_creation_locked(
+            token, key, stored, env, manifest=manifest, name=name
+        )
 
     async def _continue_creation_locked(
         self,
@@ -396,23 +466,32 @@ class SandboxManager:
         if manifest is None:
             manifest, digest = self._render_manifest(env)
             if record.template_digest != digest:
-                raise ConfigurationError("template changed during interrupted create; explicit recovery is required")
+                raise ConfigurationError(
+                    "template changed during interrupted create; explicit recovery is required"
+                )
         generation = record.generation
         name = name or f"session-{key.stable_hash()[:10]}-g{generation}"
         labels = manifest.setdefault("metadata", {}).setdefault("labels", {})
-        labels.update({
-            "session-sandbox.example.com/managed": "true",
-            "session-sandbox.example.com/session-key-hash": key.stable_hash()[:63],
-            "session-sandbox.example.com/generation": str(generation),
-        })
-        manifest.setdefault("metadata", {}).setdefault("annotations", {}).update({
-            "session-sandbox.example.com/tenant-id": key.tenant_id,
-            "session-sandbox.example.com/session-id": key.session_id,
-        })
+        labels.update(
+            {
+                "session-sandbox.example.com/managed": "true",
+                "session-sandbox.example.com/session-key-hash": key.stable_hash()[:63],
+                "session-sandbox.example.com/generation": str(generation),
+            }
+        )
+        manifest.setdefault("metadata", {}).setdefault("annotations", {}).update(
+            {
+                "session-sandbox.example.com/tenant-id": key.tenant_id,
+                "session-sandbox.example.com/session-id": key.session_id,
+            }
+        )
         pod_template = manifest.setdefault("spec", {}).setdefault("podTemplate", {})
         pod_labels = pod_template.setdefault("metadata", {}).setdefault("labels", {})
         pod_labels.update(sandbox_pod_labels(key, generation))
-        policies = [copy.deepcopy(dict(policy)) for policy in self._policy_factory(key, generation, manifest)]
+        policies = [
+            copy.deepcopy(dict(policy))
+            for policy in self._policy_factory(key, generation, manifest)
+        ]
         for policy in policies:
             policy_labels = policy.setdefault("metadata", {}).setdefault("labels", {})
             policy_labels.update(labels)
@@ -427,16 +506,22 @@ class SandboxManager:
             workspace_refs = (
                 await self._pvc_manager.list_owned(ref) if self._pvc_manager is not None else ()
             )
-            creating = record.model_copy(update={
-                "sandbox_ref": ref,
-                "workspace_pvc_refs": workspace_refs,
-                "operation_phase": "sandbox-running",
-            })
-            stored = await self.repository.compare_and_swap(token, creating, expected_resource_version=stored.resource_version)
+            creating = record.model_copy(
+                update={
+                    "sandbox_ref": ref,
+                    "workspace_pvc_refs": workspace_refs,
+                    "operation_phase": "sandbox-running",
+                }
+            )
+            stored = await self.repository.compare_and_swap(
+                token, creating, expected_resource_version=stored.resource_version
+            )
         ready = await self.backend.wait_ready(ref)
         return await self._save_ready(token, key, stored, ready)
 
-    async def _resume_locked(self, token: LeaseToken, key: SessionKey, stored: StoredSession) -> SessionHandle:
+    async def _resume_locked(
+        self, token: LeaseToken, key: SessionKey, stored: StoredSession
+    ) -> SessionHandle:
         record = stored.record
         if record.state is not SessionState.SUSPENDED or record.sandbox_ref is None:
             if record.state is SessionState.READY:
@@ -444,14 +529,24 @@ class SandboxManager:
             raise ResourceOwnershipError(f"session cannot resume from state {record.state.value!r}")
         if record.expires_at is not None and utc_now() >= record.expires_at:
             raise SessionExpiredError("session generation has passed its retention deadline")
-        intent = record.model_copy(update={"state": SessionState.RESUMING, "desired_state": DesiredSandboxState.RUNNING, "operation_phase": "resume-intent"})
-        stored = await self.repository.compare_and_swap(token, intent, expected_resource_version=stored.resource_version)
+        intent = record.model_copy(
+            update={
+                "state": SessionState.RESUMING,
+                "desired_state": DesiredSandboxState.RUNNING,
+                "operation_phase": "resume-intent",
+            }
+        )
+        stored = await self.repository.compare_and_swap(
+            token, intent, expected_resource_version=stored.resource_version
+        )
         await self.backend.resume(record.sandbox_ref)
         ready = await self.backend.wait_ready(record.sandbox_ref)
         await self._open_tracker_gate(record.sandbox_ref)
         return await self._save_ready(token, key, stored, ready)
 
-    async def _expire_locked(self, token: LeaseToken, key: SessionKey, stored: StoredSession) -> StoredSession:
+    async def _expire_locked(
+        self, token: LeaseToken, key: SessionKey, stored: StoredSession
+    ) -> StoredSession:
         record = stored.record
         if record.sandbox_ref is not None:
             snapshot = None
@@ -461,7 +556,9 @@ class SandboxManager:
                 if "no longer exists" not in str(exc):
                     raise
             deletion_timestamp = (
-                snapshot.get("metadata", {}).get("deletionTimestamp") if snapshot is not None else None
+                snapshot.get("metadata", {}).get("deletionTimestamp")
+                if snapshot is not None
+                else None
             )
             if snapshot is not None and not deletion_timestamp:
                 try:
@@ -476,22 +573,28 @@ class SandboxManager:
                 timeout_seconds=self.config.lifecycle.reconcile_interval_seconds * 2,
             )
             if self._pvc_manager is not None:
-                refs = record.workspace_pvc_refs or await self._pvc_manager.list_owned(record.sandbox_ref)
+                refs = record.workspace_pvc_refs or await self._pvc_manager.list_owned(
+                    record.sandbox_ref
+                )
                 for pvc_ref in refs:
-                    await self._pvc_manager.delete_owned(pvc_ref, sandbox_uid=record.sandbox_ref.uid)
+                    await self._pvc_manager.delete_owned(
+                        pvc_ref, sandbox_uid=record.sandbox_ref.uid
+                    )
         current = await self.repository.get(key)
         if current is None:
             raise ResourceOwnershipError("session disappeared during expiry cleanup")
-        terminated = current.record.model_copy(update={
-            "state": SessionState.TERMINATED,
-            "desired_state": None,
-            "operation_phase": "expired-cleanup-complete",
-            "active_commands": (),
-            "active_file_operations": 0,
-            "pending_events": _append_workspace_event(
-                current.record, EventType.WORKSPACE_CLEARED, "retention-expired", utc_now()
-            ),
-        })
+        terminated = current.record.model_copy(
+            update={
+                "state": SessionState.TERMINATED,
+                "desired_state": None,
+                "operation_phase": "expired-cleanup-complete",
+                "active_commands": (),
+                "active_file_operations": 0,
+                "pending_events": _append_workspace_event(
+                    current.record, EventType.WORKSPACE_CLEARED, "retention-expired", utc_now()
+                ),
+            }
+        )
         return await self.repository.compare_and_swap(
             token, terminated, expected_resource_version=current.resource_version
         )
@@ -531,9 +634,11 @@ class SandboxManager:
                                 or isinstance(active_count, bool)
                                 or active_count < 0
                             ):
-                                raise ResourceOwnershipError("tracker returned an invalid active command count")
+                                raise ResourceOwnershipError(
+                                    "tracker returned an invalid active command count"
+                                )
                             return active_count
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            except (TimeoutError, aiohttp.ClientError, OSError) as exc:
                 last_error = exc
             remaining = deadline - loop.time()
             if remaining > 0:
@@ -543,15 +648,21 @@ class SandboxManager:
             raise last_error
         raise TimeoutError("tracker gate update exceeded its 30-second deadline")
 
-    async def _save_ready(self, token: LeaseToken, key: SessionKey, stored: StoredSession, sandbox: Mapping[str, Any]) -> SessionHandle:
-        ready_record = stored.record.model_copy(update={
-            "state": SessionState.READY,
-            "ready_at": utc_now(),
-            "runtime_instance_id": _pod_uid(sandbox) or stored.record.runtime_instance_id,
-            "desired_state": DesiredSandboxState.RUNNING,
-            "operation_phase": "ready",
-        })
-        saved = await self.repository.compare_and_swap(token, ready_record, expected_resource_version=stored.resource_version)
+    async def _save_ready(
+        self, token: LeaseToken, key: SessionKey, stored: StoredSession, sandbox: Mapping[str, Any]
+    ) -> SessionHandle:
+        ready_record = stored.record.model_copy(
+            update={
+                "state": SessionState.READY,
+                "ready_at": utc_now(),
+                "runtime_instance_id": _pod_uid(sandbox) or stored.record.runtime_instance_id,
+                "desired_state": DesiredSandboxState.RUNNING,
+                "operation_phase": "ready",
+            }
+        )
+        saved = await self.repository.compare_and_swap(
+            token, ready_record, expected_resource_version=stored.resource_version
+        )
         return self._handle(key, saved.record)
 
     async def _current_record(self, key: SessionKey, generation: int | None) -> StoredSession:
@@ -565,7 +676,9 @@ class SandboxManager:
     def _render_manifest(self, env: Mapping[str, str] | None) -> tuple[dict[str, Any], str]:
         if self._template is None:
             template_path = Path(self.config.template_file)
-            rendered = self._renderer.render_file(template_path, parameters=_template_parameters(self.config))
+            rendered = self._renderer.render_file(
+                template_path, parameters=_template_parameters(self.config)
+            )
             manifest, digest = rendered.manifest, rendered.digest
         else:
             rendered = self._renderer.render(
@@ -576,14 +689,29 @@ class SandboxManager:
             )
             manifest, digest = rendered.manifest, rendered.digest
         pod_spec = manifest["spec"]["podTemplate"]["spec"]
-        containers = [container for container in pod_spec["containers"] if container.get("name") == self.config.runtime.container_name]
+        containers = [
+            container
+            for container in pod_spec["containers"]
+            if container.get("name") == self.config.runtime.container_name
+        ]
         if len(containers) != 1:
-            raise ResourceOwnershipError(f"template must contain one runtime container {self.config.runtime.container_name!r}")
+            raise ResourceOwnershipError(
+                f"template must contain one runtime container "
+                f"{self.config.runtime.container_name!r}"
+            )
         runtime_limits = {
-            "SESSION_SANDBOX_COMMAND_OUTPUT_LIMIT_BYTES": str(self.config.lifecycle.command_output_limit_bytes),
-            "SESSION_SANDBOX_SESSION_OUTPUT_LIMIT_BYTES": str(self.config.lifecycle.session_output_limit_bytes),
-            "SESSION_SANDBOX_BUFFERED_RESPONSE_LIMIT_BYTES": str(self.config.lifecycle.buffered_response_limit_bytes),
-            "SESSION_SANDBOX_OUTPUT_RETENTION_SECONDS": str(self.config.lifecycle.retention_seconds),
+            "SESSION_SANDBOX_COMMAND_OUTPUT_LIMIT_BYTES": str(
+                self.config.lifecycle.command_output_limit_bytes
+            ),
+            "SESSION_SANDBOX_SESSION_OUTPUT_LIMIT_BYTES": str(
+                self.config.lifecycle.session_output_limit_bytes
+            ),
+            "SESSION_SANDBOX_BUFFERED_RESPONSE_LIMIT_BYTES": str(
+                self.config.lifecycle.buffered_response_limit_bytes
+            ),
+            "SESSION_SANDBOX_OUTPUT_RETENTION_SECONDS": str(
+                self.config.lifecycle.retention_seconds
+            ),
         }
         containers[0]["env"] = [
             *merge_template_environment(containers[0].get("env"), env),
@@ -603,36 +731,49 @@ class SandboxManager:
             return None
         key = self.config.environment_fingerprint_key
         if key is None:
-            raise ConfigurationError("environment_fingerprint_key is required when ensure receives env")
+            raise ConfigurationError(
+                "environment_fingerprint_key is required when ensure receives env"
+            )
         return creation_environment_fingerprint(env, key.get_secret_value().encode("utf-8"))
 
-    def _check_creation_environment(self, record: SessionRecord, env: Mapping[str, str] | None) -> None:
+    def _check_creation_environment(
+        self, record: SessionRecord, env: Mapping[str, str] | None
+    ) -> None:
         if env is None:
             return
         key = self.config.environment_fingerprint_key
         if key is None:
-            raise ConfigurationError("environment_fingerprint_key is required when ensure receives env")
+            raise ConfigurationError(
+                "environment_fingerprint_key is required when ensure receives env"
+            )
         ensure_same_creation_environment(
             record.creation_env_fingerprint,
             env,
             key.get_secret_value().encode("utf-8"),
         )
 
-    async def _before_command_submit(self, key: SessionKey, generation: int, command_id: str) -> None:
+    async def _before_command_submit(
+        self, key: SessionKey, generation: int, command_id: str
+    ) -> None:
         handle = await self.ensure(key)
         if handle.generation != generation:
             raise StaleGenerationError("session handle refers to an older generation")
         if handle.record.runtime_instance_id is None:
-            raise ResourceOwnershipError("session runtime identity is not ready for command admission")
+            raise ResourceOwnershipError(
+                "session runtime identity is not ready for command admission"
+            )
         async with self._session_lease(key) as token:
             stored = await self._current_record(key, generation)
             if stored.record.state is not SessionState.READY:
                 raise ResourceOwnershipError("session is not ready for command admission")
+            runtime_instance_id = stored.record.runtime_instance_id
+            if runtime_instance_id is None:
+                raise ResourceOwnershipError("ready session has no runtime instance id")
             await self.repository.reserve_command(
                 token,
                 generation=generation,
                 command_id=command_id,
-                runtime_instance_id=stored.record.runtime_instance_id,
+                runtime_instance_id=runtime_instance_id,
             )
 
     async def _observe_command(
@@ -643,29 +784,44 @@ class SandboxManager:
             await self._save_command_observation(token, stored, command_id, observation)
 
     async def _save_command_observation(
-        self, token: LeaseToken, stored: StoredSession, command_id: str, observation: Mapping[str, object]
+        self,
+        token: LeaseToken,
+        stored: StoredSession,
+        command_id: str,
+        observation: Mapping[str, object],
     ) -> StoredSession:
         record = stored.record
-        command = next((item for item in record.active_commands if item.command_id == command_id), None)
+        command = next(
+            (item for item in record.active_commands if item.command_id == command_id), None
+        )
         if command is None:
             return stored
         raw_state = observation.get("state")
         state = (
-            CommandState.FINISHED if raw_state == "finished"
-            else CommandState.UNKNOWN if raw_state == "unknown"
+            CommandState.FINISHED
+            if raw_state == "finished"
+            else CommandState.UNKNOWN
+            if raw_state == "unknown"
             else CommandState.RUNNING
         )
         started_at = _parse_timestamp(observation.get("started_at")) or command.started_at
         finished_at = _parse_timestamp(observation.get("finished_at"))
-        updated_command = command.model_copy(update={
-            "state": state,
-            "started_at": started_at,
-            "finished_at": finished_at if state is CommandState.FINISHED else None,
-            "exit_code": observation.get("exit_code") if isinstance(observation.get("exit_code"), int) else None,
-            "output_complete": bool(observation.get("output_complete", command.output_complete)),
-        })
+        updated_command = command.model_copy(
+            update={
+                "state": state,
+                "started_at": started_at,
+                "finished_at": finished_at if state is CommandState.FINISHED else None,
+                "exit_code": observation.get("exit_code")
+                if isinstance(observation.get("exit_code"), int)
+                else None,
+                "output_complete": bool(
+                    observation.get("output_complete", command.output_complete)
+                ),
+            }
+        )
         commands = tuple(
-            updated_command if item.command_id == command_id else item for item in record.active_commands
+            updated_command if item.command_id == command_id else item
+            for item in record.active_commands
         )
         changes: dict[str, object] = {
             "active_commands": commands,
@@ -674,7 +830,9 @@ class SandboxManager:
         if started_at is not None:
             changes["last_command_started_at"] = started_at
         if state is CommandState.FINISHED:
-            changes["active_commands"] = tuple(item for item in commands if item.command_id != command_id)
+            changes["active_commands"] = tuple(
+                item for item in commands if item.command_id != command_id
+            )
             changes["last_command_finished_at"] = finished_at or utc_now()
             if not changes["active_commands"]:
                 changes["idle_since"] = changes["last_command_finished_at"]
@@ -748,7 +906,10 @@ class SandboxManager:
 def _template_parameters(config: ManagerConfig) -> dict[str, Any]:
     return {
         "runtime": config.runtime.model_dump(),
-        "workspace": {"storage_class": config.workspace_storage_class, "storage": config.workspace_storage},
+        "workspace": {
+            "storage_class": config.workspace_storage_class,
+            "storage": config.workspace_storage,
+        },
     }
 
 
@@ -800,7 +961,9 @@ def _session_annotations(record: SessionRecord, active_count: int | None) -> dic
     return {f"session-sandbox.example.com/{key}": value for key, value in values.items()}
 
 
-def _append_workspace_event(record: SessionRecord, event_type: EventType, reason: str, now: datetime):
+def _append_workspace_event(
+    record: SessionRecord, event_type: EventType, reason: str, now: datetime
+):
     event_id = f"{record.key_hash}:{record.generation}:workspace:{event_type.value}"
     if any(event.event_id == event_id for event in record.pending_events):
         return record.pending_events

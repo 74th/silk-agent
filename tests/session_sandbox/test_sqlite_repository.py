@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -18,7 +18,9 @@ from gke_session_sandbox import (
 
 
 def record_for(key: SessionKey, **changes: object) -> SessionRecord:
-    return SessionRecord(key_hash=key.stable_hash(), generation=1, state=SessionState.CREATING, **changes)
+    return SessionRecord(
+        key_hash=key.stable_hash(), generation=1, state=SessionState.CREATING, **changes
+    )
 
 
 def test_sqlite_repository_can_fail_fast_when_persistent_mount_is_missing(tmp_path) -> None:
@@ -27,10 +29,12 @@ def test_sqlite_repository_can_fail_fast_when_persistent_mount_is_missing(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_sqlite_repository_survives_reopen_and_has_no_configmap_sized_record_limit(tmp_path) -> None:
+async def test_sqlite_repository_survives_reopen_and_has_no_configmap_sized_record_limit(
+    tmp_path,
+) -> None:
     db_path = tmp_path / "pvc" / "sessions.sqlite3"
     key = SessionKey(tenant_id="tenant", session_id="large-session")
-    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    now = datetime(2030, 1, 1, tzinfo=UTC)
     events = tuple(
         SessionEvent(
             event_id=f"event-{index}",
@@ -71,9 +75,13 @@ async def test_sqlite_repository_serializes_competing_writers_and_session_leases
     created = await repo_a.create(token, record_for(key))
     desired_a = created.record.model_copy(update={"operation_phase": "phase-a"})
     desired_b = created.record.model_copy(update={"operation_phase": "phase-b"})
-    await repo_a.compare_and_swap(token, desired_a, expected_resource_version=created.resource_version)
+    await repo_a.compare_and_swap(
+        token, desired_a, expected_resource_version=created.resource_version
+    )
     with pytest.raises(RepositoryConflictError, match="version changed"):
-        await repo_b.compare_and_swap(token, desired_b, expected_resource_version=created.resource_version)
+        await repo_b.compare_and_swap(
+            token, desired_b, expected_resource_version=created.resource_version
+        )
 
     await repo_a.close()
     await repo_b.close()

@@ -11,16 +11,21 @@ import signal
 import tempfile
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import grpc
 from aiohttp import web
 from google.protobuf.empty_pb2 import Empty
 
 from ._sandboxd_proto import process_pb2, process_pb2_grpc
-from .errors import CommandOutputLimitExceeded, OutputExpiredError, OutputStorageLimitExceeded, OutputWriteError
+from .errors import (
+    CommandOutputLimitExceeded,
+    OutputExpiredError,
+    OutputStorageLimitExceeded,
+    OutputWriteError,
+)
 
 _COMMAND_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _TRACKER_MARKER_ENV = "GKE_SESSION_SANDBOX_TRACKER_MARKER"
@@ -32,19 +37,31 @@ _SIGNALS = {
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class CommandJournal:
     """Atomic JSON journal persisted on the session workspace volume."""
 
-    def __init__(self, path: Path, *, command_output_limit_bytes: int = 64 * 1024 * 1024,
-                 session_output_limit_bytes: int = 256 * 1024 * 1024,
-                 buffered_response_limit_bytes: int = 8 * 1024 * 1024,
-                 output_retention_seconds: int = 604800,
-                 clock: Callable[[], datetime] | None = None):
-        if min(command_output_limit_bytes, session_output_limit_bytes,
-               buffered_response_limit_bytes, output_retention_seconds) <= 0:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        command_output_limit_bytes: int = 64 * 1024 * 1024,
+        session_output_limit_bytes: int = 256 * 1024 * 1024,
+        buffered_response_limit_bytes: int = 8 * 1024 * 1024,
+        output_retention_seconds: int = 604800,
+        clock: Callable[[], datetime] | None = None,
+    ):
+        if (
+            min(
+                command_output_limit_bytes,
+                session_output_limit_bytes,
+                buffered_response_limit_bytes,
+                output_retention_seconds,
+            )
+            <= 0
+        ):
             raise ValueError("output limits and retention must be positive")
         self.path = path
         self.output_dir = path.parent / "command-output"
@@ -52,13 +69,15 @@ class CommandJournal:
         self.session_output_limit_bytes = session_output_limit_bytes
         self.buffered_response_limit_bytes = buffered_response_limit_bytes
         self.output_retention_seconds = output_retention_seconds
-        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.lock = asyncio.Lock()
         self.accepting = True
         self.commands: dict[str, dict[str, Any]] = {}
         if path.exists():
             saved = json.loads(path.read_text())
-            if not isinstance(saved.get("commands"), dict) or not isinstance(saved.get("accepting"), bool):
+            if not isinstance(saved.get("commands"), dict) or not isinstance(
+                saved.get("accepting"), bool
+            ):
                 raise ValueError("command journal has an invalid shape")
             self.accepting = saved["accepting"]
             self.commands = saved["commands"]
@@ -68,7 +87,11 @@ class CommandJournal:
         fd, temp_path = tempfile.mkstemp(prefix="commands.", suffix=".tmp", dir=self.path.parent)
         try:
             with os.fdopen(fd, "w") as output:
-                json.dump({"accepting": self.accepting, "commands": self.commands}, output, separators=(",", ":"))
+                json.dump(
+                    {"accepting": self.accepting, "commands": self.commands},
+                    output,
+                    separators=(",", ":"),
+                )
                 output.flush()
                 os.fsync(output.fileno())
             os.chmod(temp_path, 0o600)
@@ -86,11 +109,21 @@ class CommandJournal:
         command_id = request.get("command_id")
         command = request.get("command")
         if not isinstance(command_id, str) or not _COMMAND_ID.fullmatch(command_id):
-            raise ValueError("command_id must contain 1-128 letters, digits, '.', '_' or '-' and start with a letter or digit")
-        if not isinstance(command, list) or not command or not all(isinstance(arg, str) for arg in command) or not command[0]:
+            raise ValueError(
+                "command_id must contain 1-128 letters, digits, '.', '_' or '-' and start with a "
+                "letter or digit"
+            )
+        if (
+            not isinstance(command, list)
+            or not command
+            or not all(isinstance(arg, str) for arg in command)
+            or not command[0]
+        ):
             raise ValueError("command must be a nonempty argv list")
         env = request.get("env", {})
-        if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
+        if not isinstance(env, dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in env.items()
+        ):
             raise ValueError("env must be a string map")
         if _TRACKER_MARKER_ENV in env:
             raise ValueError(f"env key {_TRACKER_MARKER_ENV} is reserved by the tracker")
@@ -99,11 +132,21 @@ class CommandJournal:
         pty = request.get("pty", False)
         cols, rows = request.get("pty_cols", 80), request.get("pty_rows", 24)
         check = request.get("check", False)
-        if not isinstance(cwd, str) or not isinstance(timeout, int) or isinstance(timeout, bool) or not 0 <= timeout <= 86400:
+        if (
+            not isinstance(cwd, str)
+            or not isinstance(timeout, int)
+            or isinstance(timeout, bool)
+            or not 0 <= timeout <= 86400
+        ):
             raise ValueError("invalid cwd or timeout_seconds")
         if not isinstance(pty, bool) or not isinstance(check, bool):
             raise ValueError("pty and check must be boolean")
-        if not isinstance(cols, int) or not 1 <= cols <= 65535 or not isinstance(rows, int) or not 1 <= rows <= 65535:
+        if (
+            not isinstance(cols, int)
+            or not 1 <= cols <= 65535
+            or not isinstance(rows, int)
+            or not 1 <= rows <= 65535
+        ):
             raise ValueError("PTY dimensions must be positive integers")
         normalized = {
             "command_id": command_id,
@@ -119,17 +162,26 @@ class CommandJournal:
         async with self.lock:
             previous = self.commands.get(command_id)
             if previous:
-                previous_request = {key: previous.get(key, default) for key, default in normalized.items()}
+                previous_request = {
+                    key: previous.get(key, default) for key, default in normalized.items()
+                }
                 if previous_request != normalized:
                     raise Conflict("command ID already belongs to a different request")
                 return previous.copy(), False
             if not self.accepting:
                 raise GateClosed("command admission gate is closed")
             record = {
-                **normalized, "state": "reserved", "reserved_at": _now(),
-                "stdout": "", "stderr": "", "stdout_bytes": 0, "stderr_bytes": 0,
-                "stdout_truncated": False, "stderr_truncated": False,
-                "output_complete": True, "output_expired": False,
+                **normalized,
+                "state": "reserved",
+                "reserved_at": _now(),
+                "stdout": "",
+                "stderr": "",
+                "stdout_bytes": 0,
+                "stderr_bytes": 0,
+                "stdout_truncated": False,
+                "stderr_truncated": False,
+                "output_complete": True,
+                "output_expired": False,
             }
             self.commands[command_id] = record
             try:
@@ -164,7 +216,8 @@ class CommandJournal:
             session_total = sum(
                 item.get("stdout_bytes", len(base64.b64decode(item.get("stdout", ""))))
                 + item.get("stderr_bytes", len(base64.b64decode(item.get("stderr", ""))))
-                for item in self.commands.values() if not item.get("output_expired")
+                for item in self.commands.values()
+                if not item.get("output_expired")
             )
             command_remaining = max(0, self.command_output_limit_bytes - command_total)
             session_remaining = max(0, self.session_output_limit_bytes - session_total)
@@ -173,13 +226,27 @@ class CommandJournal:
             if accepted_bytes < len(chunk):
                 missing = len(chunk) - accepted_bytes
                 if command_remaining <= session_remaining:
-                    self._mark_output_error(record, "command_output_limit", "command output limit exceeded",
-                                            missing, self.command_output_limit_bytes)
-                    limit_error = CommandOutputLimitExceeded(command_id, self.command_output_limit_bytes)
+                    self._mark_output_error(
+                        record,
+                        "command_output_limit",
+                        "command output limit exceeded",
+                        missing,
+                        self.command_output_limit_bytes,
+                    )
+                    limit_error = CommandOutputLimitExceeded(
+                        command_id, self.command_output_limit_bytes
+                    )
                 else:
-                    self._mark_output_error(record, "session_output_limit", "session output storage limit exceeded",
-                                            missing, self.session_output_limit_bytes)
-                    limit_error = OutputStorageLimitExceeded(command_id, self.session_output_limit_bytes)
+                    self._mark_output_error(
+                        record,
+                        "session_output_limit",
+                        "session output storage limit exceeded",
+                        missing,
+                        self.session_output_limit_bytes,
+                    )
+                    limit_error = OutputStorageLimitExceeded(
+                        command_id, self.session_output_limit_bytes
+                    )
             self.output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             output_path = self._output_path(command_id, key)
             prior_file_size = output_path.stat().st_size if output_path.exists() else 0
@@ -191,7 +258,9 @@ class CommandJournal:
                         output.flush()
                         os.fsync(output.fileno())
                 record[f"{key}_bytes"] = record.get(f"{key}_bytes", 0) + accepted_bytes
-                record[f"{key}_truncated"] = record[f"{key}_bytes"] > self.buffered_response_limit_bytes
+                record[f"{key}_truncated"] = (
+                    record[f"{key}_bytes"] > self.buffered_response_limit_bytes
+                )
                 self._persist()
             except OSError as exc:
                 self.commands[command_id] = old
@@ -200,7 +269,12 @@ class CommandJournal:
                         output.truncate(prior_file_size)
                 except OSError:
                     pass
-                self._mark_output_error(self.commands[command_id], "output_storage_error", "output storage write failed", len(chunk))
+                self._mark_output_error(
+                    self.commands[command_id],
+                    "output_storage_error",
+                    "output storage write failed",
+                    len(chunk),
+                )
                 raise OutputWriteError(command_id) from exc
             except Exception:
                 self.commands[command_id] = old
@@ -214,10 +288,16 @@ class CommandJournal:
                 raise limit_error
 
     @staticmethod
-    def _mark_output_error(record: dict[str, Any], code: str, message: str, missing: int, limit: int | None = None) -> None:
-        record.update(output_complete=False, output_error_code=code, output_error=message,
-                      output_missing_bytes=record.get("output_missing_bytes", 0) + missing,
-                      output_error_limit_bytes=limit)
+    def _mark_output_error(
+        record: dict[str, Any], code: str, message: str, missing: int, limit: int | None = None
+    ) -> None:
+        record.update(
+            output_complete=False,
+            output_error_code=code,
+            output_error=message,
+            output_missing_bytes=record.get("output_missing_bytes", 0) + missing,
+            output_error_limit_bytes=limit,
+        )
 
     def _output_path(self, command_id: str, stream: str) -> Path:
         if not _COMMAND_ID.fullmatch(command_id):
@@ -250,7 +330,9 @@ class CommandJournal:
                 self._remove_output_files(command_id)
             return record.copy()
 
-    async def read_output(self, command_id: str, stream: str, cursor: int, limit: int) -> dict[str, Any]:
+    async def read_output(
+        self, command_id: str, stream: str, cursor: int, limit: int
+    ) -> dict[str, Any]:
         if stream not in {"stdout", "stderr"} or cursor < 0 or not 1 <= limit <= 1024 * 1024:
             raise ValueError("invalid output stream, cursor, or limit")
         async with self.lock:
@@ -274,11 +356,17 @@ class CommandJournal:
                     output.seek(cursor)
                     data = output.read(min(limit, max(0, total - cursor)))
             else:
-                data = base64.b64decode(record.get(stream, ""))[cursor:cursor + limit]
+                data = base64.b64decode(record.get(stream, ""))[cursor : cursor + limit]
             next_cursor = cursor + len(data)
-            return {"command_id": command_id, "stream": stream, "data": base64.b64encode(data).decode("ascii"),
-                    "cursor": next_cursor, "total_bytes": total, "complete": next_cursor >= total,
-                    "output_complete": record.get("output_complete", True)}
+            return {
+                "command_id": command_id,
+                "stream": stream,
+                "data": base64.b64encode(data).decode("ascii"),
+                "cursor": next_cursor,
+                "total_bytes": total,
+                "complete": next_cursor >= total,
+                "output_complete": record.get("output_complete", True),
+            }
 
     async def read_buffered_output(self, command_id: str, stream: str) -> bytes:
         async with self.lock:
@@ -342,23 +430,32 @@ class CommandJournal:
                     continue
                 identity = record.get("identity")
                 if not identity:
-                    record.update(state="unknown", error="tracker restarted before process identity was recorded")
+                    record.update(
+                        state="unknown",
+                        error="tracker restarted before process identity was recorded",
+                    )
                     continue
                 try:
                     observation = await group_present(identity["pgid"])
-                    present, detail = observation if isinstance(observation, tuple) else (observation, "")
+                    present, detail = (
+                        observation if isinstance(observation, tuple) else (observation, "")
+                    )
                 except Exception:
                     present, detail = True, "process group inspection failed"
                 if present:
                     suffix = f": {detail}" if detail else ""
-                    record.update(state="unknown", error=f"process group may still be present after tracker restart{suffix}")
+                    record.update(
+                        state="unknown",
+                        error=f"process group may still be present after tracker restart{suffix}",
+                    )
                 else:
                     record.update(
                         state="finished",
                         finished_at=now,
                         exit_code=None,
                         stop_reason="tracker_restart",
-                        error="tracker restarted after process group ended; exit status is unknown and output may be incomplete",
+                        error="tracker restarted after process group ended; exit status is "
+                        "unknown and output may be incomplete",
                     )
             try:
                 self._persist()
@@ -396,20 +493,26 @@ class Tracker:
         self.tasks: dict[str, asyncio.Task] = {}
 
     async def start(self) -> None:
-        health = await self.stub.Execute(process_pb2.ExecuteRequest(config=process_pb2.ProcessConfig(command=["/bin/true"])), timeout=3)
+        health = await self.stub.Execute(
+            process_pb2.ExecuteRequest(config=process_pb2.ProcessConfig(command=["/bin/true"])),
+            timeout=3,
+        )
         if health.exit_code != 0:
             raise RuntimeError("sandboxd process API did not pass readiness command")
 
     async def health(self, _request: web.Request) -> web.Response:
         try:
             result = await self.stub.Execute(
-                process_pb2.ExecuteRequest(config=process_pb2.ProcessConfig(command=["/bin/true"])), timeout=2
+                process_pb2.ExecuteRequest(config=process_pb2.ProcessConfig(command=["/bin/true"])),
+                timeout=2,
             )
         except grpc.aio.AioRpcError as exc:
             raise web.HTTPServiceUnavailable(text="sandboxd unavailable") from exc
         if result.exit_code != 0:
             raise web.HTTPServiceUnavailable(text="sandboxd unavailable")
-        return web.json_response({"status": "ok", "tracker_generation": self.generation, "sandboxd": "connected"})
+        return web.json_response(
+            {"status": "ok", "tracker_generation": self.generation, "sandboxd": "connected"}
+        )
 
     async def gate(self, request: web.Request) -> web.Response:
         body = await request.json()
@@ -433,7 +536,9 @@ class Tracker:
         except OSError as exc:
             raise web.HTTPInternalServerError(text="could not persist command journal") from exc
         if created:
-            self.tasks[record["command_id"]] = asyncio.create_task(self.execute(record["command_id"]))
+            self.tasks[record["command_id"]] = asyncio.create_task(
+                self.execute(record["command_id"])
+            )
         return web.json_response(_public(record), status=202 if created else 200)
 
     async def get(self, request: web.Request) -> web.Response:
@@ -444,7 +549,9 @@ class Tracker:
         public = _public(record)
         if record.get("state") == "finished" and not record.get("output_expired"):
             for stream in ("stdout", "stderr"):
-                public[stream] = base64.b64encode(await self.journal.read_buffered_output(command_id, stream)).decode("ascii")
+                public[stream] = base64.b64encode(
+                    await self.journal.read_buffered_output(command_id, stream)
+                ).decode("ascii")
         return web.json_response(public)
 
     async def output(self, request: web.Request) -> web.Response:
@@ -509,7 +616,11 @@ class Tracker:
             if kind == "init":
                 pid = event.init.process_id
                 identity = await self._read_identity(pid, marker)
-                values: dict[str, Any] = {"state": "running", "process_id": pid, "started_at": _now()}
+                values: dict[str, Any] = {
+                    "state": "running",
+                    "process_id": pid,
+                    "started_at": _now(),
+                }
                 if identity:
                     values["identity"] = identity
                 else:
@@ -519,21 +630,36 @@ class Tracker:
                 if output_failure is None:
                     try:
                         await self.journal.append_output(command_id, "stdout", event.stdout)
-                    except (CommandOutputLimitExceeded, OutputStorageLimitExceeded, OutputWriteError, OSError) as exc:
+                    except (
+                        CommandOutputLimitExceeded,
+                        OutputStorageLimitExceeded,
+                        OutputWriteError,
+                        OSError,
+                    ) as exc:
                         output_failure = exc
                         await self._handle_output_failure(command_id, exc)
             elif kind == "stderr":
                 if output_failure is None:
                     try:
                         await self.journal.append_output(command_id, "stderr", event.stderr)
-                    except (CommandOutputLimitExceeded, OutputStorageLimitExceeded, OutputWriteError, OSError) as exc:
+                    except (
+                        CommandOutputLimitExceeded,
+                        OutputStorageLimitExceeded,
+                        OutputWriteError,
+                        OSError,
+                    ) as exc:
                         output_failure = exc
                         await self._handle_output_failure(command_id, exc)
             elif kind == "exit":
                 code = event.exit.exit_code
                 record = await self.journal.get(command_id)
-                values = {"state": "finished", "exit_code": code, "finished_at": _now(),
-                          "output_complete": output_failure is None and (record or {}).get("output_complete", True)}
+                values = {
+                    "state": "finished",
+                    "exit_code": code,
+                    "finished_at": _now(),
+                    "output_complete": output_failure is None
+                    and (record or {}).get("output_complete", True),
+                }
                 if output_failure is not None:
                     values["error"] = str(output_failure)
                 elif record and record.get("check") and code:
@@ -542,7 +668,9 @@ class Tracker:
                 return
         current = await self.journal.get(command_id)
         if current and current.get("state") not in {"finished", "unknown"}:
-            await self._mark_unknown(command_id, "sandboxd Start stream ended without an exit event")
+            await self._mark_unknown(
+                command_id, "sandboxd Start stream ended without an exit event"
+            )
 
     async def _handle_output_failure(self, command_id: str, error: Exception) -> None:
         record = await self.journal.get(command_id)
@@ -554,9 +682,13 @@ class Tracker:
             else:
                 code = "output_storage_error"
             try:
-                await self.journal.update(command_id, output_complete=False,
-                                          output_error_code=code, output_error=str(error),
-                                          output_error_limit_bytes=getattr(error, "limit_bytes", None))
+                await self.journal.update(
+                    command_id,
+                    output_complete=False,
+                    output_error_code=code,
+                    output_error=str(error),
+                    output_error_limit_bytes=getattr(error, "limit_bytes", None),
+                )
             except OSError:
                 pass
             try:
@@ -568,13 +700,24 @@ class Tracker:
         try:
             scan = (
                 "for f in /proc/[0-9]*/environ; do "
-                f"if tr '\\000' '\\n' < \"$f\" 2>/dev/null | grep -Fxq '{_TRACKER_MARKER_ENV}={marker}'; then "
-                "p=${f#/proc/}; p=${p%/environ}; printf '%s ' \"$p\"; cat \"/proc/$p/stat\"; fi; done"
+                f"if tr '\\000' '\\n' < \"$f\" 2>/dev/null | grep -Fxq "
+                f"'{_TRACKER_MARKER_ENV}={marker}'; then "
+                'p=${f#/proc/}; p=${p%/environ}; printf \'%s \' "$p"; cat "/proc/$p/stat"; fi; done'
             )
             stat = await self.stub.Execute(
-                process_pb2.ExecuteRequest(config=process_pb2.ProcessConfig(command=["/bin/sh", "-c", scan])), timeout=3
+                process_pb2.ExecuteRequest(
+                    config=process_pb2.ProcessConfig(command=["/bin/sh", "-c", scan])
+                ),
+                timeout=3,
             )
-            boot = await self.stub.Execute(process_pb2.ExecuteRequest(config=process_pb2.ProcessConfig(command=["cat", "/proc/sys/kernel/random/boot_id"])), timeout=2)
+            boot = await self.stub.Execute(
+                process_pb2.ExecuteRequest(
+                    config=process_pb2.ProcessConfig(
+                        command=["cat", "/proc/sys/kernel/random/boot_id"]
+                    )
+                ),
+                timeout=2,
+            )
             if stat.exit_code or boot.exit_code:
                 return None
             lines = stat.stdout.decode().splitlines()
@@ -600,11 +743,15 @@ class Tracker:
         # inspection shell was assigned the old PGID after PID reuse, its ps/awk
         # children would otherwise make the stale group appear to still exist.
         command = (
-            f"[ \"$$\" -ne {pgid} ] || exit 1; "
-            f"ps -eo pid=,pgid=,comm= | awk '$2 == {pgid} {{ print; found=1 }} END {{ exit !found }}'"
+            f'[ "$$" -ne {pgid} ] || exit 1; '
+            f"ps -eo pid=,pgid=,comm= | awk '$2 == {pgid} {{ print; found=1 }} END "
+            f"{{ exit !found }}'"
         )
         result = await self.stub.Execute(
-            process_pb2.ExecuteRequest(config=process_pb2.ProcessConfig(command=["/bin/sh", "-c", command])), timeout=3
+            process_pb2.ExecuteRequest(
+                config=process_pb2.ProcessConfig(command=["/bin/sh", "-c", command])
+            ),
+            timeout=3,
         )
         if result.exit_code == 0:
             return True, result.stdout.decode(errors="replace").strip()
@@ -613,7 +760,9 @@ class Tracker:
         raise RuntimeError(f"could not inspect process group {pgid}")
 
     async def _send_signal(self, pid: int, value: int) -> None:
-        await self.stub.SendSignal(process_pb2.SendSignalRequest(process_id=pid, signal=value), timeout=3)
+        await self.stub.SendSignal(
+            process_pb2.SendSignalRequest(process_id=pid, signal=cast(Any, value)), timeout=3
+        )
 
     async def stop(self, command_id: str, reason: str) -> None:
         record = await self.journal.get(command_id)
@@ -664,10 +813,21 @@ class Tracker:
         record = await self._running(request)
         body = await request.json()
         cols, rows = body.get("cols"), body.get("rows")
-        if (not isinstance(cols, int) or isinstance(cols, bool) or not isinstance(rows, int)
-                or isinstance(rows, bool) or cols <= 0 or rows <= 0 or cols > 65535 or rows > 65535):
+        if (
+            not isinstance(cols, int)
+            or isinstance(cols, bool)
+            or not isinstance(rows, int)
+            or isinstance(rows, bool)
+            or cols <= 0
+            or rows <= 0
+            or cols > 65535
+            or rows > 65535
+        ):
             raise web.HTTPBadRequest(text="resize requires positive cols and rows")
-        await self.stub.ResizeTTY(process_pb2.ResizeTTYRequest(process_id=record["process_id"], cols=cols, rows=rows), timeout=3)
+        await self.stub.ResizeTTY(
+            process_pb2.ResizeTTYRequest(process_id=record["process_id"], cols=cols, rows=rows),
+            timeout=3,
+        )
         raise web.HTTPNoContent()
 
     async def cancel(self, request: web.Request) -> web.Response:
@@ -692,7 +852,7 @@ class Tracker:
 async def _generation(path: Path) -> int:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
-        previous = int(path.read_text())
+        previous = int(path.read_text())  # noqa: ASYNC240 - a few bytes on the local disk
     except FileNotFoundError:
         previous = 0
     if previous < 0:
@@ -712,7 +872,7 @@ async def _generation(path: Path) -> int:
         finally:
             os.close(dir_fd)
     finally:
-        if os.path.exists(temporary):
+        if os.path.exists(temporary):  # noqa: ASYNC240 - cleanup of a local temp file
             os.unlink(temporary)
     return current
 
@@ -724,10 +884,18 @@ async def serve() -> None:
     stub = process_pb2_grpc.ProcessServiceStub(channel)
     journal = CommandJournal(
         state_dir / "commands.json",
-        command_output_limit_bytes=int(os.environ.get("SESSION_SANDBOX_COMMAND_OUTPUT_LIMIT_BYTES", 64 * 1024 * 1024)),
-        session_output_limit_bytes=int(os.environ.get("SESSION_SANDBOX_SESSION_OUTPUT_LIMIT_BYTES", 256 * 1024 * 1024)),
-        buffered_response_limit_bytes=int(os.environ.get("SESSION_SANDBOX_BUFFERED_RESPONSE_LIMIT_BYTES", 8 * 1024 * 1024)),
-        output_retention_seconds=int(os.environ.get("SESSION_SANDBOX_OUTPUT_RETENTION_SECONDS", 604800)),
+        command_output_limit_bytes=int(
+            os.environ.get("SESSION_SANDBOX_COMMAND_OUTPUT_LIMIT_BYTES", 64 * 1024 * 1024)
+        ),
+        session_output_limit_bytes=int(
+            os.environ.get("SESSION_SANDBOX_SESSION_OUTPUT_LIMIT_BYTES", 256 * 1024 * 1024)
+        ),
+        buffered_response_limit_bytes=int(
+            os.environ.get("SESSION_SANDBOX_BUFFERED_RESPONSE_LIMIT_BYTES", 8 * 1024 * 1024)
+        ),
+        output_retention_seconds=int(
+            os.environ.get("SESSION_SANDBOX_OUTPUT_RETENTION_SECONDS", 604800)
+        ),
     )
     tracker = Tracker(journal, stub, generation)
     await tracker.start()

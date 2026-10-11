@@ -28,7 +28,9 @@ class FakeApi:
         self.reviews += 1
         attr = body["spec"]["resourceAttributes"]
         denied = self.denied == (attr["namespace"], attr["resource"], attr["verb"])
-        return {"status": {"allowed": not denied, "reason": "missing RoleBinding" if denied else ""}}
+        return {
+            "status": {"allowed": not denied, "reason": "missing RoleBinding" if denied else ""}
+        }
 
 
 class MissingCapabilityError(Exception):
@@ -41,7 +43,10 @@ class MissingCapabilityError(Exception):
     [
         ("read_runtime_class", "RuntimeClass/gvisor: not found"),
         ("read_storage_class", "StorageClass/session-workspace-rwo: not found"),
-        ("get_cluster_custom_object", "CustomResourceDefinition/sandboxes.agents.x-k8s.io: not found"),
+        (
+            "get_cluster_custom_object",
+            "CustomResourceDefinition/sandboxes.agents.x-k8s.io: not found",
+        ),
     ],
 )
 @pytest.mark.asyncio
@@ -52,10 +57,18 @@ async def test_preflight_names_missing_cluster_capabilities(method, expected) ->
 
     api = MissingApi()
     setattr(api, method, api.missing)
-    apis = {"core_api": api, "node_api": api, "storage_api": api, "custom_api": api, "authorization_api": api}
+    apis = {
+        "core_api": api,
+        "node_api": api,
+        "storage_api": api,
+        "custom_api": api,
+        "authorization_api": api,
+    }
 
     with pytest.raises(ClusterCapabilityError, match=expected.replace("/", r"/")):
-        await validate_cluster_capabilities(ManagerConfig(runtime={"image": "example.invalid/sandbox:v1"}), **apis)
+        await validate_cluster_capabilities(
+            ManagerConfig(runtime={"image": "example.invalid/sandbox:v1"}), **apis
+        )
 
 
 @pytest.mark.asyncio
@@ -63,7 +76,11 @@ async def test_preflight_checks_apis_namespaces_runtime_storage_and_rbac() -> No
     api = FakeApi()
     config = ManagerConfig(
         runtime={"image": "example.invalid/sandbox:v1"},
-        network={"allowed_fqdns": [{"name": "api.example.com", "ports": [{"protocol": "TCP", "port": 443}]}]},
+        network={
+            "allowed_fqdns": [
+                {"name": "api.example.com", "ports": [{"protocol": "TCP", "port": 443}]}
+            ]
+        },
     )
 
     checks = await validate_cluster_capabilities(
@@ -79,8 +96,14 @@ async def test_preflight_checks_apis_namespaces_runtime_storage_and_rbac() -> No
 async def test_preflight_reports_missing_worker_permission_explicitly() -> None:
     api = FakeApi(denied=("session-sandboxes", "networkpolicies", "create"))
 
-    with pytest.raises(ClusterCapabilityError, match="RBAC create networking.k8s.io/networkpolicies"):
+    with pytest.raises(
+        ClusterCapabilityError, match="RBAC create networking.k8s.io/networkpolicies"
+    ):
         await validate_cluster_capabilities(
             ManagerConfig(runtime={"image": "example.invalid/sandbox:v1"}),
-            core_api=api, node_api=api, storage_api=api, custom_api=api, authorization_api=api,
+            core_api=api,
+            node_api=api,
+            storage_api=api,
+            custom_api=api,
+            authorization_api=api,
         )

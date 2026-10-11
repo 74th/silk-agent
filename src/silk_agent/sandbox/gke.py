@@ -220,6 +220,15 @@ class GkeSessionSandboxRuntime:
 
     # ------------------------------------------------------------ notices / skills
 
+    async def is_ready(self, conversation_key: str) -> bool:
+        """Read-only: does not start the sandbox nor move its idle clock."""
+        try:
+            handle = await self._manager.get(self._session_key(conversation_key))
+        except Exception:
+            log.exception("could not read the sandbox state of %s", conversation_key)
+            return True  # unknown: do not announce a start-up
+        return handle is not None and str(getattr(handle, "state", "")) == "ready"
+
     async def pop_notices(self, conversation_key: str) -> list[str]:
         """Notices from the library (e.g. workspace deleted). They stay pending until acked."""
         await self._ensure(conversation_key, fresh=True)

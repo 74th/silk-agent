@@ -262,3 +262,45 @@ async def test_heartbeat_three_over_three_minutes(clock, channel):
     await channel.wait_for(TurnStarted)
     await clock.advance(180)
     assert len(channel.of(Heartbeat)) == 3
+
+
+# ---------------------------------------------------------------- sandbox start-up
+
+
+async def _turn_with_sandbox(clock, channel, ready: bool):
+    gate = asyncio.Event()
+    order: list[str] = []
+
+    async def notices(key):
+        order.append("ensure")
+        await gate.wait()  # creating / resuming the sandbox
+        return []
+
+    async def is_ready(key):
+        return ready
+
+    registry = AgentSessionRegistry(
+        lambda key: FakeAgentEngine(clock, [Text("ok")]),
+        channel.send,
+        clock,
+        SessionSettings(),
+        notice_source=notices,
+        sandbox_ready=is_ready,
+    )
+    s = await registry.get_or_create("k")
+    await s.submit(UserMessage("k", "u", "hi"))
+    await channel.wait_for(TurnStarted)  # shown before the sandbox is ready
+    await asyncio.sleep(0.01)
+    assert order == ["ensure"] and not channel.of(TurnFinished)
+    gate.set()
+    await channel.wait_for(TurnFinished)
+    return [e.status for e in channel.of(StatusChanged)]
+
+
+async def test_turn_shows_sandbox_start_up_when_not_running(clock, channel):
+    statuses = await _turn_with_sandbox(clock, channel, ready=False)
+    assert statuses == ["preparing_sandbox", "thinking"]
+
+
+async def test_running_sandbox_shows_nothing_extra(clock, channel):
+    assert await _turn_with_sandbox(clock, channel, ready=True) == []

@@ -65,6 +65,7 @@ class ConversationOrchestrator:
         cancel_background: Callable[[str], Awaitable[int]] | None = None,
         notice_source: Callable[[str], Awaitable[list[str]]] | None = None,
         notice_ack: Callable[[str], Awaitable[None]] | None = None,
+        sandbox_ready: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self._registry = AgentSessionRegistry(
             engine_factory,
@@ -76,6 +77,7 @@ class ConversationOrchestrator:
             cancel_commands=cancel_commands,
             notice_source=notice_source,
             notice_ack=notice_ack,
+            sandbox_ready=sandbox_ready,
         )
         self._cancel_background = cancel_background
         self._channel = channel

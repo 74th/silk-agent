@@ -81,8 +81,10 @@ class AgentSession:
         cancel_commands: Callable[[], Awaitable[None]] | None = None,
         notice_source: Callable[[str], Awaitable[list[str]]] | None = None,
         notice_ack: Callable[[str], Awaitable[None]] | None = None,
+        sandbox_ready: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self.key = key
+        self._sandbox_ready = sandbox_ready
         self._notice_source = notice_source
         self._notice_ack = notice_ack
         self._engine_factory = engine_factory
@@ -274,13 +276,16 @@ class AgentSession:
         notices: list[str] = []
         if prior is not None and prior.status in ("interrupted_crash", "interrupted_shutdown"):
             notices.append(resume_notice(prior))
-        external_notices = await self._pending_notices()
-        notices.extend(external_notices)
         await self._save_state("running", turn_id, clear_commands=bool(notices))
+        # Show the turn at once: preparing the sandbox can take tens of seconds.
         await self._sink(TurnStarted(self.key, turn_id, self._clock.now()))
         heartbeat = asyncio.create_task(self._heartbeat(turn_id))
         terminal = False
         try:
+            external_notices = await self._prepare_sandbox(turn_id)
+            if external_notices:
+                notices.extend(external_notices)
+                await self._save_state("running", turn_id, clear_commands=True)
             request = TurnRequest(
                 self.key,
                 turn_id,
@@ -347,6 +352,22 @@ class AgentSession:
         if self._state == "idle" and self._engine is not None:
             engine, self._engine = self._engine, None
             await engine.close()
+
+    async def _prepare_sandbox(self, turn_id: str) -> list[str]:
+        """Start / resume the sandbox (via the notice source) and return its notices.
+        While a sandbox that is not running starts, the turn shows "preparing_sandbox"."""
+        preparing = False
+        if self._notice_source is not None and self._sandbox_ready is not None:
+            try:
+                preparing = not await self._sandbox_ready(self.key)
+            except Exception:
+                log.exception("could not check the sandbox of %s", self.key)
+        if preparing:
+            await self._sink(StatusChanged(self.key, turn_id, "preparing_sandbox"))
+        notices = await self._pending_notices()
+        if preparing:
+            await self._sink(StatusChanged(self.key, turn_id, "thinking"))
+        return notices
 
     async def _pending_notices(self) -> list[str]:
         if self._notice_source is None:
@@ -430,7 +451,9 @@ class AgentSessionRegistry:
         cancel_commands: Callable[[str], Awaitable[None]] | None = None,
         notice_source: Callable[[str], Awaitable[list[str]]] | None = None,
         notice_ack: Callable[[str], Awaitable[None]] | None = None,
+        sandbox_ready: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
+        self._sandbox_ready = sandbox_ready
         self._notice_source = notice_source
         self._notice_ack = notice_ack
         self._engine_factory = engine_factory
@@ -459,6 +482,7 @@ class AgentSessionRegistry:
                     cancel_commands=(lambda k=key: cancel(k)) if cancel else None,
                     notice_source=self._notice_source,
                     notice_ack=self._notice_ack,
+                    sandbox_ready=self._sandbox_ready,
                 )
                 self._sessions[key] = session
             return session

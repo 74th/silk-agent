@@ -3,24 +3,44 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
-from typing import Any, Mapping
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool, StrictInt, StrictStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 from .errors import TemplateValidationError
-
 
 _QUANTITY_RE = re.compile(
     r"^(?P<number>[+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)(?P<suffix>Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|K|M|G|T|P|E)?$"
 )
 _SUFFIX_FACTORS = {
-    "n": Decimal("1e-9"), "u": Decimal("1e-6"), "m": Decimal("1e-3"),
-    "k": Decimal(1000), "K": Decimal(1000), "M": Decimal(1000) ** 2,
-    "G": Decimal(1000) ** 3, "T": Decimal(1000) ** 4, "P": Decimal(1000) ** 5,
-    "E": Decimal(1000) ** 6, "Ki": Decimal(1024), "Mi": Decimal(1024) ** 2,
-    "Gi": Decimal(1024) ** 3, "Ti": Decimal(1024) ** 4,
-    "Pi": Decimal(1024) ** 5, "Ei": Decimal(1024) ** 6,
+    "n": Decimal("1e-9"),
+    "u": Decimal("1e-6"),
+    "m": Decimal("1e-3"),
+    "k": Decimal(1000),
+    "K": Decimal(1000),
+    "M": Decimal(1000) ** 2,
+    "G": Decimal(1000) ** 3,
+    "T": Decimal(1000) ** 4,
+    "P": Decimal(1000) ** 5,
+    "E": Decimal(1000) ** 6,
+    "Ki": Decimal(1024),
+    "Mi": Decimal(1024) ** 2,
+    "Gi": Decimal(1024) ** 3,
+    "Ti": Decimal(1024) ** 4,
+    "Pi": Decimal(1024) ** 5,
+    "Ei": Decimal(1024) ** 6,
 }
 
 RESERVED_MANIFEST_PATHS: frozenset[tuple[str, ...]] = frozenset(
@@ -58,12 +78,15 @@ def parse_quantity(value: str) -> Decimal:
 
 def reject_reserved_manifest_fields(value: Mapping[str, Any]) -> None:
     """Reject any configured manifest subtree that writes library-owned fields."""
+
     def visit(node: Mapping[str, Any], prefix: tuple[str, ...] = ()) -> None:
         for key, child in node.items():
             path = (*prefix, str(key))
             if path in RESERVED_MANIFEST_PATHS:
                 dotted = ".".join(path)
-                raise TemplateValidationError(f"template override targets reserved field {dotted!r}")
+                raise TemplateValidationError(
+                    f"template override targets reserved field {dotted!r}"
+                )
             if isinstance(child, Mapping):
                 visit(child, path)
 
@@ -99,12 +122,17 @@ class RuntimeSettings(StrictSettings):
         return value
 
     @model_validator(mode="after")
-    def listener_ports_are_distinct(self) -> "RuntimeSettings":
+    def listener_ports_are_distinct(self) -> RuntimeSettings:
         ports = (self.rest_port, self.tracker_port, self.grpc_port)
         if len(set(ports)) != len(ports):
             raise ValueError("runtime listener ports must be distinct")
-        for request_name, limit_name in (("cpu_request", "cpu_limit"), ("memory_request", "memory_limit")):
-            if parse_quantity(getattr(self, request_name)) > parse_quantity(getattr(self, limit_name)):
+        for request_name, limit_name in (
+            ("cpu_request", "cpu_limit"),
+            ("memory_request", "memory_limit"),
+        ):
+            if parse_quantity(getattr(self, request_name)) > parse_quantity(
+                getattr(self, limit_name)
+            ):
                 raise ValueError(f"{request_name} must not exceed {limit_name}")
         return self
 
@@ -118,11 +146,15 @@ class LifecycleSettings(StrictSettings):
     buffered_response_limit_bytes: StrictInt = Field(default=8 * 1024 * 1024, gt=0)
 
     @model_validator(mode="after")
-    def response_limit_does_not_exceed_storage_limits(self) -> "LifecycleSettings":
+    def response_limit_does_not_exceed_storage_limits(self) -> LifecycleSettings:
         if self.buffered_response_limit_bytes > self.command_output_limit_bytes:
-            raise ValueError("buffered_response_limit_bytes must not exceed command_output_limit_bytes")
+            raise ValueError(
+                "buffered_response_limit_bytes must not exceed command_output_limit_bytes"
+            )
         if self.command_output_limit_bytes > self.session_output_limit_bytes:
-            raise ValueError("command_output_limit_bytes must not exceed session_output_limit_bytes")
+            raise ValueError(
+                "command_output_limit_bytes must not exceed session_output_limit_bytes"
+            )
         return self
 
 
@@ -144,7 +176,7 @@ class AllowedFQDN(StrictSettings):
     ports: tuple[NetworkPort, ...] = Field(default_factory=lambda: (NetworkPort(),))
 
     @model_validator(mode="after")
-    def exactly_one_match(self) -> "AllowedFQDN":
+    def exactly_one_match(self) -> AllowedFQDN:
         if (self.name is None) == (self.pattern is None):
             raise ValueError("specify exactly one of name or pattern")
         fqdn = self.name or self.pattern or ""
@@ -162,7 +194,9 @@ class AllowedFQDN(StrictSettings):
 class NetworkSettings(StrictSettings):
     allowed_fqdns: tuple[AllowedFQDN, ...] = ()
     dns_namespace: StrictStr = "kube-system"
-    dns_pod_selector: dict[StrictStr, StrictStr] = Field(default_factory=lambda: {"k8s-app": "kube-dns"})
+    dns_pod_selector: dict[StrictStr, StrictStr] = Field(
+        default_factory=lambda: {"k8s-app": "kube-dns"}
+    )
 
     @field_validator("dns_namespace")
     @classmethod

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import asyncio
 import base64
 import json
 import socket
@@ -16,8 +15,9 @@ import uuid
 
 def _request(base: str, path: str, method: str = "GET", body=None):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(base + path, data=data, method=method,
-                                 headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        base + path, data=data, method=method, headers={"Content-Type": "application/json"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=4) as response:
             return response.status, response.read(65536).decode()
@@ -44,34 +44,62 @@ def tracker(base: str, recovered_id: str = "") -> None:
     recovered = "none"
     if recovered_id:
         record = _wait(base, recovered_id, "finished")
-        if record.get("stop_reason") != "tracker_restart" or "output may be incomplete" not in record.get("error", ""):
+        if record.get(
+            "stop_reason"
+        ) != "tracker_restart" or "output may be incomplete" not in record.get("error", ""):
             raise RuntimeError(f"interrupted process was not safely recovered: {record}")
         recovered = "tracker_restart"
     marker = "/workspace/.session-runtime/network-probe-marker"
-    req = {"command_id": "network-probe-check", "command": ["sh", "-c",
-        f"printf x >> {marker}; printf 'probe-out\\n'; printf 'probe-err\\n' >&2; exit 7"],
-        "env": {"TOKEN": "probe-secret"}, "check": True}
+    req = {
+        "command_id": "network-probe-check",
+        "command": [
+            "sh",
+            "-c",
+            f"printf x >> {marker}; printf 'probe-out\\n'; printf 'probe-err\\n' >&2; exit 7",
+        ],
+        "env": {"TOKEN": "probe-secret"},
+        "check": True,
+    }
     status, body = _request(base, "/v1/commands", "POST", req)
     if status not in (200, 202) or "probe-secret" in body:
         raise RuntimeError(f"tracker first reservation returned {status}: {body}")
     duplicate_status, _ = _request(base, "/v1/commands", "POST", req)
-    conflict_status, _ = _request(base, "/v1/commands", "POST", {"command_id": req["command_id"], "command": ["echo", "different"]})
+    conflict_status, _ = _request(
+        base,
+        "/v1/commands",
+        "POST",
+        {"command_id": req["command_id"], "command": ["echo", "different"]},
+    )
     if duplicate_status != 200 or conflict_status != 409:
         raise RuntimeError(f"duplicate/conflict statuses were {duplicate_status}/{conflict_status}")
     result = _wait(base, req["command_id"], "finished")
-    if (result.get("exit_code") != 7 or base64.b64decode(result.get("stdout", "")) != b"probe-out\n"
-            or base64.b64decode(result.get("stderr", "")) != b"probe-err\n"
-            or result.get("error") != "command exited with status 7"):
+    if (
+        result.get("exit_code") != 7
+        or base64.b64decode(result.get("stdout", "")) != b"probe-out\n"
+        or base64.b64decode(result.get("stderr", "")) != b"probe-err\n"
+        or result.get("error") != "command exited with status 7"
+    ):
         raise RuntimeError(f"tracker did not retain command result: {result}")
     with open(marker, "rb") as stream:
         if stream.read() != b"x":
             raise RuntimeError("duplicate command ran more than once")
 
     stdin_id = f"network-probe-stdin-{uuid.uuid4().hex}"
-    if _request(base, "/v1/commands", "POST", {"command_id": stdin_id, "command": ["cat"]})[0] != 202:
+    if (
+        _request(base, "/v1/commands", "POST", {"command_id": stdin_id, "command": ["cat"]})[0]
+        != 202
+    ):
         raise RuntimeError("stdin command did not start")
     _wait(base, stdin_id, "running")
-    if _request(base, f"/v1/commands/{stdin_id}/stdin", "POST", {"input": base64.b64encode(b"hello").decode()})[0] != 204:
+    if (
+        _request(
+            base,
+            f"/v1/commands/{stdin_id}/stdin",
+            "POST",
+            {"input": base64.b64encode(b"hello").decode()},
+        )[0]
+        != 204
+    ):
         raise RuntimeError("stdin input was rejected")
     if _request(base, f"/v1/commands/{stdin_id}/stdin", "POST", {"eof": True})[0] != 204:
         raise RuntimeError("stdin EOF was rejected")
@@ -79,7 +107,12 @@ def tracker(base: str, recovered_id: str = "") -> None:
         raise RuntimeError("stdin output was not retained")
 
     pty_id = f"network-probe-pty-{uuid.uuid4().hex}"
-    _request(base, "/v1/commands", "POST", {"command_id": pty_id, "command": ["sleep", "30"], "pty": True})
+    _request(
+        base,
+        "/v1/commands",
+        "POST",
+        {"command_id": pty_id, "command": ["sleep", "30"], "pty": True},
+    )
     _wait(base, pty_id, "running")
     if _request(base, f"/v1/commands/{pty_id}/resize", "POST", {"cols": 120, "rows": 40})[0] != 204:
         raise RuntimeError("PTY resize was rejected")
@@ -88,7 +121,12 @@ def tracker(base: str, recovered_id: str = "") -> None:
     _wait(base, pty_id, "finished")
 
     timeout_id = f"network-probe-timeout-{uuid.uuid4().hex}"
-    _request(base, "/v1/commands", "POST", {"command_id": timeout_id, "command": ["sleep", "60"], "timeout_seconds": 1})
+    _request(
+        base,
+        "/v1/commands",
+        "POST",
+        {"command_id": timeout_id, "command": ["sleep", "60"], "timeout_seconds": 1},
+    )
     if _wait(base, timeout_id, "finished").get("stop_reason") != "timeout":
         raise RuntimeError("timeout was not recorded")
 
@@ -101,10 +139,15 @@ def tracker(base: str, recovered_id: str = "") -> None:
         raise RuntimeError("cancel was not recorded")
 
     descendant_id = f"network-probe-descendant-{uuid.uuid4().hex}"
-    _request(base, "/v1/commands", "POST", {
-        "command_id": descendant_id,
-        "command": ["sh", "-c", "sleep 60 & exit 0"],
-    })
+    _request(
+        base,
+        "/v1/commands",
+        "POST",
+        {
+            "command_id": descendant_id,
+            "command": ["sh", "-c", "sleep 60 & exit 0"],
+        },
+    )
     descendant = _wait(base, descendant_id, "running")
     time.sleep(0.2)
     descendant = json.loads(_request(base, f"/v1/commands/{descendant_id}")[1])
@@ -121,14 +164,26 @@ def tracker(base: str, recovered_id: str = "") -> None:
     gate_status, gate_body = _request(base, "/v1/commands/gate", "PUT", {"accepting": False})
     if gate_status != 200 or json.loads(gate_body).get("active_commands", 0) < 1:
         raise RuntimeError(f"gate close failed: {gate_status} {gate_body}")
-    rejected_status, rejected_body = _request(base, "/v1/commands", "POST", {"command_id": "network-probe-after-gate", "command": ["true"]})
+    rejected_status, rejected_body = _request(
+        base,
+        "/v1/commands",
+        "POST",
+        {"command_id": "network-probe-after-gate", "command": ["true"]},
+    )
     if rejected_status != 423:
-        raise RuntimeError(f"closed command gate expected HTTP 423, got {rejected_status}: {rejected_body}")
+        raise RuntimeError(
+            f"closed command gate expected HTTP 423, got {rejected_status}: {rejected_body}"
+        )
     if _request(base, "/v1/commands", "POST", req)[0] != 200:
         raise RuntimeError("closed gate rejected an idempotent retry")
     if _request(base, "/v1/commands/gate", "PUT", {"accepting": True})[0] != 200:
         raise RuntimeError("gate reopen failed")
-    print(f"tracker-command-runtime-ok first={status} duplicate=200 conflict=409 exit=7 stdout-stderr=retained marker=once stdin-eof=ok pty-resize=ok signal=ok timeout=ok cancel=ok descendant=tracked-and-terminated gate=closed-and-reopened active={active_id} recovered={recovered}")
+    print(
+        f"tracker-command-runtime-ok first={status} duplicate=200 conflict=409 exit=7 "
+        f"stdout-stderr=retained marker=once stdin-eof=ok pty-resize=ok signal=ok timeout=ok "
+        f"cancel=ok descendant=tracked-and-terminated gate=closed-and-reopened active={active_id} "
+        f"recovered={recovered}"
+    )
 
 
 def main() -> None:
@@ -153,7 +208,9 @@ def main() -> None:
             print(f"tcp-ok host={args.target} port={args.port}")
         elif args.mode in {"http", "https"}:
             with urllib.request.urlopen(args.target, timeout=4) as response:
-                payload = response.read(4096).decode(errors="replace") if args.mode == "http" else ""
+                payload = (
+                    response.read(4096).decode(errors="replace") if args.mode == "http" else ""
+                )
                 print(f"{args.mode}-ok url={args.target} status={response.status} body={payload}")
         else:
             tracker(args.base_url, args.recovered_id)

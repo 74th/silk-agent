@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from gke_session_sandbox.tracker import CommandJournal, Conflict, GateClosed, Tracker, HTTPGateClosed
-from gke_session_sandbox import tracker as tracker_module
 from gke_session_sandbox import supervisor
-from gke_session_sandbox.errors import CommandOutputLimitExceeded, OutputExpiredError, OutputStorageLimitExceeded
+from gke_session_sandbox import tracker as tracker_module
+from gke_session_sandbox.errors import (
+    CommandOutputLimitExceeded,
+    OutputExpiredError,
+    OutputStorageLimitExceeded,
+)
+from gke_session_sandbox.tracker import (
+    CommandJournal,
+    Conflict,
+    GateClosed,
+    Tracker,
+)
 
 
 @pytest.mark.asyncio
@@ -41,7 +51,9 @@ async def test_gate_closed_uses_http_423(tmp_path):
     app = web.Application()
     app.router.add_post("/commands", tracker.create)
     async with TestClient(TestServer(app)) as client:
-        response = await client.post("/commands", json={"command_id": "blocked", "command": ["true"]})
+        response = await client.post(
+            "/commands", json={"command_id": "blocked", "command": ["true"]}
+        )
         assert response.status == 423
         assert "gate is closed" in await response.text()
 
@@ -89,6 +101,7 @@ async def test_tracker_stream_records_output_and_check_failure(tmp_path):
         async def Execute(self, request, timeout):
             class Response:
                 exit_code = 1
+
             return Response()
 
     tracker = Tracker(journal, Stub(), generation=1)
@@ -98,8 +111,18 @@ async def test_tracker_stream_records_output_and_check_failure(tmp_path):
     saved = await journal.get(record["command_id"])
     assert saved["state"] == "finished"
     assert saved["exit_code"] == 7
-    assert base64.b64decode((await journal.read_output(record["command_id"], "stdout", 0, 100))["data"]) == b"out\n"
-    assert base64.b64decode((await journal.read_output(record["command_id"], "stderr", 0, 100))["data"]) == b"err\n"
+    assert (
+        base64.b64decode(
+            (await journal.read_output(record["command_id"], "stdout", 0, 100))["data"]
+        )
+        == b"out\n"
+    )
+    assert (
+        base64.b64decode(
+            (await journal.read_output(record["command_id"], "stderr", 0, 100))["data"]
+        )
+        == b"err\n"
+    )
     assert saved["error"] == "command exited with status 7"
 
 
@@ -117,14 +140,20 @@ async def test_journal_persists_output_chunks_and_replays_by_cursor(tmp_path):
     assert record["stdout_truncated"] is True
     assert record["stdout_bytes"] == 10
     assert record["stdout"] == ""
-    assert b"".join(base64.b64decode(page["data"]) for page in (first, second, third)) == b"abcdefghij"
+    assert (
+        b"".join(base64.b64decode(page["data"]) for page in (first, second, third)) == b"abcdefghij"
+    )
     assert third["complete"] is True
 
 
 @pytest.mark.asyncio
 async def test_journal_enforces_command_and_session_output_storage_limits(tmp_path):
-    journal = CommandJournal(tmp_path / "commands.json", command_output_limit_bytes=5,
-                             session_output_limit_bytes=8, buffered_response_limit_bytes=8)
+    journal = CommandJournal(
+        tmp_path / "commands.json",
+        command_output_limit_bytes=5,
+        session_output_limit_bytes=8,
+        buffered_response_limit_bytes=8,
+    )
     await journal.reserve({"command_id": "one", "command": ["printf", "one"]})
     await journal.reserve({"command_id": "two", "command": ["printf", "two"]})
     await journal.append_output("one", "stdout", b"12345")
@@ -139,22 +168,35 @@ async def test_journal_enforces_command_and_session_output_storage_limits(tmp_pa
 
 @pytest.mark.asyncio
 async def test_tracker_stops_on_output_limit_but_keeps_consuming_until_exit(tmp_path):
-    journal = CommandJournal(tmp_path / "commands.json", command_output_limit_bytes=2,
-                             session_output_limit_bytes=10, buffered_response_limit_bytes=2)
+    journal = CommandJournal(
+        tmp_path / "commands.json",
+        command_output_limit_bytes=2,
+        session_output_limit_bytes=10,
+        buffered_response_limit_bytes=2,
+    )
     await journal.reserve({"command_id": "limited", "command": ["printf", "large"]})
 
     class Event:
         def __init__(self, kind, value):
             self.kind, self.value = kind, value
-        def WhichOneof(self, _): return self.kind
+
+        def WhichOneof(self, _):
+            return self.kind
+
         @property
-        def init(self): return self.value
+        def init(self):
+            return self.value
+
         @property
-        def stdout(self): return self.value
+        def stdout(self):
+            return self.value
+
         @property
-        def exit(self): return self.value
+        def exit(self):
+            return self.value
 
     consumed = []
+
     class Stream:
         async def __aiter__(self):
             for event in (
@@ -167,11 +209,16 @@ async def test_tracker_stops_on_output_limit_but_keeps_consuming_until_exit(tmp_
                 yield event
 
     class Stub:
-        def Start(self, _): return Stream()
+        def Start(self, _):
+            return Stream()
+
     tracker = Tracker(journal, Stub(), generation=1)
     tracker._read_identity = _identity_missing
     stops = []
-    async def stop(command_id, reason): stops.append((command_id, reason))
+
+    async def stop(command_id, reason):
+        stops.append((command_id, reason))
+
     tracker.stop = stop
     await journal.update("limited", state="running", process_id=51)
     await tracker._consume("limited", Stream(), "marker")
@@ -186,7 +233,9 @@ async def test_tracker_stops_on_output_limit_but_keeps_consuming_until_exit(tmp_
 
 
 @pytest.mark.asyncio
-async def test_tracker_reports_output_file_write_failure_separately_from_quota(tmp_path, monkeypatch):
+async def test_tracker_reports_output_file_write_failure_separately_from_quota(
+    tmp_path, monkeypatch
+):
     journal = CommandJournal(tmp_path / "commands.json")
     await journal.reserve({"command_id": "disk-error", "command": ["printf", "large"]})
     output_path = tmp_path / "command-output" / "disk-error.stdout"
@@ -202,13 +251,21 @@ async def test_tracker_reports_output_file_write_failure_separately_from_quota(t
     class Event:
         def __init__(self, kind, value):
             self.kind, self.value = kind, value
-        def WhichOneof(self, _): return self.kind
+
+        def WhichOneof(self, _):
+            return self.kind
+
         @property
-        def init(self): return self.value
+        def init(self):
+            return self.value
+
         @property
-        def stdout(self): return self.value
+        def stdout(self):
+            return self.value
+
         @property
-        def exit(self): return self.value
+        def exit(self):
+            return self.value
 
     class Stream:
         async def __aiter__(self):
@@ -217,12 +274,16 @@ async def test_tracker_reports_output_file_write_failure_separately_from_quota(t
             yield Event("exit", type("Exit", (), {"exit_code": 0})())
 
     class Stub:
-        def Start(self, _): return Stream()
+        def Start(self, _):
+            return Stream()
 
     tracker = Tracker(journal, Stub(), generation=1)
     tracker._read_identity = _identity_missing
     stops = []
-    async def stop(command_id, reason): stops.append((command_id, reason))
+
+    async def stop(command_id, reason):
+        stops.append((command_id, reason))
+
     tracker.stop = stop
     await journal.update("disk-error", state="running", process_id=52)
     await tracker._consume("disk-error", Stream(), "marker")
@@ -237,8 +298,10 @@ async def test_tracker_reports_output_file_write_failure_separately_from_quota(t
 
 @pytest.mark.asyncio
 async def test_journal_expires_files_but_keeps_finished_summary(tmp_path):
-    now = [datetime(2026, 10, 10, tzinfo=timezone.utc)]
-    journal = CommandJournal(tmp_path / "commands.json", output_retention_seconds=10, clock=lambda: now[0])
+    now = [datetime(2026, 10, 10, tzinfo=UTC)]
+    journal = CommandJournal(
+        tmp_path / "commands.json", output_retention_seconds=10, clock=lambda: now[0]
+    )
     await journal.reserve({"command_id": "expired", "command": ["printf", "x"]})
     await journal.append_output("expired", "stdout", b"saved")
     await journal.update("expired", state="finished", finished_at=now[0].isoformat(), exit_code=0)
@@ -265,10 +328,16 @@ async def test_tracker_resolves_virtual_process_id_to_os_pid(tmp_path):
             nonlocal calls
             calls += 1
             command = request.config.command
+
             class Response:
                 exit_code = 0
-                stdout = (b"4242 4242 (sleep with spaces) S 1 4242 4242 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 9876\n"
-                          if calls == 1 else b"boot-id\n")
+                stdout = (
+                    b"4242 4242 (sleep with spaces) S 1 4242 4242 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 "
+                    b"9876\n"
+                    if calls == 1
+                    else b"boot-id\n"
+                )
+
             if calls == 1:
                 assert command[0:2] == ["/bin/sh", "-c"]
                 assert "GKE_SESSION_SANDBOX_TRACKER_MARKER=abc123" in command[2]
@@ -276,7 +345,13 @@ async def test_tracker_resolves_virtual_process_id_to_os_pid(tmp_path):
 
     tracker = Tracker(CommandJournal(tmp_path / "commands.json"), Stub(), 1)
     identity = await tracker._read_identity(17, "abc123")
-    assert identity == {"process_id": 17, "pid": 4242, "pgid": 4242, "start_time": 9876, "boot_id": "boot-id"}
+    assert identity == {
+        "process_id": 17,
+        "pid": 4242,
+        "pgid": 4242,
+        "start_time": 9876,
+        "boot_id": "boot-id",
+    }
 
 
 async def _identity_missing(_pid, _marker):
@@ -290,16 +365,23 @@ async def test_tracker_stop_escalates_to_kill(monkeypatch, tmp_path):
     await journal.update("cancel-me", state="running", process_id=42)
     sent = []
     tracker = Tracker(journal, object(), generation=1)
+
     async def record_signal(_pid, value):
         sent.append(value)
+
     tracker._send_signal = record_signal
     original_sleep = asyncio.sleep
+
     async def immediate_sleep(_seconds):
         await original_sleep(0)
+
     monkeypatch.setattr(tracker_module.asyncio, "sleep", immediate_sleep)
     await tracker.stop("cancel-me", "cancelled")
     await original_sleep(0.01)
-    assert sent == [tracker_module.process_pb2.SIGNAL_SIGTERM, tracker_module.process_pb2.SIGNAL_SIGKILL]
+    assert sent == [
+        tracker_module.process_pb2.SIGNAL_SIGTERM,
+        tracker_module.process_pb2.SIGNAL_SIGKILL,
+    ]
     assert (await journal.get("cancel-me"))["stop_reason"] == "cancelled"
 
 
@@ -310,11 +392,15 @@ async def test_process_group_probe_excludes_its_reused_own_pgid(tmp_path):
             command = request.config.command
             assert command[0:2] == ["/bin/sh", "-c"]
             assert command[2].startswith('[ "$$" -ne 42 ] || exit 1; ps -eo pid=,pgid=,comm= | awk')
+
             class Response:
                 exit_code = 1
+
             return Response()
 
-    assert await Tracker(CommandJournal(tmp_path / "commands.json"), Stub(), 1)._group_present(42) == (False, "")
+    assert await Tracker(CommandJournal(tmp_path / "commands.json"), Stub(), 1)._group_present(
+        42
+    ) == (False, "")
 
 
 @pytest.mark.asyncio
@@ -324,28 +410,37 @@ async def test_supervisor_stops_tracker_before_sandboxd(monkeypatch):
     class Child:
         def __init__(self, name):
             self.name, self.returncode = name, None
+
         async def wait(self):
             await asyncio.Future()
+
         def terminate(self):
             events.append(f"terminate:{self.name}")
             self.returncode = -15
+
         def kill(self):
             events.append(f"kill:{self.name}")
             self.returncode = -9
 
     children = iter((Child("sandboxd"), Child("tracker")))
+
     async def spawn(*_args):
         return next(children)
+
     async def ready(_process, timeout=45):
         events.append("ready")
+
     async def stop(process, grace=5):
         events.append(f"stop:{process.name}")
         process.returncode = -15
+
     monkeypatch.setattr(supervisor.asyncio, "create_subprocess_exec", spawn)
     monkeypatch.setattr(supervisor, "_wait_ready", ready)
     monkeypatch.setattr(supervisor, "_stop", stop)
     event = asyncio.Event()
-    task = asyncio.create_task(supervisor.run(stop_event=event, sandboxd_command=["sandboxd"], tracker_command=["tracker"]))
+    task = asyncio.create_task(
+        supervisor.run(stop_event=event, sandboxd_command=["sandboxd"], tracker_command=["tracker"])
+    )
     await asyncio.sleep(0)
     event.set()
     assert await task == 0

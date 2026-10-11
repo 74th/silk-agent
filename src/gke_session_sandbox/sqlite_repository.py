@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .errors import (
@@ -90,19 +90,25 @@ class SQLiteSessionRepository:
         expires = now + timedelta(seconds=self._lease_duration_seconds)
         self._db.execute("BEGIN IMMEDIATE")
         try:
-            row = self._db.execute("SELECT * FROM session_leases WHERE key_hash = ?", (key_hash,)).fetchone()
+            row = self._db.execute(
+                "SELECT * FROM session_leases WHERE key_hash = ?", (key_hash,)
+            ).fetchone()
             if row is not None:
                 lease = self._lease_from_row(row)
                 if lease.holder and lease.holder != holder_identity and now < lease.expires_at:
                     raise SessionLeaseHeldError("session lease is held by another live worker")
-                transitions = lease.transitions + int(bool(lease.holder and lease.holder != holder_identity))
+                transitions = lease.transitions + int(
+                    bool(lease.holder and lease.holder != holder_identity)
+                )
                 self._db.execute(
-                    "UPDATE session_leases SET holder = ?, expires_at = ?, transitions = ? WHERE key_hash = ?",
+                    "UPDATE session_leases SET holder = ?, expires_at = ?, transitions = ? WHERE "
+                    "key_hash = ?",
                     (holder_identity, expires.isoformat(), transitions, key_hash),
                 )
             else:
                 self._db.execute(
-                    "INSERT INTO session_leases(key_hash, holder, expires_at, transitions) VALUES (?, ?, ?, 0)",
+                    "INSERT INTO session_leases(key_hash, holder, expires_at, transitions) VALUES "
+                    "(?, ?, ?, 0)",
                     (key_hash, holder_identity, expires.isoformat()),
                 )
             self._db.execute("COMMIT")
@@ -114,7 +120,7 @@ class SQLiteSessionRepository:
     async def renew_lease(self, token: LeaseToken) -> LeaseToken:
         self._db.execute("BEGIN IMMEDIATE")
         try:
-            lease = self._read_owned_lease(token)
+            self._read_owned_lease(token)
             expires = _utc(self._clock()) + timedelta(seconds=self._lease_duration_seconds)
             self._db.execute(
                 "UPDATE session_leases SET expires_at = ? WHERE key_hash = ? AND holder = ?",
@@ -131,7 +137,8 @@ class SQLiteSessionRepository:
         try:
             self._read_owned_lease(token)
             self._db.execute(
-                "UPDATE session_leases SET holder = '', expires_at = ? WHERE key_hash = ? AND holder = ?",
+                "UPDATE session_leases SET holder = '', expires_at = ? WHERE key_hash = ? AND "
+                "holder = ?",
                 (_utc(self._clock()).isoformat(), token.key_hash, token.holder_identity),
             )
             self._db.execute("COMMIT")
@@ -144,7 +151,9 @@ class SQLiteSessionRepository:
 
     async def get_by_hash(self, key_hash: str) -> StoredSession | None:
         _validate_key_hash(key_hash)
-        row = self._db.execute("SELECT record_json, version FROM sessions WHERE key_hash = ?", (key_hash,)).fetchone()
+        row = self._db.execute(
+            "SELECT record_json, version FROM sessions WHERE key_hash = ?", (key_hash,)
+        ).fetchone()
         if row is None:
             return None
         record = SessionRecord.model_validate_json(row["record_json"])
@@ -153,7 +162,9 @@ class SQLiteSessionRepository:
         return StoredSession(record, str(row["version"]))
 
     async def list_records(self) -> tuple[StoredSession, ...]:
-        rows = self._db.execute("SELECT record_json, version FROM sessions ORDER BY key_hash").fetchall()
+        rows = self._db.execute(
+            "SELECT record_json, version FROM sessions ORDER BY key_hash"
+        ).fetchall()
         result = []
         for row in rows:
             record = SessionRecord.model_validate_json(row["record_json"])
@@ -191,7 +202,9 @@ class SQLiteSessionRepository:
                 (_serialize(record), record.key_hash, int(expected_resource_version)),
             )
             if cursor.rowcount != 1:
-                exists = self._db.execute("SELECT 1 FROM sessions WHERE key_hash = ?", (record.key_hash,)).fetchone()
+                exists = self._db.execute(
+                    "SELECT 1 FROM sessions WHERE key_hash = ?", (record.key_hash,)
+                ).fetchone()
                 if exists is None:
                     raise RepositoryConflictError("session record disappeared before update")
                 raise RepositoryConflictError("session database version changed")
@@ -213,14 +226,23 @@ class SQLiteSessionRepository:
         for command in stored.record.active_commands:
             if command.command_id == command_id:
                 if command.generation != generation:
-                    raise StaleGenerationError("command ID belongs to a different session generation")
+                    raise StaleGenerationError(
+                        "command ID belongs to a different session generation"
+                    )
                 return command, False
         command = CommandRecord(
-            command_id=command_id, generation=generation, runtime_instance_id=runtime_instance_id,
-            state=CommandState.RUNNING, accepted_at=_utc(self._clock()),
+            command_id=command_id,
+            generation=generation,
+            runtime_instance_id=runtime_instance_id,
+            state=CommandState.RUNNING,
+            accepted_at=_utc(self._clock()),
         )
-        record = stored.record.model_copy(update={"active_commands": (*stored.record.active_commands, command)})
-        await self.compare_and_swap(token, record, expected_resource_version=stored.resource_version)
+        record = stored.record.model_copy(
+            update={"active_commands": (*stored.record.active_commands, command)}
+        )
+        await self.compare_and_swap(
+            token, record, expected_resource_version=stored.resource_version
+        )
         return command, True
 
     async def append_event_once(self, token: LeaseToken, event: SessionEvent) -> bool:
@@ -229,8 +251,12 @@ class SQLiteSessionRepository:
             raise RepositoryConflictError("session record is missing while appending event")
         if any(item.event_id == event.event_id for item in stored.record.pending_events):
             return False
-        record = stored.record.model_copy(update={"pending_events": (*stored.record.pending_events, event)})
-        await self.compare_and_swap(token, record, expected_resource_version=stored.resource_version)
+        record = stored.record.model_copy(
+            update={"pending_events": (*stored.record.pending_events, event)}
+        )
+        await self.compare_and_swap(
+            token, record, expected_resource_version=stored.resource_version
+        )
         return True
 
     async def acknowledge_event(self, token: LeaseToken, event_id: str) -> bool:
@@ -248,7 +274,9 @@ class SQLiteSessionRepository:
         if not changed:
             return False
         record = stored.record.model_copy(update={"pending_events": tuple(events)})
-        await self.compare_and_swap(token, record, expected_resource_version=stored.resource_version)
+        await self.compare_and_swap(
+            token, record, expected_resource_version=stored.resource_version
+        )
         return True
 
     async def record_operation(
@@ -257,8 +285,12 @@ class SQLiteSessionRepository:
         stored = await self.get_by_hash(token.key_hash)
         if stored is None:
             raise RepositoryConflictError("session record is missing while recording operation")
-        record = stored.record.model_copy(update={"operation_id": operation_id, "operation_phase": operation_phase})
-        return await self.compare_and_swap(token, record, expected_resource_version=stored.resource_version)
+        record = stored.record.model_copy(
+            update={"operation_id": operation_id, "operation_phase": operation_phase}
+        )
+        return await self.compare_and_swap(
+            token, record, expected_resource_version=stored.resource_version
+        )
 
     async def adjust_file_operations(self, token: LeaseToken, delta: int) -> StoredSession:
         if delta not in {-1, 1}:
@@ -270,12 +302,14 @@ class SQLiteSessionRepository:
                 "SELECT record_json, version FROM sessions WHERE key_hash = ?", (token.key_hash,)
             ).fetchone()
             if row is None:
-                raise RepositoryConflictError("session record is missing while tracking file activity")
+                raise RepositoryConflictError(
+                    "session record is missing while tracking file activity"
+                )
             record = SessionRecord.model_validate_json(row["record_json"])
             count = record.active_file_operations + delta
             if count < 0:
                 raise RepositoryConflictError("file operation counter would become negative")
-            changes = {"active_file_operations": count}
+            changes: dict[str, object] = {"active_file_operations": count}
             if delta == -1:
                 changes["last_file_operation_at"] = _utc(self._clock())
                 if count == 0:
@@ -283,7 +317,8 @@ class SQLiteSessionRepository:
             updated = record.model_copy(update=changes)
             version = int(row["version"])
             self._db.execute(
-                "UPDATE sessions SET record_json = ?, version = version + 1 WHERE key_hash = ? AND version = ?",
+                "UPDATE sessions SET record_json = ?, version = version + 1 WHERE key_hash = ? "
+                "AND version = ?",
                 (_serialize(updated), token.key_hash, version),
             )
             self._db.execute("COMMIT")
@@ -304,7 +339,9 @@ class SQLiteSessionRepository:
         self._read_owned_lease(token)
 
     def _read_owned_lease(self, token: LeaseToken) -> _Lease:
-        row = self._db.execute("SELECT * FROM session_leases WHERE key_hash = ?", (token.key_hash,)).fetchone()
+        row = self._db.execute(
+            "SELECT * FROM session_leases WHERE key_hash = ?", (token.key_hash,)
+        ).fetchone()
         if row is None:
             raise SessionLeaseLostError("session lease no longer exists")
         lease = self._lease_from_row(row)

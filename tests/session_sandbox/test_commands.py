@@ -9,7 +9,10 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from gke_session_sandbox.commands import CommandTrackerClient
 from gke_session_sandbox.errors import (
-    CommandFailedError, CommandOutputLimitExceeded, ExecutionOutcomeUnknown, RuntimeConnectionError,
+    CommandFailedError,
+    CommandOutputLimitExceeded,
+    ExecutionOutcomeUnknown,
+    RuntimeConnectionError,
 )
 
 
@@ -28,16 +31,25 @@ async def test_run_reserves_once_and_returns_saved_output():
         calls["get"] += 1
         if calls["get"] == 1:
             return web.json_response({**state, "state": "running"})
-        return web.json_response({**state, "state": "finished", "exit_code": 0,
-                                  "stdout": base64.b64encode(b"done\n").decode(), "stderr": ""})
+        return web.json_response(
+            {
+                **state,
+                "state": "finished",
+                "exit_code": 0,
+                "stdout": base64.b64encode(b"done\n").decode(),
+                "stderr": "",
+            }
+        )
 
     app = web.Application()
     app.router.add_post("/v1/commands", create)
     app.router.add_get("/v1/commands/{command_id}", get)
     async with TestClient(TestServer(app)) as server:
+
         async def resolve():
             calls["resolve"] += 1
             return str(server.make_url("")).rstrip("/")
+
         async with CommandTrackerClient(resolve, poll_interval=0.001) as commands:
             result = await commands.run(["echo", "done"])
         assert result.stdout == b"done\n"
@@ -61,7 +73,9 @@ async def test_unknown_submission_is_not_retried_and_keeps_command_id():
     app.router.add_post("/v1/commands", create)
     async with TestClient(TestServer(app)) as server:
         endpoint = str(server.make_url("")).rstrip("/")
-        async with CommandTrackerClient(lambda: _resolved(endpoint), request_timeout=0.02) as commands:
+        async with CommandTrackerClient(
+            lambda: _resolved(endpoint), request_timeout=0.02
+        ) as commands:
             with pytest.raises(ExecutionOutcomeUnknown) as error:
                 await commands.start(["touch", "/workspace/side-effect"], command_id="known-id")
             assert error.value.command_id == "known-id"
@@ -88,19 +102,38 @@ async def test_read_output_uses_byte_cursor_and_buffered_wait_reports_limit():
     async def output(request):
         assert request.query["stream"] == "stdout"
         assert request.query["cursor"] == "2"
-        return web.json_response({"command_id": "paged", "stream": "stdout", "data": base64.b64encode(b"cd").decode(),
-                                  "cursor": 4, "total_bytes": 6, "complete": False, "output_complete": True})
+        return web.json_response(
+            {
+                "command_id": "paged",
+                "stream": "stdout",
+                "data": base64.b64encode(b"cd").decode(),
+                "cursor": 4,
+                "total_bytes": 6,
+                "complete": False,
+                "output_complete": True,
+            }
+        )
 
     async def get(_request):
-        return web.json_response({"command_id": "large", "state": "finished", "exit_code": 0,
-                                  "stdout": "", "stderr": "", "stdout_truncated": True})
+        return web.json_response(
+            {
+                "command_id": "large",
+                "state": "finished",
+                "exit_code": 0,
+                "stdout": "",
+                "stderr": "",
+                "stdout_truncated": True,
+            }
+        )
 
     app = web.Application()
     app.router.add_get("/v1/commands/paged/output", output)
     app.router.add_get("/v1/commands/large", get)
     async with TestClient(TestServer(app)) as server:
         endpoint = str(server.make_url("")).rstrip("/")
-        async with CommandTrackerClient(lambda: _resolved(endpoint), buffered_response_limit_bytes=4) as commands:
+        async with CommandTrackerClient(
+            lambda: _resolved(endpoint), buffered_response_limit_bytes=4
+        ) as commands:
             page = await commands.read_output("paged", cursor=2, limit=2)
             assert page.data == b"cd" and page.cursor == 4 and page.total_bytes == 6
             with pytest.raises(CommandOutputLimitExceeded) as error:
@@ -117,17 +150,26 @@ async def test_reconnects_and_check_error_keeps_command_id():
     calls = 0
 
     async def get(_request):
-        return web.json_response({"command_id": "failed-id", "state": "finished", "exit_code": 7,
-                                  "stdout": "", "stderr": ""})
+        return web.json_response(
+            {
+                "command_id": "failed-id",
+                "state": "finished",
+                "exit_code": 7,
+                "stdout": "",
+                "stderr": "",
+            }
+        )
 
     app = web.Application()
     app.router.add_get("/v1/commands/failed-id", get)
     async with TestClient(TestServer(app)) as server:
         endpoint = str(server.make_url("")).rstrip("/")
+
         async def resolve():
             nonlocal calls
             calls += 1
             return "http://127.0.0.1:1" if calls == 1 else endpoint
+
         async with CommandTrackerClient(resolve) as commands:
             with pytest.raises(ExecutionOutcomeUnknown):
                 await commands.get("failed-id")

@@ -98,6 +98,14 @@ def test_view_shows_appended_messages_while_running():
     assert not any(line.startswith("📝") for line in v.render(T0).splitlines())
 
 
+def test_view_shows_sandbox_start_up_until_the_agent_runs():
+    v = ProgressView(T0)
+    v.apply(StatusChanged(KEY, "t1", "preparing_sandbox"))
+    assert v.render(T0).splitlines()[0].startswith("🛠 作業環境を起動しています…")
+    v.apply(StatusChanged(KEY, "t1", "thinking"))
+    assert v.render(T0).splitlines()[0].startswith("⏳ 実行中")
+
+
 def test_view_shows_latest_20_and_remaining_count():
     v = ProgressView(T0)
     for i in range(25):

@@ -13,20 +13,32 @@ from .types import ResourceRef
 
 
 class SandboxCustomObjectsApi(Protocol):
-    async def create_namespaced_custom_object(self, group: str, version: str, namespace: str, plural: str, body: Any) -> Any: ...
-    async def get_namespaced_custom_object(self, group: str, version: str, namespace: str, plural: str, name: str) -> Any: ...
-    async def patch_namespaced_custom_object(self, group: str, version: str, namespace: str, plural: str, name: str, body: Any) -> Any: ...
-    async def delete_namespaced_custom_object(self, group: str, version: str, namespace: str, plural: str, name: str, body: Any = None) -> Any: ...
+    async def create_namespaced_custom_object(
+        self, group: str, version: str, namespace: str, plural: str, body: Any
+    ) -> Any: ...
+    async def get_namespaced_custom_object(
+        self, group: str, version: str, namespace: str, plural: str, name: str
+    ) -> Any: ...
+    async def patch_namespaced_custom_object(
+        self, group: str, version: str, namespace: str, plural: str, name: str, body: Any
+    ) -> Any: ...
+    async def delete_namespaced_custom_object(
+        self, group: str, version: str, namespace: str, plural: str, name: str, body: Any = None
+    ) -> Any: ...
 
 
 class SandboxCoreApi(Protocol):
-    async def list_namespaced_pod(self, namespace: str, label_selector: str | None = None) -> Any: ...
+    async def list_namespaced_pod(
+        self, namespace: str, label_selector: str | None = None
+    ) -> Any: ...
 
 
 class SandboxNetworkingApi(Protocol):
     async def create_namespaced_network_policy(self, namespace: str, body: Any) -> Any: ...
     async def read_namespaced_network_policy(self, name: str, namespace: str) -> Any: ...
-    async def delete_namespaced_network_policy(self, name: str, namespace: str, body: Any = None) -> Any: ...
+    async def delete_namespaced_network_policy(
+        self, name: str, namespace: str, body: Any = None
+    ) -> Any: ...
 
 
 HealthCheck = Callable[[str | None, str | None], Awaitable[bool]]
@@ -76,8 +88,12 @@ class CoreSandboxBackend:
             )
             expected_labels = metadata.get("labels", {})
             actual_labels = _field(_field(created, "metadata", {}), "labels", {}) or {}
-            if not expected_labels or any(actual_labels.get(key) != value for key, value in expected_labels.items()):
-                raise ResourceOwnershipError("Sandbox name already belongs to another session generation") from exc
+            if not expected_labels or any(
+                actual_labels.get(key) != value for key, value in expected_labels.items()
+            ):
+                raise ResourceOwnershipError(
+                    "Sandbox name already belongs to another session generation"
+                ) from exc
         return _sandbox_ref(created, namespace)
 
     async def create_policies(
@@ -93,19 +109,23 @@ class CoreSandboxBackend:
             metadata = body.setdefault("metadata", {})
             metadata["namespace"] = namespace
             if owner is not None:
-                metadata["ownerReferences"] = [{
-                    "apiVersion": owner.api_version,
-                    "kind": owner.kind,
-                    "name": owner.name,
-                    "uid": owner.uid,
-                    "controller": False,
-                    "blockOwnerDeletion": False,
-                }]
-            api_version, kind = body.get("apiVersion"), body.get("kind")
+                metadata["ownerReferences"] = [
+                    {
+                        "apiVersion": owner.api_version,
+                        "kind": owner.kind,
+                        "name": owner.name,
+                        "uid": owner.uid,
+                        "controller": False,
+                        "blockOwnerDeletion": False,
+                    }
+                ]
+            api_version, kind = str(body.get("apiVersion", "")), str(body.get("kind", ""))
             name = metadata.get("name")
             if (api_version, kind) == ("networking.k8s.io/v1", "NetworkPolicy"):
                 try:
-                    created = await self._networking.create_namespaced_network_policy(namespace, body)
+                    created = await self._networking.create_namespaced_network_policy(
+                        namespace, body
+                    )
                 except Exception as exc:
                     if getattr(exc, "status", None) != 409:
                         raise
@@ -145,7 +165,11 @@ class CoreSandboxBackend:
     async def start(self, ref: ResourceRef) -> ResourceRef:
         current = await self._read_owned(ref)
         patched = await self._custom.patch_namespaced_custom_object(
-            self.GROUP, self.VERSION, ref.namespace, self.PLURAL, ref.name,
+            self.GROUP,
+            self.VERSION,
+            _namespace(ref),
+            self.PLURAL,
+            ref.name,
             [
                 {"op": "test", "path": "/metadata/uid", "value": ref.uid},
                 {"op": "replace", "path": "/spec/operatingMode", "value": "Running"},
@@ -156,7 +180,11 @@ class CoreSandboxBackend:
     async def suspend(self, ref: ResourceRef) -> None:
         await self._read_owned(ref)
         await self._custom.patch_namespaced_custom_object(
-            self.GROUP, self.VERSION, ref.namespace, self.PLURAL, ref.name,
+            self.GROUP,
+            self.VERSION,
+            _namespace(ref),
+            self.PLURAL,
+            ref.name,
             [
                 {"op": "test", "path": "/metadata/uid", "value": ref.uid},
                 {"op": "replace", "path": "/spec/operatingMode", "value": "Suspended"},
@@ -168,7 +196,11 @@ class CoreSandboxBackend:
         await self._read_owned(ref)
         timestamp = expires_at.isoformat().replace("+00:00", "Z")
         await self._custom.patch_namespaced_custom_object(
-            self.GROUP, self.VERSION, ref.namespace, self.PLURAL, ref.name,
+            self.GROUP,
+            self.VERSION,
+            _namespace(ref),
+            self.PLURAL,
+            ref.name,
             [
                 {"op": "test", "path": "/metadata/uid", "value": ref.uid},
                 {"op": "add", "path": "/spec/shutdownTime", "value": timestamp},
@@ -180,15 +212,17 @@ class CoreSandboxBackend:
         """Clear the absolute expiry and switch to Running in one UID-guarded patch."""
         current = await self._read_owned(ref)
         spec = _field(current, "spec", {}) or {}
-        body = [{"op": "test", "path": "/metadata/uid", "value": ref.uid}]
+        body: list[dict[str, Any]] = [{"op": "test", "path": "/metadata/uid", "value": ref.uid}]
         if _field(spec, "shutdownTime") is not None:
             body.append({"op": "remove", "path": "/spec/shutdownTime"})
-        body.extend([
-            {"op": "add", "path": "/spec/shutdownPolicy", "value": "Retain"},
-            {"op": "replace", "path": "/spec/operatingMode", "value": "Running"},
-        ])
+        body.extend(
+            [
+                {"op": "add", "path": "/spec/shutdownPolicy", "value": "Retain"},
+                {"op": "replace", "path": "/spec/operatingMode", "value": "Running"},
+            ]
+        )
         patched = await self._custom.patch_namespaced_custom_object(
-            self.GROUP, self.VERSION, ref.namespace, self.PLURAL, ref.name, body
+            self.GROUP, self.VERSION, _namespace(ref), self.PLURAL, ref.name, body
         )
         return _sandbox_ref(patched or current, ref.namespace or "")
 
@@ -201,19 +235,31 @@ class CoreSandboxBackend:
             sandbox = await self._read_owned(ref)
             status = _field(sandbox, "status", {}) or {}
             conditions = _field(status, "conditions", []) or []
-            condition = next((item for item in conditions if _field(item, "type") == "Suspended"), None)
+            condition = next(
+                (item for item in conditions if _field(item, "type") == "Suspended"), None
+            )
             selector = _field(status, "selector")
-            pods = await self._core.list_namespaced_pod(ref.namespace or "", label_selector=selector)
-            if condition and _field(condition, "status") == "True" and not (_field(pods, "items", []) or []):
+            pods = await self._core.list_namespaced_pod(
+                ref.namespace or "", label_selector=selector
+            )
+            if (
+                condition
+                and _field(condition, "status") == "True"
+                and not (_field(pods, "items", []) or [])
+            ):
                 return sandbox
             last_diagnostic = (
                 f"Suspended={_field(condition, 'status')} reason={_field(condition, 'reason')} "
                 f"matchingPods={len(_field(pods, 'items', []) or [])}"
             )
             await asyncio.sleep(poll_interval_seconds)
-        raise SandboxReadyTimeout(f"Sandbox {ref.namespace}/{ref.name} did not suspend: {last_diagnostic}")
+        raise SandboxReadyTimeout(
+            f"Sandbox {ref.namespace}/{ref.name} did not suspend: {last_diagnostic}"
+        )
 
-    async def wait_deleted(self, ref: ResourceRef, *, timeout_seconds: float = 120, poll_interval_seconds: float = 2) -> None:
+    async def wait_deleted(
+        self, ref: ResourceRef, *, timeout_seconds: float = 120, poll_interval_seconds: float = 2
+    ) -> None:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             try:
@@ -223,7 +269,9 @@ class CoreSandboxBackend:
                     return
                 raise
             await asyncio.sleep(poll_interval_seconds)
-        raise SandboxReadyTimeout(f"Sandbox {ref.namespace}/{ref.name} was not deleted before timeout")
+        raise SandboxReadyTimeout(
+            f"Sandbox {ref.namespace}/{ref.name} was not deleted before timeout"
+        )
 
     async def get_owned(self, ref: ResourceRef) -> Mapping[str, Any]:
         """Read the current owned Sandbox, including deletionTimestamp and conditions."""
@@ -234,20 +282,24 @@ class CoreSandboxBackend:
         current = await self._read_owned(ref)
         metadata = _field(current, "metadata", {}) or {}
         existing = _field(metadata, "annotations", {}) or {}
-        body = [{"op": "test", "path": "/metadata/uid", "value": ref.uid}]
+        body: list[dict[str, Any]] = [{"op": "test", "path": "/metadata/uid", "value": ref.uid}]
         if not existing:
             body.append({"op": "add", "path": "/metadata/annotations", "value": {}})
         for key, value in annotations.items():
             escaped = key.replace("~", "~0").replace("/", "~1")
             body.append({"op": "add", "path": f"/metadata/annotations/{escaped}", "value": value})
         await self._custom.patch_namespaced_custom_object(
-            self.GROUP, self.VERSION, ref.namespace, self.PLURAL, ref.name, body
+            self.GROUP, self.VERSION, _namespace(ref), self.PLURAL, ref.name, body
         )
 
     async def delete(self, ref: ResourceRef) -> None:
         await self._read_owned(ref)
         await self._custom.delete_namespaced_custom_object(
-            self.GROUP, self.VERSION, ref.namespace, self.PLURAL, ref.name,
+            self.GROUP,
+            self.VERSION,
+            _namespace(ref),
+            self.PLURAL,
+            ref.name,
             body={"preconditions": {"uid": ref.uid}},
         )
 
@@ -277,12 +329,17 @@ class CoreSandboxBackend:
             metadata = _field(sandbox, "metadata", {})
             status = _field(sandbox, "status", {}) or {}
             conditions = _field(status, "conditions", []) or []
-            ready = next((condition for condition in conditions if _field(condition, "type") == "Ready"), None)
+            ready = next(
+                (condition for condition in conditions if _field(condition, "type") == "Ready"),
+                None,
+            )
             observed = _field(ready, "observedGeneration", 0) if ready else 0
             generation = _field(metadata, "generation", 0) or 0
             if ready and _field(ready, "status") == "True" and observed >= generation:
                 selector = _field(status, "selector")
-                pods = await self._core.list_namespaced_pod(ref.namespace or "", label_selector=selector)
+                pods = await self._core.list_namespaced_pod(
+                    ref.namespace or "", label_selector=selector
+                )
                 pod_items = _field(pods, "items", []) or []
                 ready_pod = next((pod for pod in pod_items if _pod_ready(pod)), None)
                 if ready_pod is not None:
@@ -296,7 +353,9 @@ class CoreSandboxBackend:
                                 _field(ready_pod, "metadata", {}), "uid"
                             )
                         return snapshot
-                    last_diagnostic = "Sandbox controller and Pod are Ready, runtime health probe failed"
+                    last_diagnostic = (
+                        "Sandbox controller and Pod are Ready, runtime health probe failed"
+                    )
                 else:
                     last_diagnostic = "Sandbox is Ready but no Ready Pod matches its selector"
             elif ready:
@@ -307,10 +366,16 @@ class CoreSandboxBackend:
             else:
                 last_diagnostic = "Sandbox has no Ready condition"
             await asyncio.sleep(poll_interval_seconds)
-        raise SandboxReadyTimeout(f"Sandbox {ref.namespace}/{ref.name} did not become ready: {last_diagnostic}")
+        raise SandboxReadyTimeout(
+            f"Sandbox {ref.namespace}/{ref.name} did not become ready: {last_diagnostic}"
+        )
 
     async def _read_owned(self, ref: ResourceRef) -> Any:
-        if ref.kind != "Sandbox" or ref.api_version != f"{self.GROUP}/{self.VERSION}" or not ref.namespace:
+        if (
+            ref.kind != "Sandbox"
+            or ref.api_version != f"{self.GROUP}/{self.VERSION}"
+            or not ref.namespace
+        ):
             raise ResourceOwnershipError("resource reference is not a namespaced core Sandbox")
         try:
             sandbox = await self._custom.get_namespaced_custom_object(
@@ -327,17 +392,35 @@ class CoreSandboxBackend:
 
 
 def _sandbox_ref(sandbox: Any, namespace: str | None) -> ResourceRef:
-    return _resource_ref(sandbox, namespace, api_version=f"{CoreSandboxBackend.GROUP}/{CoreSandboxBackend.VERSION}", kind="Sandbox")
+    return _resource_ref(
+        sandbox,
+        namespace,
+        api_version=f"{CoreSandboxBackend.GROUP}/{CoreSandboxBackend.VERSION}",
+        kind="Sandbox",
+    )
 
 
-def _resource_ref(resource: Any, namespace: str | None, *, api_version: str, kind: str) -> ResourceRef:
+def _resource_ref(
+    resource: Any, namespace: str | None, *, api_version: str, kind: str
+) -> ResourceRef:
     metadata = _field(resource, "metadata", {})
     name = _field(metadata, "name")
     uid = _field(metadata, "uid")
     actual_namespace = _field(metadata, "namespace") or namespace
     if not name or not uid or not actual_namespace:
-        raise ResourceOwnershipError("created Kubernetes resource has incomplete name / namespace / UID")
-    return ResourceRef(api_version=api_version, kind=kind, namespace=actual_namespace, name=name, uid=uid)
+        raise ResourceOwnershipError(
+            "created Kubernetes resource has incomplete name / namespace / UID"
+        )
+    return ResourceRef(
+        api_version=api_version, kind=kind, namespace=actual_namespace, name=name, uid=uid
+    )
+
+
+def _namespace(ref: ResourceRef) -> str:
+    """Sandboxes and their policies are namespaced resources."""
+    if not ref.namespace:
+        raise ResourceOwnershipError(f"{ref.kind}/{ref.name} has no namespace")
+    return ref.namespace
 
 
 def _field(value: Any, name: str, default: Any = None) -> Any:
@@ -350,12 +433,17 @@ def _field(value: Any, name: str, default: Any = None) -> Any:
 def _pod_ready(pod: Any) -> bool:
     status = _field(pod, "status", {}) or {}
     conditions = _field(status, "conditions", []) or []
-    return any(_field(condition, "type") == "Ready" and _field(condition, "status") == "True" for condition in conditions)
+    return any(
+        _field(condition, "type") == "Ready" and _field(condition, "status") == "True"
+        for condition in conditions
+    )
 
 
 def _validate_policy_owner(existing: Any, expected_metadata: Mapping[str, Any], kind: str) -> None:
     metadata = _field(existing, "metadata", {})
     expected_labels = expected_metadata.get("labels", {}) or {}
     actual_labels = _field(metadata, "labels", {}) or {}
-    if not expected_labels or any(actual_labels.get(key) != value for key, value in expected_labels.items()):
+    if not expected_labels or any(
+        actual_labels.get(key) != value for key, value in expected_labels.items()
+    ):
         raise ResourceOwnershipError(f"{kind} name already belongs to another owner")

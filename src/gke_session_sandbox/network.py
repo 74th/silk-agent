@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
 from typing import Any
 
 from .config import ManagerConfig
@@ -44,17 +43,30 @@ def build_session_network_policies(
         {
             "apiVersion": "networking.k8s.io/v1",
             "kind": "NetworkPolicy",
-            "metadata": {"name": f"sandbox-management-ingress-{suffix}", "labels": copy.deepcopy(labels)},
+            "metadata": {
+                "name": f"sandbox-management-ingress-{suffix}",
+                "labels": copy.deepcopy(labels),
+            },
             "spec": {
                 "podSelector": selector,
                 "policyTypes": ["Ingress"],
-                "ingress": [{
-                    "from": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": config.control_namespace}}}],
-                    "ports": [
-                        {"protocol": "TCP", "port": config.runtime.rest_port},
-                        {"protocol": "TCP", "port": config.runtime.tracker_port},
-                    ],
-                }],
+                "ingress": [
+                    {
+                        "from": [
+                            {
+                                "namespaceSelector": {
+                                    "matchLabels": {
+                                        "kubernetes.io/metadata.name": config.control_namespace
+                                    }
+                                }
+                            }
+                        ],
+                        "ports": [
+                            {"protocol": "TCP", "port": config.runtime.rest_port},
+                            {"protocol": "TCP", "port": config.runtime.tracker_port},
+                        ],
+                    }
+                ],
             },
         },
         {
@@ -64,13 +76,23 @@ def build_session_network_policies(
             "spec": {
                 "podSelector": selector,
                 "policyTypes": ["Egress"],
-                "egress": [{
-                    "to": [{
-                        "namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": config.network.dns_namespace}},
-                        "podSelector": {"matchLabels": config.network.dns_pod_selector},
-                    }],
-                    "ports": [{"protocol": protocol, "port": 53} for protocol in ("UDP", "TCP")],
-                }],
+                "egress": [
+                    {
+                        "to": [
+                            {
+                                "namespaceSelector": {
+                                    "matchLabels": {
+                                        "kubernetes.io/metadata.name": config.network.dns_namespace
+                                    }
+                                },
+                                "podSelector": {"matchLabels": config.network.dns_pod_selector},
+                            }
+                        ],
+                        "ports": [
+                            {"protocol": protocol, "port": 53} for protocol in ("UDP", "TCP")
+                        ],
+                    }
+                ],
             },
         },
     ]
@@ -78,14 +100,23 @@ def build_session_network_policies(
         egress = []
         for rule in config.network.allowed_fqdns:
             match = {"name": rule.name} if rule.name is not None else {"pattern": rule.pattern}
-            egress.append({
-                "matches": [match],
-                "ports": [{"protocol": port.protocol, "port": port.port} for port in rule.ports],
-            })
-        policies.append({
-            "apiVersion": "networking.gke.io/v1alpha1",
-            "kind": "FQDNNetworkPolicy",
-            "metadata": {"name": f"sandbox-fqdn-egress-{suffix}", "labels": copy.deepcopy(labels)},
-            "spec": {"podSelector": selector, "egress": egress},
-        })
+            egress.append(
+                {
+                    "matches": [match],
+                    "ports": [
+                        {"protocol": port.protocol, "port": port.port} for port in rule.ports
+                    ],
+                }
+            )
+        policies.append(
+            {
+                "apiVersion": "networking.gke.io/v1alpha1",
+                "kind": "FQDNNetworkPolicy",
+                "metadata": {
+                    "name": f"sandbox-fqdn-egress-{suffix}",
+                    "labels": copy.deepcopy(labels),
+                },
+                "spec": {"podSelector": selector, "egress": egress},
+            }
+        )
     return tuple(policies)

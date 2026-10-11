@@ -29,10 +29,13 @@ def merge_template_environment(
         entry = copy.deepcopy(dict(raw_entry))
         name = entry.get("name")
         _validate_env_name(name)
+        assert isinstance(name, str)  # checked by _validate_env_name
         if name in positions:
             raise TemplateValidationError(f"duplicate template env name {name!r}")
         if ("value" in entry) == ("valueFrom" in entry):
-            raise TemplateValidationError(f"template env {name!r} must specify exactly one of value or valueFrom")
+            raise TemplateValidationError(
+                f"template env {name!r} must specify exactly one of value or valueFrom"
+            )
         if "value" in entry and not isinstance(entry["value"], str):
             raise TemplateValidationError(f"template env {name!r} value must be a string")
         if "valueFrom" in entry and not isinstance(entry["valueFrom"], Mapping):
@@ -72,7 +75,9 @@ def creation_environment_fingerprint(environment: Mapping[str, str], key: bytes)
     if len(key) < 32:
         raise ValueError("environment fingerprint key must contain at least 32 bytes")
     clean = _validate_env_mapping(environment, "creation")
-    canonical = json.dumps(clean, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    canonical = json.dumps(clean, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+        "utf-8"
+    )
     return hmac.new(key, canonical, hashlib.sha256).hexdigest()
 
 
@@ -86,7 +91,9 @@ def ensure_same_creation_environment(
         return True
     requested = creation_environment_fingerprint(requested_environment, key)
     if stored_fingerprint is None or not hmac.compare_digest(stored_fingerprint, requested):
-        raise SessionConfigurationConflictError("creation environment differs from the existing session generation")
+        raise SessionConfigurationConflictError(
+            "creation environment differs from the existing session generation"
+        )
     return False
 
 

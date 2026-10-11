@@ -49,7 +49,8 @@ InboundEvent = UserMessage | StopRequest | ResetRequest | ResumeRequest
 
 # background: the tool call returned while its command keeps running in the sandbox
 ToolStatus = Literal["running", "success", "failure", "interrupted", "background"]
-TurnStatus = Literal["thinking", "running_tool", "interrupting", "interrupted"]
+# preparing_sandbox: the sandbox is being created / resumed before the agent starts
+TurnStatus = Literal["thinking", "running_tool", "interrupting", "interrupted", "preparing_sandbox"]
 InterruptReason = Literal["crash", "shutdown", "user", "new_message"]
 
 

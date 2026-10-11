@@ -16,7 +16,9 @@ def test_validation_target_accepts_only_the_expected_gke_context_and_project():
 
 
 def test_validation_target_rejects_a_different_kubectl_context():
-    with pytest.raises(SystemExit, match="GKE validation: context 'gke_other_us-central1_other-cluster'"):
+    with pytest.raises(
+        SystemExit, match="GKE validation: context 'gke_other_us-central1_other-cluster'"
+    ):
         verify_target(
             "project-a",
             "us-central1",

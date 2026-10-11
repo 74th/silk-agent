@@ -11,20 +11,22 @@ from collections.abc import Sequence
 import aiohttp
 
 
-async def _wait_ready(process: asyncio.subprocess.Process, timeout: float = 45) -> None:
-    deadline = asyncio.get_running_loop().time() + timeout
+async def _wait_ready(process: asyncio.subprocess.Process, limit_seconds: float = 45) -> None:
+    deadline = asyncio.get_running_loop().time() + limit_seconds
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=0.5)) as session:
         while asyncio.get_running_loop().time() < deadline:
             if process.returncode is not None:
-                raise RuntimeError(f"sandboxd exited before readiness (status {process.returncode})")
+                raise RuntimeError(
+                    f"sandboxd exited before readiness (status {process.returncode})"
+                )
             try:
                 async with session.get("http://127.0.0.1:8080/v1/health") as response:
                     if response.status == 200:
                         return
-            except (aiohttp.ClientError, asyncio.TimeoutError):
+            except (TimeoutError, aiohttp.ClientError):
                 pass
             await asyncio.sleep(0.1)
-    raise TimeoutError(f"sandboxd did not become ready within {timeout:g} seconds")
+    raise TimeoutError(f"sandboxd did not become ready within {limit_seconds:g} seconds")
 
 
 async def _stop(process: asyncio.subprocess.Process | None, grace: float = 5) -> None:
@@ -38,9 +40,12 @@ async def _stop(process: asyncio.subprocess.Process | None, grace: float = 5) ->
         await process.wait()
 
 
-async def run(*, sandboxd_command: Sequence[str] | None = None,
-              tracker_command: Sequence[str] | None = None,
-              stop_event: asyncio.Event | None = None) -> int:
+async def run(
+    *,
+    sandboxd_command: Sequence[str] | None = None,
+    tracker_command: Sequence[str] | None = None,
+    stop_event: asyncio.Event | None = None,
+) -> int:
     """Run both children; stopping tracker first closes active sandboxd streams."""
     sandboxd_command = sandboxd_command or (
         os.environ.get("SANDBOXD_BINARY", "/usr/local/bin/sandboxd"),
@@ -70,13 +75,22 @@ async def run(*, sandboxd_command: Sequence[str] | None = None,
         if stop_wait in done:
             return 0
         if tracker.returncode is not None:
-            raise RuntimeError(f"tracker exited ({tracker.returncode}); stopping sandboxd closes active command streams")
+            raise RuntimeError(
+                f"tracker exited ({tracker.returncode}); stopping sandboxd closes active command "
+                f"streams"
+            )
         raise RuntimeError(f"sandboxd exited ({sandboxd.returncode}); tracker cannot continue")
     finally:
         # Cancel tracker first so its gRPC Start streams close before sandboxd exits.
         await _stop(tracker)
         await _stop(sandboxd)
-        for task in locals().get("stop_wait",), locals().get("sandboxd_wait"), locals().get("tracker_wait"):
+        for task in (
+            locals().get(
+                "stop_wait",
+            ),
+            locals().get("sandboxd_wait"),
+            locals().get("tracker_wait"),
+        ):
             if task is not None and not task.done():
                 task.cancel()
         for sig in installed_signals:

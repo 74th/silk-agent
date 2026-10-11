@@ -13,7 +13,9 @@ from .types import ResourceRef
 class PersistentVolumeClaimApi(Protocol):
     async def read_namespaced_persistent_volume_claim(self, name: str, namespace: str) -> Any: ...
     async def list_namespaced_persistent_volume_claim(self, namespace: str) -> Any: ...
-    async def delete_namespaced_persistent_volume_claim(self, name: str, namespace: str, **kwargs: Any) -> Any: ...
+    async def delete_namespaced_persistent_volume_claim(
+        self, name: str, namespace: str, **kwargs: Any
+    ) -> Any: ...
 
 
 def attach_shared_code_volume(
@@ -35,17 +37,23 @@ def attach_shared_code_volume(
         raise ResourceOwnershipError("Sandbox manifest has no podTemplate container list") from exc
     targets = [container for container in containers if container.get("name") == container_name]
     if len(targets) != 1:
-        raise ResourceOwnershipError(f"expected exactly one runtime container named {container_name!r}")
+        raise ResourceOwnershipError(
+            f"expected exactly one runtime container named {container_name!r}"
+        )
     volumes = pod_spec.setdefault("volumes", [])
     if any(volume.get("name") == volume_name for volume in volumes):
         raise ResourceOwnershipError(f"volume name {volume_name!r} is already defined")
     mounts = targets[0].setdefault("volumeMounts", [])
-    if any(mount.get("mountPath") == mount_path or mount.get("name") == volume_name for mount in mounts):
+    if any(
+        mount.get("mountPath") == mount_path or mount.get("name") == volume_name for mount in mounts
+    ):
         raise ResourceOwnershipError("shared code mount conflicts with an existing container mount")
-    volumes.append({
-        "name": volume_name,
-        "persistentVolumeClaim": {"claimName": claim_name, "readOnly": True},
-    })
+    volumes.append(
+        {
+            "name": volume_name,
+            "persistentVolumeClaim": {"claimName": claim_name, "readOnly": True},
+        }
+    )
     mounts.append({"name": volume_name, "mountPath": mount_path, "readOnly": True})
     return result
 
@@ -58,26 +66,36 @@ class OwnedWorkspacePVCManager:
 
     async def list_owned(self, sandbox_ref: ResourceRef) -> tuple[ResourceRef, ...]:
         _validate_sandbox_ref(sandbox_ref)
-        response = await self._core.list_namespaced_persistent_volume_claim(sandbox_ref.namespace)
+        response = await self._core.list_namespaced_persistent_volume_claim(
+            sandbox_ref.namespace or ""  # _validate_sandbox_ref requires a namespace
+        )
         claims = _field(response, "items", []) or []
         refs: list[ResourceRef] = []
         for claim in claims:
             metadata = _field(claim, "metadata", {})
             if _owned_by(metadata, sandbox_ref.uid):
-                refs.append(ResourceRef(
-                    api_version="v1",
-                    kind="PersistentVolumeClaim",
-                    namespace=sandbox_ref.namespace,
-                    name=_field(metadata, "name"),
-                    uid=_field(metadata, "uid"),
-                ))
+                refs.append(
+                    ResourceRef(
+                        api_version="v1",
+                        kind="PersistentVolumeClaim",
+                        namespace=sandbox_ref.namespace,
+                        name=_field(metadata, "name"),
+                        uid=_field(metadata, "uid"),
+                    )
+                )
         return tuple(refs)
 
     async def delete_owned(self, pvc_ref: ResourceRef, *, sandbox_uid: str) -> None:
-        if pvc_ref.api_version != "v1" or pvc_ref.kind != "PersistentVolumeClaim" or not pvc_ref.namespace:
+        if (
+            pvc_ref.api_version != "v1"
+            or pvc_ref.kind != "PersistentVolumeClaim"
+            or not pvc_ref.namespace
+        ):
             raise ResourceOwnershipError("resource reference is not a namespaced PVC")
         try:
-            claim = await self._core.read_namespaced_persistent_volume_claim(pvc_ref.name, pvc_ref.namespace)
+            claim = await self._core.read_namespaced_persistent_volume_claim(
+                pvc_ref.name, pvc_ref.namespace
+            )
         except Exception as exc:
             if getattr(exc, "status", None) == 404:
                 return
@@ -95,10 +113,16 @@ class OwnedWorkspacePVCManager:
 
     async def verify_owned(self, pvc_ref: ResourceRef, *, sandbox_uid: str) -> None:
         """Confirm that a persisted PVC reference still names the same owned claim."""
-        if pvc_ref.api_version != "v1" or pvc_ref.kind != "PersistentVolumeClaim" or not pvc_ref.namespace:
+        if (
+            pvc_ref.api_version != "v1"
+            or pvc_ref.kind != "PersistentVolumeClaim"
+            or not pvc_ref.namespace
+        ):
             raise ResourceOwnershipError("resource reference is not a namespaced PVC")
         try:
-            claim = await self._core.read_namespaced_persistent_volume_claim(pvc_ref.name, pvc_ref.namespace)
+            claim = await self._core.read_namespaced_persistent_volume_claim(
+                pvc_ref.name, pvc_ref.namespace
+            )
         except Exception as exc:
             if getattr(exc, "status", None) == 404:
                 raise ResourceOwnershipError("owned PVC no longer exists") from exc

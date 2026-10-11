@@ -20,7 +20,10 @@ async def main() -> None:
         session = await manager.ensure(key)
         session = await manager.suspend(session)
         session = await manager.resume(session)
-        print(f"session generation={session.generation} state={session.state.value} sandbox={session.sandbox_ref.name}")
+        print(
+            f"session generation={session.generation} state={session.state.value} "
+            f"sandbox={session.sandbox_ref.name}"
+        )
 
 
 if __name__ == "__main__":

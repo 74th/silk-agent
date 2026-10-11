@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from pathlib import Path
 import subprocess
 import sys
-
-import yaml
+from pathlib import Path
 
 import pytest
+import yaml
 
 from gke_session_sandbox import TemplateRenderer, TemplateValidationError
 
@@ -25,7 +24,7 @@ def sandbox_template(image: object = None) -> dict[str, object]:
                         {"name": "agent-tools", "image": "example.invalid/tools:v1"},
                     ],
                 }
-            }
+            },
         },
     }
 
@@ -42,11 +41,16 @@ def test_render_keeps_parameter_value_types_and_is_deterministic() -> None:
     result = renderer.render(template, parameters=parameters)
     same = renderer.render(template, parameters=parameters)
 
-    assert result.manifest["spec"]["podTemplate"]["spec"]["containers"][0]["image"] == "example.invalid/sandbox:v1"
+    assert (
+        result.manifest["spec"]["podTemplate"]["spec"]["containers"][0]["image"]
+        == "example.invalid/sandbox:v1"
+    )
     assert result.manifest["spec"]["service"] is True
     assert result.digest == same.digest
     assert len(result.digest) == 64
-    assert template["spec"]["podTemplate"]["spec"]["containers"][0]["image"] == {"$param": "runtime.image"}
+    assert template["spec"]["podTemplate"]["spec"]["containers"][0]["image"] == {
+        "$param": "runtime.image"
+    }
 
 
 def test_render_applies_named_image_overrides_and_digest_tracks_them() -> None:
@@ -60,7 +64,10 @@ def test_render_applies_named_image_overrides_and_digest_tracks_them() -> None:
         image_overrides={"agent-tools": "example.invalid/tools@sha256:abcd"},
     )
 
-    assert second.manifest["spec"]["podTemplate"]["spec"]["containers"][1]["image"] == "example.invalid/tools@sha256:abcd"
+    assert (
+        second.manifest["spec"]["podTemplate"]["spec"]["containers"][1]["image"]
+        == "example.invalid/tools@sha256:abcd"
+    )
     assert second.digest != first.digest
 
 
@@ -151,7 +158,12 @@ def test_repository_template_and_example_config_render_without_cluster_access() 
     assert container["image"] == config.runtime.image
     assert container["resources"]["requests"] == {"cpu": "100m", "memory": "128Mi"}
     result = subprocess.run(
-        [sys.executable, str(root / "examples/render_template.py"), "--config", str(root / "examples/sandbox-config.yaml")],
+        [
+            sys.executable,
+            str(root / "examples/render_template.py"),
+            "--config",
+            str(root / "examples/sandbox-config.yaml"),
+        ],
         cwd=root,
         check=True,
         capture_output=True,

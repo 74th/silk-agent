@@ -52,10 +52,10 @@ def is_not_found(error: BaseException) -> bool:
 
 
 def make_client(project: str, location: str) -> Any:
-    from vertexai import Client
+    import vertexai
 
-    client: Any = Client(project=project, location=location)  # pyright: ignore[reportCallIssue]
-    return client
+    client_class: Any = vertexai.Client
+    return client_class(project=project, location=location)
 
 
 class AgentPlatformSessions:

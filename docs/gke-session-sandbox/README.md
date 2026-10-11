@@ -15,7 +15,7 @@
 >
 > 移管後の変更: `SandboxManager.from_config`とCLIが同期関数の`load_incluster_config()`を`await`していたため、Pod内で必ずkubeconfigへフォールバックして失敗していた。`kube.load_kube_client_config`で修正した。
 >
-> テストはsilk-agentのルートで`uv run pytest`。ruff / pyrightの対象からは、スタイルを揃えるまで外している。
+> テスト・lint・型チェックはsilk-agentのルートで`uv run pytest`、`uv run ruff check .`、`uv run pyrefly check`（このライブラリも対象）。移管後にruff formatで整形し、lintと型の指摘を直した。生成コード`_sandboxd_proto`はlintの対象外で、型スタブ（`.pyi`）を`scripts/generate-sandboxd-proto.py`で生成する。
 
 SlackBotからClaude Agent SDKを利用する際に、会話セッションごとの作業環境をGKE上で管理するためのPythonライブラリを設計する。Sandboxの作成・再接続・サスペンド・終了と、sandboxd経由のコマンド実行・ファイル操作を提供する。
 

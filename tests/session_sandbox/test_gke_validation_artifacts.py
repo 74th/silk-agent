@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 from gke_session_sandbox import gke_validation as validation
@@ -11,7 +10,11 @@ def test_failure_artifact_collector_saves_owned_resources_and_pod_logs(tmp_path,
     def fake_run(command, **_kwargs):
         calls.append(command)
         if command[:3] == ["kubectl", "get", "pods"]:
-            return SimpleNamespace(stdout=json.dumps({"items": [{"metadata": {"name": "sandbox-a"}}]}), stderr="", returncode=0)
+            return SimpleNamespace(
+                stdout=json.dumps({"items": [{"metadata": {"name": "sandbox-a"}}]}),
+                stderr="",
+                returncode=0,
+            )
         if command[:3] == ["kubectl", "logs", "sandbox-a"]:
             return SimpleNamespace(stdout="sandbox log output\n", stderr="", returncode=0)
         return SimpleNamespace(stdout="resource snapshot\n", stderr="", returncode=0)
@@ -35,8 +38,13 @@ def test_failure_artifact_collector_saves_owned_resources_and_pod_logs(tmp_path,
     assert (output / "pod-sandbox-a.log").read_text() == "sandbox log output\n"
     assert (output / "pod-sandbox-a.previous.log").exists()
     assert any("--previous" in command for command in calls)
-    configmap_command = next(command for command in calls if command[:3] == ["kubectl", "get", "configmaps"])
-    assert "custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp" in configmap_command
+    configmap_command = next(
+        command for command in calls if command[:3] == ["kubectl", "get", "configmaps"]
+    )
+    assert (
+        "custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp"
+        in configmap_command
+    )
 
 
 def test_failure_artifact_collector_records_diagnostic_command_errors(tmp_path, monkeypatch):

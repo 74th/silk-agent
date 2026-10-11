@@ -647,7 +647,7 @@ kubectl -n session-sandbox-system logs deploy/silk-agent -f
 
 ```bash
 uv run pytest                      # ユニット（外部に接続しない）
-uv run ruff check . && uv run pyright
+uv run ruff check . && uv run ruff format --check . && uv run pyrefly check
 # 実サービスに接続するテスト（課金対象。Haiku 5.5 / Gemini / Model Armor / Sessions）
 SILK_AGENT_TEST_RUNTIME=projects/<project>/locations/us-central1/reasoningEngines/<id> \
   uv run pytest -m integration

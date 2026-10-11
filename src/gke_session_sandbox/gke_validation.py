@@ -44,7 +44,9 @@ def collect_failure_artifacts(
 
     def capture(filename: str, command: list[str]) -> str:
         try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+            result = subprocess.run(
+                command, capture_output=True, text=True, timeout=60, check=False
+            )
             content = result.stdout
             if result.stderr:
                 content += f"\n--- stderr (exit {result.returncode}) ---\n{result.stderr}"
@@ -56,14 +58,27 @@ def collect_failure_artifacts(
     capture("namespace.yaml", ["kubectl", "get", "namespace", namespace, "-o", "yaml"])
     capture(
         "resources.yaml",
-        ["kubectl", "get", "sandbox,pod,pvc,service,networkpolicy,events", "-n", namespace, "-o", "yaml"],
+        [
+            "kubectl",
+            "get",
+            "sandbox,pod,pvc,service,networkpolicy,events",
+            "-n",
+            namespace,
+            "-o",
+            "yaml",
+        ],
     )
     # ConfigMaps can contain credentials, so retain only identifying metadata.
     capture(
         "configmaps.txt",
         [
-            "kubectl", "get", "configmaps", "-n", namespace,
-            "-o", "custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp",
+            "kubectl",
+            "get",
+            "configmaps",
+            "-n",
+            namespace,
+            "-o",
+            "custom-columns=NAME:.metadata.name,UID:.metadata.uid,CREATED:.metadata.creationTimestamp",
         ],
     )
     pod_result = capture("pods.json", ["kubectl", "get", "pods", "-n", namespace, "-o", "json"])
@@ -75,7 +90,15 @@ def collect_failure_artifacts(
         safe_pod_name = "".join(ch if ch.isalnum() or ch in "-." else "_" for ch in pod_name)
         capture(
             f"pod-{safe_pod_name}.log",
-            ["kubectl", "logs", pod_name, "-n", namespace, "--all-containers=true", "--prefix=true"],
+            [
+                "kubectl",
+                "logs",
+                pod_name,
+                "-n",
+                namespace,
+                "--all-containers=true",
+                "--prefix=true",
+            ],
         )
         capture(
             f"pod-{safe_pod_name}.previous.log",

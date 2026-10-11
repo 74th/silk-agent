@@ -137,9 +137,13 @@ def _apply_image_overrides(manifest: dict[str, Any], images: Mapping[str, str]) 
     }
     for container_name, image in images.items():
         if not isinstance(container_name, str) or not isinstance(image, str) or not image.strip():
-            raise TemplateValidationError("container image overrides require non-empty string names and images")
+            raise TemplateValidationError(
+                "container image overrides require non-empty string names and images"
+            )
         if container_name not in by_name:
-            raise TemplateValidationError(f"image override refers to unknown container {container_name!r}")
+            raise TemplateValidationError(
+                f"image override refers to unknown container {container_name!r}"
+            )
         by_name[container_name]["image"] = image
 
 

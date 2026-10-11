@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import yaml
 
@@ -13,8 +13,8 @@ from . import __version__
 from .config import ManagerConfig
 from .errors import ClusterCapabilityError, ConfigurationError
 from .kube import load_kube_client_config
-from .preflight import validate_cluster_capabilities
 from .manager import SandboxManager
+from .preflight import validate_cluster_capabilities
 from .reconciler import LifecycleReconciler
 
 
@@ -29,25 +29,33 @@ def build_parser() -> argparse.ArgumentParser:
         version=f"%(prog)s {__version__}",
     )
     commands = parser.add_subparsers(dest="command")
-    preflight = commands.add_parser("preflight", help="check cluster APIs, runtime, storage, namespaces, and RBAC")
+    preflight = commands.add_parser(
+        "preflight", help="check cluster APIs, runtime, storage, namespaces, and RBAC"
+    )
     preflight.add_argument("--config", required=True, help="manager YAML configuration")
     preflight.add_argument("--context", help="kubeconfig context; defaults to current context")
     reconcile = commands.add_parser("reconcile", help="run session lifecycle reconciliation")
     reconcile.add_argument("--config", required=True, help="manager YAML configuration")
     reconcile.add_argument("--context", help="kubeconfig context; defaults to current context")
-    reconcile.add_argument("--once", action="store_true", help="perform one reconciliation pass and exit")
+    reconcile.add_argument(
+        "--once", action="store_true", help="perform one reconciliation pass and exit"
+    )
     return parser
 
 
 async def _run_preflight(config_path: Path, kube_context: str | None) -> tuple[str, ...]:
     try:
-        settings = ManagerConfig.model_validate(yaml.safe_load(config_path.read_text(encoding="utf-8")))
+        settings = ManagerConfig.model_validate(
+            yaml.safe_load(await asyncio.to_thread(config_path.read_text, encoding="utf-8"))
+        )
     except Exception as exc:
         raise ConfigurationError(f"cannot load manager config {config_path}: {exc}") from exc
     try:
         from kubernetes_asyncio import client
     except ImportError as exc:
-        raise ConfigurationError("install the kubernetes-asyncio dependency to run preflight") from exc
+        raise ConfigurationError(
+            "install the kubernetes-asyncio dependency to run preflight"
+        ) from exc
 
     await load_kube_client_config(kube_context)
     api_client = client.ApiClient()
@@ -64,7 +72,9 @@ async def _run_preflight(config_path: Path, kube_context: str | None) -> tuple[s
         await api_client.close()
 
 
-async def _run_reconcile(config_path: Path, kube_context: str | None, *, once: bool) -> tuple[str, ...]:
+async def _run_reconcile(
+    config_path: Path, kube_context: str | None, *, once: bool
+) -> tuple[str, ...]:
     manager = await SandboxManager.from_config(config_path, kube_context=kube_context)
     try:
         reconciler = LifecycleReconciler(manager)

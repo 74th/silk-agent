@@ -165,6 +165,9 @@ class LocalProcessRuntime:
 
     # ------------------------------------------------------------ notices / skills
 
+    async def is_ready(self, conversation_key: str) -> bool:
+        return True
+
     async def pop_notices(self, conversation_key: str) -> list[str]:
         return []
 

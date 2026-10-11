@@ -45,7 +45,7 @@
 - [x] 6.2 停止語の判定（NFKC正規化、前後の空白、大文字化、完全一致、設定で変更可）を実装し、slack-channelのspecの停止語のシナリオのテストが通ることを確認する
 - [x] 6.3 `ProgressView`と進捗メッセージ（投稿、1秒に1回までの`chat.update`、ツール一覧の最新20件と残り件数、MCPツールの表示、「最終更新」の1分更新、完了・中断の表示、更新失敗時の再投稿）を実装し、`FakeClock`とモックしたSlack clientで「5分のツール実行中に最終更新が1分ごとに変わる」ことをテストで確認する
 - [x] 6.4 応答の投稿（テキストブロック単位、12,000文字超はファイルとしてアップロード）と、再起動後の「Botの停止により中断」の表示を実装し、モックしたSlack clientでテストする
-- [ ] 6.5 `apps/slack_bot.py`（設定、Secret Managerからのトークン取得、起動時の中断検出、SIGTERMの処理）を作り、テスト用のworkspaceで「メンション → ツール実行の表示 → 応答」「停止」「Botの強制終了 → 最終更新が止まる → 再起動で中断表示」を手動で確認する
+- [x] 6.5 `apps/slack_bot.py`（設定、Secret Managerからのトークン取得、起動時の中断検出、SIGTERMの処理）を作り、テスト用のworkspaceで「メンション → ツール実行の表示 → 応答」「停止」「Botの強制終了 → 最終更新が止まる → 再起動で中断表示」を手動で確認する（2026-10-11 Slackで確認: メンション→ツール表示→応答、停止語、強制終了後の「⚠️ Botの停止により中断」表示、「続けて」で実行中だったcommandを確認してから再開）
 
 ## 7. Streamlit（dev-channels）
 
@@ -54,7 +54,7 @@
 ## 8. Sandbox（GKE）
 
 - [x] 8.1 `GkeSessionSandboxRuntime`（`SandboxManager.ensure`、`USER_EMAIL`のenv、command / file APIへの対応、`pending_context_events`の反映とack）を実装し、`gke-session-sandbox`をモックしたユニットテストで通知が次のturnに反映されることを確認する
-- [ ] 8.2 `gke-session-sandbox`のcommand / file APIの実装後に、検証用GKEクラスタでSlack（またはStreamlit）から「ファイル作成 → コマンド実行 → 別の会話から見えない」をE2Eで確認する
+- [x] 8.2 `gke-session-sandbox`のcommand / file APIの実装後に、検証用GKEクラスタでSlack（またはStreamlit）から「ファイル作成 → コマンド実行 → 別の会話から見えない」をE2Eで確認する（2026-10-11 Slackで確認: 別スレッドからは前のスレッドのファイルが見えない）
 
 ## 9. 仕上げ
 

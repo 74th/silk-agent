@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
-from .errors import RepositoryCapacityError, RepositoryConflictError, SessionLeaseHeldError, SessionLeaseLostError, StaleGenerationError
+from .errors import (
+    RepositoryCapacityError,
+    RepositoryConflictError,
+    SessionLeaseHeldError,
+    SessionLeaseLostError,
+    StaleGenerationError,
+)
 from .types import CommandRecord, CommandState, SessionEvent, SessionKey, SessionRecord, utc_now
 
 _RECORD_DATA_KEY = "record.json"
@@ -18,7 +24,9 @@ class CoreV1Api(Protocol):
     async def read_namespaced_config_map(self, name: str, namespace: str) -> Any: ...
     async def create_namespaced_config_map(self, namespace: str, body: Any) -> Any: ...
     async def patch_namespaced_config_map(self, name: str, namespace: str, body: Any) -> Any: ...
-    async def list_namespaced_config_map(self, namespace: str, label_selector: str | None = None) -> Any: ...
+    async def list_namespaced_config_map(
+        self, namespace: str, label_selector: str | None = None
+    ) -> Any: ...
 
 
 class CoordinationV1Api(Protocol):
@@ -72,12 +80,16 @@ class ConfigMapSessionRepository:
         except Exception as exc:
             if _status(exc) != 404:
                 raise
-            body = _lease_body(name, self._namespace, holder_identity, now, self._lease_duration_seconds)
+            body = _lease_body(
+                name, self._namespace, holder_identity, now, self._lease_duration_seconds
+            )
             try:
                 await self._coordination.create_namespaced_lease(self._namespace, body)
             except Exception as create_exc:
                 if _status(create_exc) == 409:
-                    raise SessionLeaseHeldError("session lease was acquired concurrently") from create_exc
+                    raise SessionLeaseHeldError(
+                        "session lease was acquired concurrently"
+                    ) from create_exc
                 raise
             return LeaseToken(key_hash, holder_identity)
 
@@ -91,7 +103,13 @@ class ConfigMapSessionRepository:
         resource_version = _resource_version(lease)
         body = [
             {"op": "test", "path": "/metadata/resourceVersion", "value": resource_version},
-            {"op": "replace", "path": "/spec", "value": _lease_spec(holder_identity, now, self._lease_duration_seconds, transitions)},
+            {
+                "op": "replace",
+                "path": "/spec",
+                "value": _lease_spec(
+                    holder_identity, now, self._lease_duration_seconds, transitions
+                ),
+            },
         ]
         try:
             await self._coordination.patch_namespaced_lease(name, self._namespace, body)
@@ -107,13 +125,21 @@ class ConfigMapSessionRepository:
         resource_version = _resource_version(lease)
         body = [
             {"op": "test", "path": "/metadata/resourceVersion", "value": resource_version},
-            {"op": "replace", "path": "/spec", "value": _lease_spec(
-                token.holder_identity, _utc(self._clock()), self._lease_duration_seconds,
-                _field(spec, "leaseTransitions", 0) or 0,
-            )},
+            {
+                "op": "replace",
+                "path": "/spec",
+                "value": _lease_spec(
+                    token.holder_identity,
+                    _utc(self._clock()),
+                    self._lease_duration_seconds,
+                    _field(spec, "leaseTransitions", 0) or 0,
+                ),
+            },
         ]
         try:
-            await self._coordination.patch_namespaced_lease(_resource_name("lease", token.key_hash), self._namespace, body)
+            await self._coordination.patch_namespaced_lease(
+                _resource_name("lease", token.key_hash), self._namespace, body
+            )
         except Exception as exc:
             if _status(exc) == 409:
                 raise SessionLeaseLostError("session lease was lost during renewal") from exc
@@ -126,13 +152,21 @@ class ConfigMapSessionRepository:
         resource_version = _resource_version(lease)
         body = [
             {"op": "test", "path": "/metadata/resourceVersion", "value": resource_version},
-            {"op": "replace", "path": "/spec", "value": _lease_spec(
-                "", _utc(self._clock()), self._lease_duration_seconds,
-                _field(spec, "leaseTransitions", 0) or 0,
-            )},
+            {
+                "op": "replace",
+                "path": "/spec",
+                "value": _lease_spec(
+                    "",
+                    _utc(self._clock()),
+                    self._lease_duration_seconds,
+                    _field(spec, "leaseTransitions", 0) or 0,
+                ),
+            },
         ]
         try:
-            await self._coordination.patch_namespaced_lease(_resource_name("lease", token.key_hash), self._namespace, body)
+            await self._coordination.patch_namespaced_lease(
+                _resource_name("lease", token.key_hash), self._namespace, body
+            )
         except Exception as exc:
             if _status(exc) == 409:
                 raise SessionLeaseLostError("session lease changed before release") from exc
@@ -155,16 +189,20 @@ class ConfigMapSessionRepository:
             record = await self.get_by_hash(key_hash)
             if record is not None:
                 stored.append(record)
-        return tuple(sorted(stored, key=lambda item: (item.record.key_hash, item.record.generation)))
+        return tuple(
+            sorted(stored, key=lambda item: (item.record.key_hash, item.record.generation))
+        )
 
     async def create(self, token: LeaseToken, record: SessionRecord) -> StoredSession:
         await self._assert_token(token, record.key_hash)
         self._validate_record(record)
         name = _resource_name("session", token.key_hash)
         body = {
-            "apiVersion": "v1", "kind": "ConfigMap",
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
             "metadata": {
-                "name": name, "namespace": self._namespace,
+                "name": name,
+                "namespace": self._namespace,
                 "labels": {"session-sandbox.example.com/managed": "true"},
                 "annotations": {_KEY_HASH_ANNOTATION: token.key_hash},
             },
@@ -197,7 +235,9 @@ class ConfigMapSessionRepository:
             updated = await self._core.patch_namespaced_config_map(name, self._namespace, body)
         except Exception as exc:
             if _status(exc) == 409:
-                raise RepositoryConflictError("session ConfigMap changed during compare-and-swap") from exc
+                raise RepositoryConflictError(
+                    "session ConfigMap changed during compare-and-swap"
+                ) from exc
             raise
         return StoredSession(record, _resource_version(updated))
 
@@ -213,7 +253,9 @@ class ConfigMapSessionRepository:
         for command in stored.record.active_commands:
             if command.command_id == command_id:
                 if command.generation != generation:
-                    raise StaleGenerationError("command ID belongs to a different session generation")
+                    raise StaleGenerationError(
+                        "command ID belongs to a different session generation"
+                    )
                 return command, False
         command = CommandRecord(
             command_id=command_id,
@@ -222,8 +264,12 @@ class ConfigMapSessionRepository:
             state=CommandState.RUNNING,
             accepted_at=_utc(self._clock()),
         )
-        record = stored.record.model_copy(update={"active_commands": (*stored.record.active_commands, command)})
-        await self.compare_and_swap(token, record, expected_resource_version=stored.resource_version)
+        record = stored.record.model_copy(
+            update={"active_commands": (*stored.record.active_commands, command)}
+        )
+        await self.compare_and_swap(
+            token, record, expected_resource_version=stored.resource_version
+        )
         return command, True
 
     async def append_event_once(self, token: LeaseToken, event: SessionEvent) -> bool:
@@ -233,8 +279,12 @@ class ConfigMapSessionRepository:
             raise RepositoryConflictError("session ConfigMap is missing while appending event")
         if any(item.event_id == event.event_id for item in stored.record.pending_events):
             return False
-        record = stored.record.model_copy(update={"pending_events": (*stored.record.pending_events, event)})
-        await self.compare_and_swap(token, record, expected_resource_version=stored.resource_version)
+        record = stored.record.model_copy(
+            update={"pending_events": (*stored.record.pending_events, event)}
+        )
+        await self.compare_and_swap(
+            token, record, expected_resource_version=stored.resource_version
+        )
         return True
 
     async def acknowledge_event(self, token: LeaseToken, event_id: str) -> bool:
@@ -256,7 +306,9 @@ class ConfigMapSessionRepository:
         if not found or not changed:
             return False
         record = stored.record.model_copy(update={"pending_events": tuple(events)})
-        await self.compare_and_swap(token, record, expected_resource_version=stored.resource_version)
+        await self.compare_and_swap(
+            token, record, expected_resource_version=stored.resource_version
+        )
         return True
 
     async def record_operation(
@@ -266,14 +318,20 @@ class ConfigMapSessionRepository:
         stored = await self.get_by_hash(token.key_hash)
         if stored is None:
             raise RepositoryConflictError("session ConfigMap is missing while recording operation")
-        record = stored.record.model_copy(update={"operation_id": operation_id, "operation_phase": operation_phase})
-        return await self.compare_and_swap(token, record, expected_resource_version=stored.resource_version)
+        record = stored.record.model_copy(
+            update={"operation_id": operation_id, "operation_phase": operation_phase}
+        )
+        return await self.compare_and_swap(
+            token, record, expected_resource_version=stored.resource_version
+        )
 
     async def get_by_hash(self, key_hash: str) -> StoredSession | None:
         if re.fullmatch(r"[0-9a-f]{64}", key_hash) is None:
             raise ValueError("key_hash must be a lowercase SHA-256 hex string")
         try:
-            cm = await self._core.read_namespaced_config_map(_resource_name("session", key_hash), self._namespace)
+            cm = await self._core.read_namespaced_config_map(
+                _resource_name("session", key_hash), self._namespace
+            )
         except Exception as exc:
             if _status(exc) == 404:
                 return None
@@ -304,13 +362,17 @@ class ConfigMapSessionRepository:
 
     async def _read_owned_lease(self, token: LeaseToken) -> Any:
         try:
-            lease = await self._coordination.read_namespaced_lease(_resource_name("lease", token.key_hash), self._namespace)
+            lease = await self._coordination.read_namespaced_lease(
+                _resource_name("lease", token.key_hash), self._namespace
+            )
         except Exception as exc:
             if _status(exc) == 404:
                 raise SessionLeaseLostError("session lease no longer exists") from exc
             raise
         spec = _field(lease, "spec", {})
-        if _field(spec, "holderIdentity") != token.holder_identity or _lease_expired(spec, _utc(self._clock())):
+        if _field(spec, "holderIdentity") != token.holder_identity or _lease_expired(
+            spec, _utc(self._clock())
+        ):
             raise SessionLeaseLostError("session lease is no longer held by this worker")
         return lease
 
@@ -323,9 +385,12 @@ def _serialize(record: SessionRecord) -> str:
     return record.model_dump_json(exclude_none=False)
 
 
-def _lease_body(name: str, namespace: str, holder: str, now: datetime, duration: int) -> dict[str, Any]:
+def _lease_body(
+    name: str, namespace: str, holder: str, now: datetime, duration: int
+) -> dict[str, Any]:
     return {
-        "apiVersion": "coordination.k8s.io/v1", "kind": "Lease",
+        "apiVersion": "coordination.k8s.io/v1",
+        "kind": "Lease",
         "metadata": {"name": name, "namespace": namespace},
         "spec": _lease_spec(holder, now, duration, 0),
     }
@@ -334,8 +399,11 @@ def _lease_body(name: str, namespace: str, holder: str, now: datetime, duration:
 def _lease_spec(holder: str, now: datetime, duration: int, transitions: int) -> dict[str, Any]:
     timestamp = now.isoformat().replace("+00:00", "Z")
     return {
-        "holderIdentity": holder, "leaseDurationSeconds": duration,
-        "acquireTime": timestamp, "renewTime": timestamp, "leaseTransitions": transitions,
+        "holderIdentity": holder,
+        "leaseDurationSeconds": duration,
+        "acquireTime": timestamp,
+        "renewTime": timestamp,
+        "leaseTransitions": transitions,
     }
 
 
@@ -372,4 +440,4 @@ def _status(exc: Exception) -> int | None:
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("clock must return a timezone-aware datetime")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)

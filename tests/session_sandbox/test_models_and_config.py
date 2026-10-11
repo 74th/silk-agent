@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -25,7 +25,10 @@ def runtime_settings(**overrides: object) -> dict[str, object]:
 def test_session_key_has_a_stable_non_reversible_name_hash() -> None:
     key = SessionKey(tenant_id="tenant-a", session_id="channel/thread")
 
-    assert key.stable_hash() == SessionKey(tenant_id="tenant-a", session_id="channel/thread").stable_hash()
+    assert (
+        key.stable_hash()
+        == SessionKey(tenant_id="tenant-a", session_id="channel/thread").stable_hash()
+    )
     assert len(key.stable_hash()) == 64
     assert "channel/thread" not in key.stable_hash()
 
@@ -66,7 +69,7 @@ def test_process_identity_rejects_invalid_numeric_fields() -> None:
 
 
 def test_finished_command_requires_an_aware_finish_time() -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     base = {
         "command_id": "cmd-1",
         "generation": 1,

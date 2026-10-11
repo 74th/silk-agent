@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 from collections.abc import AsyncIterable, Awaitable, Callable, Iterable
@@ -28,6 +27,7 @@ def _tracks_activity(method):
         finally:
             if self._activity_hook is not None:
                 await self._activity_hook(-1)
+
     wrapped.__name__ = method.__name__
     wrapped.__doc__ = method.__doc__
     return wrapped
@@ -45,10 +45,16 @@ class FileInfo:
 class FileClient:
     """Read and write workspace files over sandboxd REST without gRPC access."""
 
-    def __init__(self, endpoint_resolver: EndpointResolver, *, read_only: bool = False,
-                 response_limit_bytes: int = 8 * 1024 * 1024,
-                 transfer_limit_bytes: int = 64 * 1024 * 1024,
-                 request_timeout: float = 30, activity_hook: FileActivityHook | None = None) -> None:
+    def __init__(
+        self,
+        endpoint_resolver: EndpointResolver,
+        *,
+        read_only: bool = False,
+        response_limit_bytes: int = 8 * 1024 * 1024,
+        transfer_limit_bytes: int = 64 * 1024 * 1024,
+        request_timeout: float = 30,
+        activity_hook: FileActivityHook | None = None,
+    ) -> None:
         if min(response_limit_bytes, transfer_limit_bytes) <= 0 or request_timeout <= 0:
             raise ValueError("file limits and request_timeout must be positive")
         self._endpoint_resolver = endpoint_resolver
@@ -60,8 +66,10 @@ class FileClient:
         self._http_session: aiohttp.ClientSession | None = None
         self._base: str | None = None
 
-    async def __aenter__(self) -> "FileClient":
-        self._http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self._request_timeout))
+    async def __aenter__(self) -> FileClient:
+        self._http_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=self._request_timeout)
+        )
         return self
 
     async def __aexit__(self, *_exc) -> None:
@@ -74,7 +82,9 @@ class FileClient:
 
     def _http(self) -> aiohttp.ClientSession:
         if self._http_session is None:
-            self._http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self._request_timeout))
+            self._http_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self._request_timeout)
+            )
         return self._http_session
 
     async def _url(self, path: str) -> str:
@@ -111,8 +121,10 @@ class FileClient:
             async for chunk in response.content.iter_chunked(64 * 1024):
                 copied += len(chunk)
                 if copied > self._transfer_limit:
-                    raise FileTransferLimitExceeded(f"streamed read exceeds {self._transfer_limit} bytes")
-                writer = sink if callable(sink) else getattr(sink, "write")
+                    raise FileTransferLimitExceeded(
+                        f"streamed read exceeds {self._transfer_limit} bytes"
+                    )
+                writer = sink if callable(sink) else sink.write
                 result = writer(chunk)
                 if inspect.isawaitable(result):
                     await result
@@ -122,24 +134,31 @@ class FileClient:
     async def write(self, path: str, data: bytes, *, mode: str | None = None) -> None:
         self._ensure_writable(path)
         if len(data) > self._transfer_limit:
-            raise FileTransferLimitExceeded(f"write exceeds {self._transfer_limit} bytes; use write_from()")
+            raise FileTransferLimitExceeded(
+                f"write exceeds {self._transfer_limit} bytes; use write_from()"
+            )
         await self._put(path, data, mode=mode)
 
     @_tracks_activity
-    async def write_from(self, path: str, source: AsyncIterable[bytes] | Iterable[bytes], *,
-                         mode: str | None = None) -> int:
+    async def write_from(
+        self, path: str, source: AsyncIterable[bytes] | Iterable[bytes], *, mode: str | None = None
+    ) -> int:
         self._ensure_writable(path)
         copied = 0
 
         async def chunks():
             nonlocal copied
-            iterator = source.__aiter__() if hasattr(source, "__aiter__") else _iterate_sync(source)
+            iterator = (
+                source.__aiter__() if isinstance(source, AsyncIterable) else _iterate_sync(source)
+            )
             async for chunk in iterator:
                 if not isinstance(chunk, bytes):
                     raise TypeError("write_from source must yield bytes")
                 copied += len(chunk)
                 if copied > self._transfer_limit:
-                    raise FileTransferLimitExceeded(f"streamed write exceeds {self._transfer_limit} bytes")
+                    raise FileTransferLimitExceeded(
+                        f"streamed write exceeds {self._transfer_limit} bytes"
+                    )
                 yield chunk
 
         await self._put(path, chunks(), mode=mode)
@@ -159,14 +178,23 @@ class FileClient:
             try:
                 listing = await response.json()
                 entries = listing["entries"]
-                return tuple(FileInfo(
-                    path=str(PurePosixPath(_workspace_path(path)) / entry["name"]),
-                    type=entry["type"], size=int(entry["size"]),
-                    modified_at=datetime.fromisoformat(entry["modified_at"].replace("Z", "+00:00")),
-                    mode=entry.get("mode"),
-                ) for entry in entries if entry.get("name") != ".session-runtime")
+                return tuple(
+                    FileInfo(
+                        path=str(PurePosixPath(_workspace_path(path)) / entry["name"]),
+                        type=entry["type"],
+                        size=int(entry["size"]),
+                        modified_at=datetime.fromisoformat(
+                            entry["modified_at"].replace("Z", "+00:00")
+                        ),
+                        mode=entry.get("mode"),
+                    )
+                    for entry in entries
+                    if entry.get("name") != ".session-runtime"
+                )
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise FileOperationError("sandboxd returned an invalid directory listing", path=path) from exc
+                raise FileOperationError(
+                    "sandboxd returned an invalid directory listing", path=path
+                ) from exc
 
     @_tracks_activity
     async def stat(self, path: str) -> FileInfo:
@@ -196,7 +224,9 @@ class FileClient:
         if relative in {"", "."}:
             raise ValueError("workspace root cannot be deleted")
         url = await self._url(path)
-        async with self._http().delete(url, params={"recursive": "true"} if recursive else None) as response:
+        async with self._http().delete(
+            url, params={"recursive": "true"} if recursive else None
+        ) as response:
             await self._check(response, path, expected={204})
 
     def _ensure_writable(self, path: str) -> None:
@@ -204,12 +234,17 @@ class FileClient:
             raise WorkspaceReadOnlyError(f"workspace is read-only: {path}")
 
     @staticmethod
-    async def _check(response: aiohttp.ClientResponse, path: str, *, expected: set[int] | None = None) -> None:
+    async def _check(
+        response: aiohttp.ClientResponse, path: str, *, expected: set[int] | None = None
+    ) -> None:
         expected = expected or {200}
         if response.status not in expected:
             detail = (await response.read()).decode(errors="replace")
-            raise FileOperationError(detail or f"sandboxd returned HTTP {response.status}",
-                                     path=path, status=response.status)
+            raise FileOperationError(
+                detail or f"sandboxd returned HTTP {response.status}",
+                path=path,
+                status=response.status,
+            )
 
 
 async def _iterate_sync(source: Iterable[bytes]):

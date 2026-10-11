@@ -170,6 +170,7 @@ async def build_services(
         cancel_background=background.cancel_all,
         notice_source=runtime.pop_notices,
         notice_ack=runtime.ack_notices,
+        sandbox_ready=runtime.is_ready,
     )
     # A backgrounded command reports its completion to its conversation.
     background.on_finished = orchestrator.notify

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -34,8 +34,12 @@ class Commands:
         self.argv = argv
         self.kwargs = kwargs
         return CommandResult(
-            command_id="turn-1", exit_code=0, stdout=b"turn complete", stderr=b"",
-            stop_reason=None, output_complete=True,
+            command_id="turn-1",
+            exit_code=0,
+            stdout=b"turn complete",
+            stderr=b"",
+            stop_reason=None,
+            output_complete=True,
         )
 
 
@@ -63,9 +67,11 @@ class Manager:
 @pytest.mark.asyncio
 async def test_bot_adapter_persists_events_before_ack_and_runs_one_command():
     event = SessionEvent(
-        event_id="session:1:lost", generation=1,
+        event_id="session:1:lost",
+        generation=1,
         event_type=EventType.WORKSPACE_LOST,
-        occurred_at="2030-01-01T00:00:00Z", reason="external-pvc-loss",
+        occurred_at="2030-01-01T00:00:00Z",
+        reason="external-pvc-loss",
         context_message="The previous workspace was lost.",
     )
     store = ConversationStore()
@@ -79,9 +85,7 @@ async def test_bot_adapter_persists_events_before_ack_and_runs_one_command():
     assert manager.acked == [event.event_id]
     assert store.messages == [event.context_message]
     assert result.exit_code == 0
-    assert manager.handle.commands.argv == [
-        "python3", "/opt/agent/one_turn_agent.py", "hello"
-    ]
+    assert manager.handle.commands.argv == ["python3", "/opt/agent/one_turn_agent.py", "hello"]
     assert manager.handle.commands.kwargs == {"check": True, "timeout_seconds": 600}
 
 
@@ -94,12 +98,21 @@ def test_one_turn_agent_fixture_exits_after_simulated_llm_wait():
 
 async def _run_fixture(fixture: Path):
     process = await asyncio.create_subprocess_exec(
-        sys.executable, str(fixture), "waiting prompt", "--wait-seconds", "0.1",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        sys.executable,
+        str(fixture),
+        "waiting prompt",
+        "--wait-seconds",
+        "0.1",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
     stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=2)
-    return type("ProcessResult", (), {
-        "returncode": process.returncode,
-        "stdout": stdout.decode(),
-        "stderr": stderr.decode(),
-    })()
+    return type(
+        "ProcessResult",
+        (),
+        {
+            "returncode": process.returncode,
+            "stdout": stdout.decode(),
+            "stderr": stderr.decode(),
+        },
+    )()

@@ -333,6 +333,9 @@ class InMemoryRuntime:
             if p.startswith(prefix) or path in ("", "/", ".")
         ]
 
+    async def is_ready(self, conversation_key: str) -> bool:
+        return True
+
     async def pop_notices(self, conversation_key: str) -> list[str]:
         return list(self._w(conversation_key).notices)
 

@@ -29,22 +29,6 @@ class SessionLeaseLostError(GkeSessionSandboxError):
     """The caller no longer owns this session's Lease."""
 
 
-class RepositoryConflictError(GkeSessionSandboxError):
-    """A compare-and-swap write lost a resourceVersion race."""
-
-
-class RepositoryCapacityError(GkeSessionSandboxError):
-    """A session record or its pending-event queue reached a configured limit."""
-
-
-class SessionLeaseHeldError(GkeSessionSandboxError):
-    """Another live holder owns this session's Lease."""
-
-
-class SessionLeaseLostError(GkeSessionSandboxError):
-    """The caller no longer owns this session's Lease."""
-
-
 class TemplateValidationError(ConfigurationError):
     """A rendered or configured sandbox template is invalid."""
 
@@ -84,7 +68,9 @@ class RuntimeConnectionError(GkeSessionSandboxError):
 class ExecutionOutcomeUnknown(GkeSessionSandboxError):
     """A command may have run, but its final result could not be confirmed."""
 
-    def __init__(self, command_id: str, message: str = "command outcome could not be confirmed") -> None:
+    def __init__(
+        self, command_id: str, message: str = "command outcome could not be confirmed"
+    ) -> None:
         super().__init__(f"{message} (command_id={command_id})")
         self.command_id = command_id
 
@@ -115,7 +101,9 @@ class OutputStorageLimitExceeded(GkeSessionSandboxError):
     """Persistent command output reached its configured storage limit."""
 
     def __init__(self, command_id: str, limit_bytes: int) -> None:
-        super().__init__(f"session output storage exceeded {limit_bytes} bytes (command_id={command_id})")
+        super().__init__(
+            f"session output storage exceeded {limit_bytes} bytes (command_id={command_id})"
+        )
         self.command_id = command_id
         self.limit_bytes = limit_bytes
 
@@ -123,7 +111,9 @@ class OutputStorageLimitExceeded(GkeSessionSandboxError):
 class OutputWriteError(GkeSessionSandboxError):
     """Persisting command output failed before the storage quota was reached."""
 
-    def __init__(self, command_id: str, message: str = "command output storage write failed") -> None:
+    def __init__(
+        self, command_id: str, message: str = "command output storage write failed"
+    ) -> None:
         super().__init__(f"{message} (command_id={command_id})")
         self.command_id = command_id
 

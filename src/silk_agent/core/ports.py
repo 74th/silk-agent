@@ -124,7 +124,12 @@ class SandboxRuntime(Protocol):
     async def list_files(self, conversation_key: str, path: str) -> list[FileEntry]: ...
 
     async def pop_notices(self, conversation_key: str) -> list[str]:
-        """Notices (e.g. workspace deleted) that should reach the agent."""
+        """Notices (e.g. workspace deleted) that should reach the agent. Makes sure the
+        sandbox is running (creates / resumes it), which can take a while."""
+        ...
+
+    async def is_ready(self, conversation_key: str) -> bool:
+        """True when the conversation's sandbox is already running (no start-up wait)."""
         ...
 
     async def ack_notices(self, conversation_key: str) -> None: ...

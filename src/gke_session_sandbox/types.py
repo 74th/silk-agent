@@ -4,10 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 
 class StrictModel(BaseModel):
@@ -91,7 +99,7 @@ class CommandRecord(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def validate_state_timestamps(self) -> "CommandRecord":
+    def validate_state_timestamps(self) -> CommandRecord:
         if self.state is CommandState.RUNNING and self.finished_at is not None:
             raise ValueError("running command must not have finished_at")
         if self.state is CommandState.FINISHED and self.finished_at is None:
@@ -154,9 +162,16 @@ class SessionRecord(StrictModel):
     retry_after: datetime | None = None
 
     @field_validator(
-        "ready_at", "last_command_started_at", "last_command_finished_at",
-        "last_commands_checked_at", "last_no_commands_confirmed_at", "last_file_operation_at", "idle_since",
-        "suspended_at", "expires_at", "retry_after",
+        "ready_at",
+        "last_command_started_at",
+        "last_command_finished_at",
+        "last_commands_checked_at",
+        "last_no_commands_confirmed_at",
+        "last_file_operation_at",
+        "idle_since",
+        "suspended_at",
+        "expires_at",
+        "retry_after",
     )
     @classmethod
     def timestamps_are_aware(cls, value: datetime | None) -> datetime | None:
@@ -167,4 +182,4 @@ class SessionRecord(StrictModel):
 
 def utc_now() -> datetime:
     """Return an aware UTC timestamp for record creation and injected test clocks."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)

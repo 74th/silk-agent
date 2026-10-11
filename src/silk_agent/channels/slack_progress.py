@@ -87,6 +87,7 @@ class ProgressView:
     warnings: tuple[str, ...] = ()
     error: str = ""
     appended: int = 0  # user messages added to this turn while it was running
+    preparing_sandbox: bool = False
 
     @property
     def finished(self) -> bool:
@@ -96,6 +97,7 @@ class ProgressView:
 
     def apply(self, event: OutboundEvent) -> None:
         if isinstance(event, ToolStarted):
+            self.preparing_sandbox = False
             self.tools.append(ToolLine(event.tool_use_id, event.name, event.summary))
         elif isinstance(event, ToolFinished):
             for line in reversed(self.tools):
@@ -106,6 +108,7 @@ class ProgressView:
                         line.summary = event.summary
                     break
         elif isinstance(event, StatusChanged):
+            self.preparing_sandbox = event.status == "preparing_sandbox"
             if event.status == "interrupting" and not self.finished:
                 self.status = "interrupting"
         elif isinstance(event, TurnFinished):
@@ -136,7 +139,9 @@ class ProgressView:
         end = self.finished_at or now
         elapsed = format_duration((end - self.started_at).total_seconds())
 
-        if self.status == "running":
+        if self.status == "running" and self.preparing_sandbox:
+            header = f"🛠 作業環境を起動しています…（経過 {elapsed}）　最終更新 {stamp}"
+        elif self.status == "running":
             header = f"⏳ 実行中（経過 {elapsed}）　最終更新 {stamp}"
         elif self.status == "interrupting":
             header = f"⏹ 中断しています…（経過 {elapsed}）　最終更新 {stamp}"
