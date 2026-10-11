@@ -11,4 +11,4 @@ Checked against the GKE cluster on 2026-10-10.
 - Reader B on a regular system-pool node read the same shared fixture concurrently and could not see Reader A's workspace file or write to the shared mount.
 - Both Pods completed successfully on different nodes in the fixture disk's zone. The failed initial snapshot attempt created a transient Cloud snapshot; its Kubernetes objects and the Cloud snapshot were removed before the successful direct-disk ROM test.
 
-To repeat the check, use `scripts/bootstrap-platform.sh` followed by `scripts/validate-storage.sh` as documented in `docs/agent-sandbox-controller.md`. The fixture uses a zonal disk, so the two readers are deliberately scheduled to separate node pools in the same zone.
+This is historical evidence from the previous validation environment. For the current dedicated cluster, install the controller and required workspace StorageClass with `kubectl kustomize k8s/platform | kubectl apply -f -`, then follow the [zonal cluster runbook](../zonal-cluster-runbook.md). The old shared fixture and its validator were not transferred into the Bot's production platform bundle.

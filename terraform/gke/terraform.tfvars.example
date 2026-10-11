@@ -1,0 +1,9 @@
+project_id    = "nnyn-dev"
+zone          = "us-central1-a"
+operator_cidrs = ["203.0.113.10/32"] # Replace with the operator's public egress CIDR.
+
+# Confirm these ranges do not overlap any existing VPC or GKE control-plane range.
+subnet_cidr   = "192.168.0.0/20"
+pods_cidr     = "192.168.32.0/19"
+services_cidr = "192.168.64.0/20"
+master_cidr   = "172.20.0.0/28"

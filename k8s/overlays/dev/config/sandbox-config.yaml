@@ -8,7 +8,7 @@ repository_database_path: /var/lib/session-sandbox/sessions.sqlite3
 repository_require_mount: true
 runtime:
   container_name: sandboxd
-  image: us-central1-docker.pkg.dev/nnyn-dev/research-gke-agent-sandbox-with-sandboxd-images/session-runtime@sha256:11eaa6651ef23b9a7e19a1138277a8e6b30b2400df461530a8016e043bc1baf3
+  image: SANDBOX_RUNTIME_IMAGE
   rest_port: 8080
   tracker_port: 8081
   grpc_port: 9090

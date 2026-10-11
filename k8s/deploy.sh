@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# Build the image, create the Slack Secret from .env, and apply k8s/ to the
-# gke-session-sandbox cluster. Requires the exact kube context below.
+# Build the image, create the Slack Secret from .env, and apply a kustomization (default:
+# k8s/overlays/dev; KUSTOMIZE_DIR=usecases/<name>/k8s for a use case) to the
+# Dedicated cluster from terraform/gke. Requires its exact kube context.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-expected_context="${KUBE_CONTEXT:-gke_nnyn-dev_us-central1_research-gke-agent-sandbox-with-sandboxd}"
+kustomize_dir="${KUSTOMIZE_DIR:-${repo_root}/k8s/overlays/dev}"
+gke_root="${repo_root}/terraform/gke"
+expected_context="$(terraform -chdir="${gke_root}" output -raw kube_context)"
 current_context="$(kubectl config current-context)"
+if [[ -n "${KUBE_CONTEXT:-}" && "${KUBE_CONTEXT}" != "${expected_context}" ]]; then
+  echo "refusing to deploy: KUBE_CONTEXT ${KUBE_CONTEXT} does not match Terraform output ${expected_context}" >&2
+  exit 2
+fi
 if [[ "${current_context}" != "${expected_context}" ]]; then
   echo "refusing to deploy: current context ${current_context}, expected ${expected_context}" >&2
   exit 2
@@ -16,10 +23,15 @@ for key in SLACK_BOT_TOKEN SLACK_APP_TOKEN; do
   grep -q "^${key}=." "${env_file}" || { echo "${key} is not set in ${env_file}" >&2; exit 3; }
 done
 
-if [[ -z "${SILK_AGENT_IMAGE:-}" ]]; then
-  eval "$("${repo_root}/k8s/build-image.sh" | grep '^SILK_AGENT_IMAGE=')"
+# The default (k8s/overlays/dev) builds this repository's Bot image and pins the Deployment to it.
+# A use case (KUSTOMIZE_DIR) names its own Bot image in its kustomization (images:).
+if [[ -z "${KUSTOMIZE_DIR:-}" ]]; then
+  : "${SANDBOX_RUNTIME_IMAGE:?Set SANDBOX_RUNTIME_IMAGE to the pushed session-runtime image digest}"
+  if [[ -z "${SILK_AGENT_IMAGE:-}" ]]; then
+    eval "$("${repo_root}/k8s/build-image.sh" | grep '^SILK_AGENT_IMAGE=')"
+  fi
+  echo "image: ${SILK_AGENT_IMAGE}"
 fi
-echo "image: ${SILK_AGENT_IMAGE}"
 
 # Only the Slack tokens go into the Secret.
 kubectl -n session-sandbox-system create secret generic silk-agent-slack \
@@ -33,7 +45,12 @@ if ! kubectl -n session-sandbox-system get secret silk-agent-sandbox >/dev/null 
     --from-literal=environment-fingerprint-key="$(openssl rand -hex 32)"
 fi
 
-kubectl kustomize "${repo_root}/k8s" \
-  | sed "s#image: us-central1-docker.pkg.dev/nnyn-dev/research-gke-agent-sandbox-with-sandboxd-images/silk-agent\$#image: ${SILK_AGENT_IMAGE}#" \
-  | kubectl apply -f -
+if [[ -z "${KUSTOMIZE_DIR:-}" ]]; then
+  kubectl kustomize "${kustomize_dir}" \
+    | sed "s#image: silk-agent\$#image: ${SILK_AGENT_IMAGE}#" \
+    | sed "s#image: SANDBOX_RUNTIME_IMAGE#image: ${SANDBOX_RUNTIME_IMAGE}#" \
+    | kubectl apply -f -
+else
+  kubectl kustomize "${kustomize_dir}" | kubectl apply -f -
+fi
 kubectl -n session-sandbox-system rollout status deployment/silk-agent --timeout=300s

@@ -40,7 +40,7 @@ spec:
               value: /config/silk-agent.yaml
             - name: SILK_AGENT_WORKDIR
               value: /work
-            # HMAC key for gke-session-sandbox's creation-env fingerprint (USER_EMAIL).
+            # HMAC key for gke-session-sandbox's creation-env fingerprint (AGENT_USER_EMAIL).
             # Generated once by deploy.sh; changing it conflicts with existing sandboxes.
             - name: SILK_AGENT_SANDBOX_FINGERPRINT_KEY
               valueFrom:

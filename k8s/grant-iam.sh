@@ -3,7 +3,8 @@
 # the Google Cloud roles it needs. Idempotent.
 set -euo pipefail
 
-project="${GCP_PROJECT_ID:-nnyn-dev}"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+project="${GCP_PROJECT_ID:-$(terraform -chdir="${repo_root}/terraform/gke" output -raw project_id)}"
 number="$(gcloud projects describe "${project}" --format='value(projectNumber)')"
 member="principal://iam.googleapis.com/projects/${number}/locations/global/workloadIdentityPools/${project}.svc.id.goog/subject/ns/session-sandbox-system/sa/silk-agent"
 

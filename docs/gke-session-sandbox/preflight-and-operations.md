@@ -9,13 +9,13 @@ uv run gke-session-sandbox preflight --config examples/sandbox-config.yaml
 
 `--context`を指定するとkubeconfig内のcontextを選べる。in-cluster実行ではPodのServiceAccountを使う。preflightはSandbox CRDの`v1beta1`、設定したFQDN policy用CRD、`gvisor` RuntimeClass、workspace StorageClassとprovisioner、管理namespace / sandbox namespace、現在の接続主体の必要RBACを確認する。不足項目は一括して表示し、作成前に非ゼロ終了する。FQDN allowを設定しない場合、FQDN policy用CRDとそのRBACは必須ではない。
 
-初回は専用検証clusterの正しいcontextを確認してからplatform manifestを適用する。manifestは管理用namespace、sandbox用namespace、worker ServiceAccount / RoleBinding、RWO workspace StorageClass、ROM StorageClassを作る。
+初回は専用検証clusterの正しいcontextを確認してからplatform manifestを適用する。controller、Bot / Sandbox namespace、Sandbox管理Role、RWO workspace StorageClassの適用と確認は[ゾーンクラスタrunbook](zonal-cluster-runbook.md)を参照。
 
 ```bash
-GKE_PROJECT_ID=nnyn-dev \
-GKE_LOCATION=us-central1 \
-GKE_CLUSTER_NAME=research-gke-agent-sandbox-with-sandboxd \
-scripts/bootstrap-platform.sh
+kubectl kustomize k8s/platform | kubectl apply -f -
+kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=300s
+kubectl get crd sandboxes.agents.x-k8s.io
+kubectl get runtimeclass gvisor
 ```
 
 workerにはsandbox resourceを作るnamespaceとsession recordを置くnamespaceだけにRoleBindingを作る。GKEの`FQDNNetworkPolicy`を使う場合は`networking.gke.io/fqdnnetworkpolicies`権限も必要になる。Pod自体のServiceAccount token mountは無効にし、管理workerの認証情報をsandboxへ渡さない。

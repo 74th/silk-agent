@@ -3,7 +3,12 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-repository="${SILK_AGENT_IMAGE_REPOSITORY:-us-central1-docker.pkg.dev/nnyn-dev/research-gke-agent-sandbox-with-sandboxd-images/silk-agent}"
+gke_root="${repo_root}/terraform/gke"
+if [[ -n "${SILK_AGENT_IMAGE_REPOSITORY:-}" ]]; then
+  repository="${SILK_AGENT_IMAGE_REPOSITORY}"
+else
+  repository="$(terraform -chdir="${gke_root}" output -raw artifact_registry_url)/silk-agent"
+fi
 tag="${SILK_AGENT_IMAGE_TAG:-$(date -u +%Y%m%d-%H%M%S)}"
 
 gcloud auth configure-docker "${repository%%/*}" --quiet >/dev/null 2>&1

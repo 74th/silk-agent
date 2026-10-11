@@ -1,0 +1,20 @@
+# silk-agent test deployment (this repository's own settings, no use case).
+# Deploy with k8s/deploy.sh (builds the image, creates the Slack Secret from .env, applies this).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The base labels its own resources; the generated ConfigMap needs the label here.
+labels:
+  - pairs:
+      app.kubernetes.io/name: silk-agent
+    includeSelectors: false
+resources:
+  - ../../base
+configMapGenerator:
+  - name: silk-agent-config
+    namespace: session-sandbox-system
+    files:
+      - config/silk-agent.yaml
+      - config/sandbox-config.yaml
+      - config/mcp.json
+images:
+  - name: silk-agent

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${GKE_PROJECT_ID:?Set GKE_PROJECT_ID explicitly}"
-: "${GKE_LOCATION:?Set GKE_LOCATION explicitly}"
-: "${SANDBOXD_IMAGE_REPOSITORY:?Set SANDBOXD_IMAGE_REPOSITORY explicitly}"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+gke_root="${repo_root}/terraform/gke"
+GKE_PROJECT_ID="${GKE_PROJECT_ID:-$(terraform -chdir="${gke_root}" output -raw project_id)}"
+GKE_LOCATION="${GKE_LOCATION:-$(terraform -chdir="${gke_root}" output -raw region)}"
+SANDBOXD_IMAGE_REPOSITORY="${SANDBOXD_IMAGE_REPOSITORY:-$(terraform -chdir="${gke_root}" output -raw artifact_registry_url | sed 's#^[^/]*/[^/]*/##')}"
+export GKE_PROJECT_ID GKE_LOCATION SANDBOXD_IMAGE_REPOSITORY
 
 version="v1.0.6"
 runtime_version="${version}-session-runtime"
@@ -12,7 +15,6 @@ archive_url="https://github.com/kubernetes-sigs/agent-sandbox/archive/refs/tags/
 cache_dir="${XDG_CACHE_HOME:-${TMPDIR:-/tmp}}/agent-sandbox-${version}"
 archive="${cache_dir}/source.tar.gz"
 source_dir="${cache_dir}/source"
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${GKE_LOCATION}-docker.pkg.dev/${GKE_PROJECT_ID}/${SANDBOXD_IMAGE_REPOSITORY}/session-runtime:${runtime_version}"
 
 mkdir -p "${cache_dir}"

@@ -6,3 +6,18 @@ __pycache__/
 skills-cache/
 .env
 *.egg-info/
+
+# Dedicated GKE Terraform root: keep only example inputs and the provider lock file.
+terraform/gke/.terraform/
+terraform/gke/*.tfstate
+terraform/gke/*.tfstate.*
+terraform/gke/*.tfplan
+terraform/gke/*.plan
+terraform/gke/terraform.tfvars
+terraform/gke/terraform.tfvars.*
+!terraform/gke/terraform.tfvars.example
+terraform/gke/*credentials*
+terraform/gke/*.json
+terraform/gke/*.key
+terraform/gke/*.pem
+terraform/gke/*.p12
