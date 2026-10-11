@@ -16,9 +16,15 @@ dependencies = [
   "streamlit>=1.40",
   "pydantic>=2.11,<3",
   "PyYAML>=6.0.2,<7",
-  "aiohttp>=3.10",
-  "gke-session-sandbox>=0.1.0",
+  "aiohttp>=3.14,<4",
+  # gke_session_sandbox (src/gke_session_sandbox)
+  "grpcio>=1.78.0",
+  "kubernetes-asyncio>=35,<36",
+  "protobuf>=6.31.1,<7",
 ]
+
+[project.scripts]
+gke-session-sandbox = "gke_session_sandbox.cli:main"
 
 [dependency-groups]
 dev = [
@@ -26,6 +32,7 @@ dev = [
   "pytest-asyncio>=1.0",
   "ruff>=0.8",
   "pyright>=1.1.380",
+  "grpcio-tools==1.78.0",  # scripts/generate-sandboxd-proto.py
 ]
 
 [build-system]
@@ -38,26 +45,31 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# gke-session-sandbox is developed in a sibling repository; use the local checkout.
-[tool.uv.sources]
-gke-session-sandbox = { path = "../test-google-cloud-agent-platform/20261010-gke-agent-sandbox-with-sandboxd", editable = true }
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-m 'not integration'"
+addopts = "-m 'not integration and not gke' --import-mode=importlib"
 markers = [
   "integration: calls real external services (Agent Platform, Model Armor, ...); run with -m integration",
+  "gke: requires access to an explicitly selected GKE validation cluster",
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# gke_session_sandbox (moved from another repository) keeps its own style for now.
+extend-exclude = [
+  "src/gke_session_sandbox",
+  "tests/session_sandbox",
+  "examples",
+  "scripts/generate-sandboxd-proto.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
 
 [tool.pyright]
 include = ["src", "apps"]
+exclude = ["src/gke_session_sandbox"]  # moved from another repository; not type-clean yet
 pythonVersion = "3.12"
 typeCheckingMode = "standard"

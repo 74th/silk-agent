@@ -1,0 +1,56 @@
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  labels:
+    app.kubernetes.io/name: gke-session-sandbox
+spec:
+  service: true
+  podTemplate:
+    spec:
+      runtimeClassName: gvisor
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sandboxd
+          image: {$param: runtime.image}
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: rest
+              containerPort: 8080
+            - name: tracker
+              containerPort: 8081
+            - name: grpc
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: tracker
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+          resources:
+            requests:
+              cpu: {$param: runtime.cpu_request}
+              memory: {$param: runtime.memory_request}
+            limits:
+              cpu: {$param: runtime.cpu_limit}
+              memory: {$param: runtime.memory_limit}
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        storageClassName: {$param: workspace.storage_class}
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: {$param: workspace.storage}

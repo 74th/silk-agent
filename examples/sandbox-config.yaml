@@ -1,0 +1,24 @@
+namespace: session-sandboxes
+control_namespace: session-sandbox-system
+repository_database_path: /var/lib/session-sandbox/sessions.sqlite3
+repository_require_mount: true
+template_file: templates/sandbox.yaml
+workspace_storage_class: session-workspace-rwo
+workspace_storage: 10Gi
+runtime:
+  container_name: sandboxd
+  image: registry.example.com/agent-runtime:replace-with-digest
+  rest_port: 8080
+  tracker_port: 8081
+  grpc_port: 9090
+  cpu_request: 100m
+  cpu_limit: "1"
+  memory_request: 128Mi
+  memory_limit: 1Gi
+lifecycle:
+  reconcile_interval_seconds: 60
+  idle_timeout_seconds: 300
+  retention_seconds: 604800
+environment_fingerprint_key: null
+network:
+  allowed_fqdns: []

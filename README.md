@@ -2,7 +2,7 @@
 
 Slackから受け取った指示をClaude Agent SDKで処理し、ツールは**GKE Agent Sandbox上のセッション専用作業環境**で実行するSlackBotの仕様をまとめる。
 
-**このREADMEは仕様書と、実装のセットアップ手順（§15）をまとめたもの。** Sandboxのライフサイクル管理とcommand / file実行は、並行して開発しているライブラリ`gke-session-sandbox`（`../test-google-cloud-agent-platform/20261010-gke-agent-sandbox-with-sandboxd`）に任せる。このリポジトリでは、それより上の「Slack → Bot → Claude Agent SDK → ライブラリ」の部分を作る。公式資料の確認日は2026-10-10。
+**このREADMEは仕様書と、実装のセットアップ手順（§15）をまとめたもの。** Sandboxのライフサイクル管理とcommand / file実行は、このリポジトリの`src/gke_session_sandbox`にあるライブラリ`gke_session_sandbox`に任せる（説明は[docs/gke-session-sandbox/README.md](docs/gke-session-sandbox/README.md)）。このリポジトリでは、それより上の「Slack → Bot → Claude Agent SDK → ライブラリ」の部分を作る。公式資料の確認日は2026-10-10。
 
 ## 1. 要点
 
@@ -640,8 +640,8 @@ kubectl -n session-sandbox-system logs deploy/silk-agent -f
 
 - `.env`の`SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN`だけがSecret `silk-agent-slack`に入る。トークンを変えたら`./k8s/deploy.sh`を再実行する。
 - Secret `silk-agent-sandbox`（`environment-fingerprint-key`）は、Sandbox作成時のenv（`USER_EMAIL`）の同一性を判定するHMAC鍵。`deploy.sh`が初回だけ生成し、起動時に`environment_fingerprint_key`としてSandbox設定へ注入する。変えると既存のSandboxと衝突するので、作り直さない。
-- イメージは`Dockerfile`でビルドする。`gke-session-sandbox`はpath依存なので、隣のチェックアウトを名前付きbuild contextとして渡す（`k8s/build-image.sh`）。
-- 既知の回避: ライブラリの`SandboxManager.from_config`は同期関数の`load_incluster_config()`を`await`するため、Pod内では失敗する。`silk_agent.app._make_incluster_loader_awaitable`で回避している。
+- イメージは`Dockerfile`でビルドする（`k8s/build-image.sh`）。
+- Sandbox Pod側のruntime image（sandboxd + CommandTracker）は`scripts/build-session-runtime-image.sh`でビルドし、`k8s/config/sandbox-config.yaml`の`runtime.image`にdigestを書く。
 
 ### 15.6 テスト
 

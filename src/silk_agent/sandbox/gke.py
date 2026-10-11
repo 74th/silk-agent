@@ -58,7 +58,7 @@ class GkeSessionSandboxRuntime:
         tenant, session = to_session_key_parts(key)
         if self._key_factory is not None:
             return self._key_factory(tenant, session)
-        from gke_session_sandbox import SessionKey  # pyright: ignore[reportMissingImports]
+        from gke_session_sandbox import SessionKey
 
         return SessionKey(tenant_id=tenant, session_id=session)
 

@@ -1,21 +1,10 @@
-# silk-agent Slack bot image.
-#
-# gke-session-sandbox is a path dependency (../test-google-cloud-agent-platform/...), so the
-# library checkout is passed as a named build context and placed at the same relative path:
-#
-#   docker build --build-context gke-session-sandbox=<library checkout> -t <image> .
-#
-# k8s/build-image.sh does this and pushes the image.
+# silk-agent Slack bot image (k8s/build-image.sh builds and pushes it).
 FROM python:3.12-slim-bookworm
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.26 /uv /uvx /bin/
 
-ARG LIB_DIR=/src/test-google-cloud-agent-platform/20261010-gke-agent-sandbox-with-sandboxd
-COPY --from=gke-session-sandbox pyproject.toml uv.lock README.md ${LIB_DIR}/
-COPY --from=gke-session-sandbox src ${LIB_DIR}/src
-COPY --from=gke-session-sandbox templates /app/sandbox-templates
-
 WORKDIR /src/silk-agent
+COPY templates /app/sandbox-templates
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY apps ./apps

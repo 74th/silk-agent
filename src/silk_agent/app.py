@@ -93,34 +93,12 @@ def with_fingerprint_key(config_file: Path, key: str, out: Path) -> Path:
     return out
 
 
-def _make_incluster_loader_awaitable() -> None:
-    """Work around `SandboxManager.from_config` awaiting `load_incluster_config()`.
-
-    kubernetes_asyncio's `load_incluster_config` is synchronous, so inside a Pod the
-    `await` raises TypeError and the library falls back to a (missing) kubeconfig.
-    Remove once gke-session-sandbox calls it without `await`.
-    """
-    import inspect
-
-    from kubernetes_asyncio import config as kube_config
-
-    original = kube_config.load_incluster_config
-    if inspect.iscoroutinefunction(original):
-        return
-
-    async def load_incluster_config(*args: Any, **kwargs: Any) -> None:
-        original(*args, **kwargs)
-
-    kube_config.load_incluster_config = load_incluster_config  # type: ignore[assignment]
-
-
 async def build_runtime(
     config: Config, root: Path, work_dir: Path, env_provider: Any
 ) -> SandboxRuntime:
     if config.sandbox.runtime == "local_process":
         return LocalProcessRuntime(work_dir / "sandbox")
-    from gke_session_sandbox import SandboxManager  # pyright: ignore[reportMissingImports]
-
+    from gke_session_sandbox import SandboxManager
     from silk_agent.sandbox.gke import GkeSessionSandboxRuntime
 
     config_file = root / (config.sandbox.config_file or "config/sandbox-config.yaml")
@@ -129,7 +107,6 @@ async def build_runtime(
         config_file = await asyncio.to_thread(
             with_fingerprint_key, config_file, key, work_dir / "sandbox-config.yaml"
         )
-    _make_incluster_loader_awaitable()
     manager = await SandboxManager.from_config(str(config_file))
     return GkeSessionSandboxRuntime(manager, env_provider=env_provider)
 
@@ -205,7 +182,7 @@ async def build_services(
     ):
         # The Bot is the library's single "API process": it owns the SQLite repository,
         # so the idle-suspend / retention reconciler runs here too.
-        from gke_session_sandbox import LifecycleReconciler  # pyright: ignore[reportMissingImports]
+        from gke_session_sandbox import LifecycleReconciler
 
         reconciler = LifecycleReconciler(runtime.manager)  # type: ignore[attr-defined]
         services.background.append(asyncio.create_task(reconciler.run_forever()))
