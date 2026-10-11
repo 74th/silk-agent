@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from silk_agent.core.events import (
     Heartbeat,
     InterruptReason,
+    MessageAppended,
     OutboundEvent,
     StatusChanged,
     ToolFinished,
@@ -20,13 +21,26 @@ from silk_agent.core.events import (
 )
 
 STOP_HINT = "停止するには『停止』と書き込んでください"
+APPENDED_LINE = "📝 追加の指示 {n}件（実行中のツールが終わったら、この処理の続きで対応します）"
 RESUME_HINT = "「続けて」と書き込むと再開できます"
 STALE_HINT = "最終更新から5分以上経っても変わらない場合、Botが停止している可能性があります"
 
 ViewStatus = Literal["running", "interrupting", "completed", "failed", "interrupted"]
 
-_TOOL_ICON = {"running": "⏳", "success": "✅", "failure": "❌", "interrupted": "⏹"}
-_TOOL_WORD = {"running": "実行中", "success": "成功", "failure": "失敗", "interrupted": "中断"}
+_TOOL_ICON = {
+    "running": "⏳",
+    "success": "✅",
+    "failure": "❌",
+    "interrupted": "⏹",
+    "background": "🔄",
+}
+_TOOL_WORD = {
+    "running": "実行中",
+    "success": "成功",
+    "failure": "失敗",
+    "interrupted": "中断",
+    "background": "バックグラウンドで実行中",
+}
 _INTERRUPT_HEADER: dict[InterruptReason, str] = {
     "user": "⏹ 中断しました",
     "new_message": "↪ 新しい指示で再開",
@@ -72,6 +86,7 @@ class ProgressView:
     cost_usd: float | None = None
     warnings: tuple[str, ...] = ()
     error: str = ""
+    appended: int = 0  # user messages added to this turn while it was running
 
     @property
     def finished(self) -> bool:
@@ -108,6 +123,8 @@ class ProgressView:
             for line in self.tools:
                 if line.status == "running":
                     line.status = "interrupted"
+        elif isinstance(event, MessageAppended):
+            self.appended += 1
         elif isinstance(event, Heartbeat):
             pass  # only the "last updated" stamp changes, and that is taken at render time
 
@@ -139,6 +156,8 @@ class ProgressView:
             lines.append(f"　{self.error}")
         lines.extend(f"⚠️ {w}" for w in self.warnings)
         lines.extend(self._tool_lines())
+        if self.appended and self.status in ("running", "interrupting"):
+            lines.append(APPENDED_LINE.format(n=self.appended))
         if self.status == "running":
             lines.append(STOP_HINT)
         elif self.status == "interrupted" and self.interrupt_reason in ("shutdown", "crash"):

@@ -1,0 +1,84 @@
+# Exactly one instance: the Bot owns the SQLite repository (RWO volume) and the
+# AgentSession registry is per process. Recreate avoids two Pods during a rollout.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: silk-agent
+  namespace: session-sandbox-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: silk-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: silk-agent
+    spec:
+      serviceAccountName: silk-agent
+      # SIGTERM: stop Socket Mode, give running turns 25 s, then record the rest as interrupted.
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bot
+          image: silk-agent
+          envFrom:
+            - secretRef:
+                name: silk-agent-slack     # SLACK_BOT_TOKEN / SLACK_APP_TOKEN (from .env)
+          env:
+            - name: LOG_LEVEL
+              value: INFO
+            - name: SILK_AGENT_CONFIG
+              value: /config/silk-agent.yaml
+            - name: SILK_AGENT_WORKDIR
+              value: /work
+            # HMAC key for gke-session-sandbox's creation-env fingerprint (USER_EMAIL).
+            # Generated once by deploy.sh; changing it conflicts with existing sandboxes.
+            - name: SILK_AGENT_SANDBOX_FINGERPRINT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: silk-agent-sandbox
+                  key: environment-fingerprint-key
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: sandbox-state
+              mountPath: /var/lib/session-sandbox
+            - name: work
+              mountPath: /work
+            - name: home
+              mountPath: /home/app
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: silk-agent-config
+        - name: sandbox-state
+          persistentVolumeClaim:
+            claimName: silk-agent-sandbox-state
+        - name: work
+          emptyDir: {}
+        - name: home
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

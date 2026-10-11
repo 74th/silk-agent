@@ -1,0 +1,13 @@
+# gke-session-sandbox SessionRepository (SQLite). Dedicated to silk-agent so it does not
+# share the library's own session-manager-state claim (StorageClass: storageclass.yaml).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: silk-agent-sandbox-state
+  namespace: session-sandbox-system
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: silk-agent-state-rwo
+  resources:
+    requests:
+      storage: 10Gi

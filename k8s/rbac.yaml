@@ -1,0 +1,15 @@
+# Sandbox / PVC / Service / NetworkPolicy management in the sandbox namespace
+# (reuses the Role defined by gke-session-sandbox).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: silk-agent-sandbox-management
+  namespace: session-sandboxes
+subjects:
+  - kind: ServiceAccount
+    name: silk-agent
+    namespace: session-sandbox-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-management

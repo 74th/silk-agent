@@ -18,7 +18,7 @@ Slackから受け取った指示をClaude Agent SDKで処理し、ツールは**
 | 入力チェック | ルールベースのフィルタの後、Agent Platform上の`gemini-3.8-flash`で指示違反を判定する |
 | 出力チェック | Model Armor（`projects/nnyn-dev/locations/us-central1/templates/simple`）でsanitizeする。個人情報はマスクして表示する |
 | 停止 | スレッドに「停止」「中止」「中断」「STOP」だけを書くと、実行中の処理を止める |
-| 割り込み | 実行中にスレッドへ届いた追加指示は、同じ`AgentSession`へ「interrupt → 新しい指示で再開」として渡す |
+| 実行中の追加指示 | 実行中にスレッドへ届いた追加指示は、同じ`AgentSession`の実行中のturnへ追記する（止めない）。設定で「interrupt → 新しい指示で再開」も選べる |
 | 進捗表示 | スレッドに進捗メッセージを1つ置き、実行したツールの一覧と「最終更新 2026-10-10 18:59」を1分ごとに更新する。Botが落ちると更新が止まるので、ユーザが気付ける |
 | MCP | 設定ファイル（`mcp.json`）から読み込み、`strict_mcp_config=True`で想定外の設定は読まない |
 | Skills | GCSから同期したディレクトリを読み込む。Sandbox側にも同じ内容を配置する |
@@ -53,7 +53,7 @@ flowchart LR
 2. `MessageFilter`が対象外のメッセージを捨てる（bot投稿、許可外のchannel / user、編集イベントなど）。停止語なら`StopRequest`に変換し、ここで処理を終える。
 3. `InputGuard`がGeminiで指示違反を判定する。違反ならエージェントに渡さず、理由を返信する。
 4. `AgentSessionRegistry`が会話キーに対応する`AgentSession`を返す。なければ作り、`SessionStore`から過去の会話を復元する。
-5. `AgentSession`が実行中なら割り込み、実行中でなければ新しいturnとして`query()`する。
+5. `AgentSession`が実行中なら実行中のturnへ追記し、実行中でなければ新しいturnとして`query()`する。
 6. SDKのメッセージとhookを`OutboundEvent`（テキスト、ツール開始 / 終了、状態、完了、エラー）に変換する。
 7. テキストとツール表示を`OutputSanitizer`（Model Armor）に通してからチャネルadapterへ送る。
 
@@ -211,7 +211,8 @@ class InputVerdict(BaseModel):
   - アップロードするテキストファイル
 - **判定の扱い**:
   - **個人情報（SDP）に該当した場合**: `deidentify_result.data.text`（マスク後のテキスト）に置き換えて、**そのまま表示する**。マスクしたことは監査ログに記録する。
-  - **SDP以外のフィルタ（RAI / jailbreak / 悪性URL / CSAM）に該当した場合**: 出力を差し止め、「出力がポリシーにより表示できませんでした」と通知する（`GuardBlocked(stage="output")`）。
+  - **SDP以外のフィルタ（RAI / 悪性URL / CSAM）に該当した場合**: 出力を差し止め、「出力がポリシーにより表示できませんでした」と通知する（`GuardBlocked(stage="output")`）。
+  - **jailbreak（`pi_and_jailbreak`）は出力では無視する**（`output_sanitizer.ignored_filters`）。通常のシェルコマンドの要約まで該当と判定されるため。代わりに、`bash`ツールが「ディレクトリ内の全ファイルを一括で取り出す」コマンド（ディレクトリのアーカイブ化、`cat *`、`find -exec cat`、`xargs cat`、全行に一致する再帰grepなど）を実行前に拒否する軽いルールを持つ（`src/silk_agent/guards/bulk_files.py`）。
   - SDPに該当したのに`deidentify_result`が返らない場合は、差し止める。
 - **長文**: Model Armorの非SDPフィルタは1回10,000トークンまでなので、段落・コードブロックの境界で分割して検査する。
 - **Model Armorの呼出しに失敗した場合**: fail-closed。表示を保留し、失敗したことだけを通知する。
@@ -249,17 +250,24 @@ class InputVerdict(BaseModel):
 
 | ツール（`mcp__sandbox__*`） | ライブラリAPI |
 | --- | --- |
-| `bash(command, cwd, timeout)` | `commands.run(["bash","-lc",command])` / 長時間なら`commands.start` |
+| `bash(command, cwd, timeout_seconds, run_in_background)` | `commands.start` + `commands.wait`。20秒で終わらなければバックグラウンドへ（下記） |
 | `read_file(path, offset, limit)` | `files.read` |
 | `write_file(path, content)` | `files.write` |
 | `edit_file(path, old, new)` | `files.read` + `files.write`（置換が一意であることを確認） |
 | `list_files(path)` / `glob(pattern)` / `grep(pattern, path)` | `files.list`、または`commands.run(["rg", ...])` |
 | `command_status(command_id)` / `command_output(command_id, cursor)` | `commands.get` / `commands.read_output` |
+| `cancel_command(command_id)` | バックグラウンドのcommandを止める（`commands.cancel`） |
 
 - **会話とSandboxの対応**: 会話キーから`SessionKey(tenant_id=team_id, session_id=hash(channel/thread))`を作り、`manager.ensure(key, env={"USER_EMAIL": ...})`でSandboxを取得する。
 - **ライブラリからの通知**: `pending_context_events`（workspace消失の通知など）は、次のturnの先頭にシステム的な文脈として追加し、保存してからackする。
 - **turnの中断との関係**: 中断ではSDKのturnだけを止め、Sandbox内のcommandは`commands`のcancel APIで明示的に止める。結果が分からないcommand（`ExecutionOutcomeUnknown`）はcommand IDをツール結果として返し、エージェントが後で`command_status`で確認できるようにする。
-- **ライブラリ側でまだ実装されていない部分**: command / file API（CommandTrackerを含む）は未実装。こちらは`SandboxRuntime` portを通して使い、実装されるまでは`LocalProcessRuntime`で開発する。
+- **バックグラウンド実行**（`src/silk_agent/core/background.py`）: 時間のかかる作業をしながら、次々に指示できるようにする。
+  - `bash`は最大20秒だけ完了を待つ。終わらなければ「バックグラウンドで実行中（command_id）」を返し、エージェントはturnを終えられる。`run_in_background: true`なら待たずに返す。commandの上限時間は既定3600秒。
+  - 終了すると、その会話へ`<system-notice>`（終了コード、stdout / stderrの末尾）を送る。turnの実行中ならそのturnへ追記し、待機中なら新しいturnを始めて、エージェントが結果をユーザに報告する。
+  - 停止語では、実行中のturnに加えてバックグラウンドのcommandも止める（終了通知は送らない）。turnの中断でツール呼出しが取り消されても、バックグラウンドのcommandは止めない。
+  - 進捗メッセージでは、バックグラウンドに移ったツールを「🔄 バックグラウンドで実行中」と表示する。
+  - 制限: Botが再起動すると、実行中だったcommandの終了通知は届かない（commandはSandboxで動き続け、IDは管理情報に残る）。
+- **追記の取りこぼし防止**: CLIを`--replay-user-messages`で起動し、送ったプロンプトがCLIに消費されたことを数える。`ResultMessage`の時点で未消費のプロンプトがあれば（turnの終わり際に追記した場合）、CLIが続けて始める応答も同じturnとして読み続ける。
 
 ### 7.4 主要なオプション
 
@@ -299,7 +307,7 @@ flowchart LR
 
 - `AgentSessionRegistry`は`conversation_key → AgentSession`の辞書を持つ。取得・作成は`asyncio.Lock`で直列化し、**同じ会話に`AgentSession`が2つできないようにする**。
 - `AgentSession`は`ClaudeSDKClient`を最大1つだけ持ち、状態（`idle` / `running` / `interrupting`）と入力queueを管理する。チャネルからの入力はすべてこのqueueに入れ、1つのworker taskが順に処理する。
-  - そのため、処理中にスレッドへ書き込まれても、新しいSDKインスタンスは起動しない。同じ`AgentSession`の割り込みとして扱う。
+  - そのため、処理中にスレッドへ書き込まれても、新しいSDKインスタンスは起動しない。同じ`AgentSession`の実行中のturnへの追記として扱う。
 - **Botは1インスタンスで動かす前提**のため、プロセスをまたいだ排他（lease）は実装しない。
 - 一定時間（例: 10分）入力がない`AgentSession`は、`ClaudeSDKClient`を`disconnect()`して解放する。次の入力のときにSessionStoreから`resume`する。
 
@@ -308,11 +316,12 @@ flowchart LR
 - **中断（StopRequest）**: `client.interrupt()`を呼び、`receive_response()`で残りのメッセージを読み切る。
   - 実行中のSandbox commandをcancelする。
   - 進捗メッセージを「⏹ 中断しました」にして`idle`に戻る。
-- **割り込み（実行中のUserMessage）**: 初期版の既定は**interrupt → 読み切り → 新しいメッセージを`query()`**とする。
-  - SDKは実行中の追加メッセージをqueueに積めるが、それが現在のturnに注入されるのか次のturnで処理されるのかは公式に明記されていない（要検証）。そのため、確実に動く方式を既定にする。
-  - 設定で`queue`（現在のturnの完了後に処理する）も選べるようにする。
-  - 割り込みのメッセージも入力ガードを通す。
-  - 割り込まれたturnの進捗メッセージは「↪ 新しい指示で再開」にして閉じ、新しいturnの進捗メッセージを投稿する。
+- **実行中のUserMessage**: 既定は**追記（`interrupt_mode: append`）**。実行中のturnを止めずに、streaming inputで同じturnへメッセージを送る（`client.query()`）。モデルは実行中のツールの完了後にそれを読み、同じturnの中で答える（claude-agent-sdk 0.2.165で確認）。
+  - スレッドには「実行中の処理に追加しました。今の処理を止めずに、続けて対応します（止める場合は「停止」…）」と返す。
+  - turnがすでに結果（`ResultMessage`）を受け取った後など、追記できない場合は次のturnとしてqueueに積む。
+  - 設定で`interrupt`（interrupt → 読み切り → 新しいメッセージで新しいturn）と`queue`（現在のturnの完了後に処理する）も選べる。`interrupt`では割り込まれたturnの進捗メッセージを「↪ 新しい指示で再開」にして閉じる。
+  - 追記・割り込みのメッセージも入力ガードを通す。
+- 中断でツール呼出しが取り消された場合、待っていたSandbox commandもcancelする（走り続けないようにする）。
 
 ### 7.7 ツール実行の表示
 
@@ -442,7 +451,7 @@ slack:
   app_token_secret: projects/nnyn-dev/secrets/slack-app-token
   bot_token_secret: projects/nnyn-dev/secrets/slack-bot-token
   stop_words: ["停止", "中止", "中断", "STOP"]
-  interrupt_mode: interrupt        # interrupt | queue
+  interrupt_mode: append           # append | interrupt | queue
   progress:
     heartbeat_interval_seconds: 60
     timezone: Asia/Tokyo
@@ -608,6 +617,31 @@ SILK_AGENT_CONFIG=config/silk-agent.yaml uv run python apps/slack_bot.py
 ```
 
 Slack Botは、起動時に前回のBotが中断したturnを検出してスレッドへ知らせる。SIGTERMでは、新しい入力を止め、実行中のturnに最大25秒の猶予を与えてから、残りを「中断（再起動）」として保存して終了する。
+
+### 15.6.1 GKEへのデプロイ
+
+Slack Botは`gke-session-sandbox`のクラスタ（`research-gke-agent-sandbox-with-sandboxd`）の`session-sandbox-system` namespaceで、1 Podだけ動かす。BotがライブラリのSQLite Repository（専用PVC）を持ち、idle停止・保持期限のreconcilerも同じプロセスで動かす。マニフェストは`k8s/`にある。
+
+| ファイル | 内容 |
+| --- | --- |
+| `k8s/kustomization.yaml` | 全体。設定は`k8s/config/`からConfigMapを生成する |
+| `k8s/config/silk-agent.yaml` | Botの設定（モデル、ガード、Sessions、Sandbox） |
+| `k8s/config/sandbox-config.yaml` | `gke-session-sandbox`の設定（runtime image、idle / 保持期限） |
+| `k8s/deployment.yaml` | replicas 1、`Recreate`、`terminationGracePeriodSeconds: 45` |
+| `k8s/pvc.yaml`, `k8s/storageclass.yaml` | SQLite Repository用のPVC（Retain） |
+| `k8s/serviceaccount.yaml`, `k8s/rbac.yaml` | KSA `silk-agent`と、Sandbox namespaceの`sandbox-management` Roleへの紐付け |
+
+```bash
+gcloud container clusters get-credentials research-gke-agent-sandbox-with-sandboxd --region us-central1 --project nnyn-dev
+./k8s/grant-iam.sh   # Workload Identityで aiplatform.user / modelarmor.user を付与（初回のみ）
+./k8s/deploy.sh      # イメージのビルド・push、.envからSecret作成、apply、rollout待ち
+kubectl -n session-sandbox-system logs deploy/silk-agent -f
+```
+
+- `.env`の`SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN`だけがSecret `silk-agent-slack`に入る。トークンを変えたら`./k8s/deploy.sh`を再実行する。
+- Secret `silk-agent-sandbox`（`environment-fingerprint-key`）は、Sandbox作成時のenv（`USER_EMAIL`）の同一性を判定するHMAC鍵。`deploy.sh`が初回だけ生成し、起動時に`environment_fingerprint_key`としてSandbox設定へ注入する。変えると既存のSandboxと衝突するので、作り直さない。
+- イメージは`Dockerfile`でビルドする。`gke-session-sandbox`はpath依存なので、隣のチェックアウトを名前付きbuild contextとして渡す（`k8s/build-image.sh`）。
+- 既知の回避: ライブラリの`SandboxManager.from_config`は同期関数の`load_incluster_config()`を`await`するため、Pod内では失敗する。`silk_agent.app._make_incluster_loader_awaitable`で回避している。
 
 ### 15.6 テスト
 

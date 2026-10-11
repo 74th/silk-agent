@@ -1,0 +1,14 @@
+.env
+.env.*
+.git
+.venv
+.pytest_cache
+.ruff_cache
+**/__pycache__
+*.egg-info
+xprivate
+terraform
+openspec
+tests
+skills-cache
+config/silk-agent.yaml

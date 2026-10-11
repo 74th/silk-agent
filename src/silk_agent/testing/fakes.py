@@ -156,6 +156,8 @@ class FakeAgentEngine:
         self._scenarios = scenarios if scenarios is not None else [Text("ok")]
         self._interrupt = asyncio.Event()
         self.requests: list[TurnRequest] = []
+        self.appended: list[str] = []
+        self._turn_running = False
         self.interrupt_count = 0
         self.reset_count = 0
         self.closed = False
@@ -180,6 +182,14 @@ class FakeAgentEngine:
     async def run_turn(self, request: TurnRequest) -> AsyncIterator[OutboundEvent]:
         self.requests.append(request)
         self._interrupt = asyncio.Event()
+        self._turn_running = True
+        try:
+            async for event in self._play(request):
+                yield event
+        finally:
+            self._turn_running = False
+
+    async def _play(self, request: TurnRequest) -> AsyncIterator[OutboundEvent]:
         key, turn_id = request.conversation_key, request.turn_id
         tool_n = 0
         for item in self._scenario(request):
@@ -222,6 +232,12 @@ class FakeAgentEngine:
     async def interrupt(self) -> None:
         self.interrupt_count += 1
         self._interrupt.set()
+
+    async def append(self, text: str) -> bool:
+        if not self._turn_running or self._interrupt.is_set():
+            return False
+        self.appended.append(text)
+        return True
 
     async def reset(self) -> None:
         self.reset_count += 1

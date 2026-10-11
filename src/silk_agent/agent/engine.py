@@ -21,8 +21,11 @@ from claude_agent_sdk import (
     MirrorErrorMessage,
     ResultMessage,
     TextBlock,
+    ToolResultBlock,
+    UserMessage,
 )
 
+from silk_agent.agent.sandbox_tools import BACKGROUND_MARKER
 from silk_agent.agent.summaries import display_name, summarize
 from silk_agent.core.events import (
     AssistantText,
@@ -111,6 +114,7 @@ class ClaudeAgentEngine:
         self._sandbox_generation: str | None = None
         self._fresh = False  # set by reset(): never resume the stored session
         self._interrupted = False
+        self._sent, self._echoed, self._closing = 0, 0, False
         self._queue: asyncio.Queue[Any] | None = None
         self._turn_id = ""
         self._running: dict[str, tuple[Any, str, str]] = {}  # tool_use_id -> (start, name, summary)
@@ -149,6 +153,9 @@ class ClaudeAgentEngine:
             session_id=None if resume else str(uuid.uuid4()),
             max_turns=self._s.max_turns,
             max_budget_usd=self._s.max_budget_usd,
+            # The CLI echoes each user prompt when it consumes it; run_turn counts the
+            # echoes to know whether an appended prompt is still to be answered.
+            extra_args={"replay-user-messages": None},
         )
 
     @property
@@ -216,7 +223,10 @@ class ClaudeAgentEngine:
     async def _on_post_tool(
         self, hook_input: Any, tool_use_id: str | None, context: Any
     ) -> HookJSONOutput:
-        await self._finish_tool(tool_use_id or hook_input.get("tool_use_id", ""), "success")
+        status = (
+            "background" if BACKGROUND_MARKER in str(hook_input.get("tool_response")) else "success"
+        )
+        await self._finish_tool(tool_use_id or hook_input.get("tool_use_id", ""), status)
         return {}
 
     async def _on_tool_failure(
@@ -236,6 +246,7 @@ class ClaudeAgentEngine:
     async def run_turn(self, request: TurnRequest) -> AsyncIterator[OutboundEvent]:
         self._turn_id = request.turn_id
         self._interrupted = False
+        self._sent, self._echoed, self._closing = 1, 0, False
         self._running.clear()
         queue: asyncio.Queue[Any] = asyncio.Queue()
         self._queue = queue
@@ -255,6 +266,12 @@ class ClaudeAgentEngine:
                 if isinstance(item, MirrorErrorMessage):
                     if MIRROR_WARNING not in warnings:
                         warnings.append(MIRROR_WARNING)
+                    continue
+                if isinstance(item, _Partial):
+                    # An appended prompt arrived after the CLI ended its turn: the CLI
+                    # answers it in a turn of its own, which still belongs to this one.
+                    if item.result.session_id:
+                        self._session_id = item.result.session_id
                     continue
                 if isinstance(item, ResultMessage):
                     for event in await self._on_result(item, request, warnings):
@@ -284,8 +301,19 @@ class ClaudeAgentEngine:
             self._running.clear()
 
     async def _pump(self, client: Any, queue: asyncio.Queue[Any]) -> None:
+        """Forward messages until a ResultMessage arrives with every sent prompt consumed."""
         try:
-            async for message in client.receive_response():
+            async for message in client.receive_messages():
+                if _is_prompt_echo(message):
+                    self._echoed += 1
+                    continue
+                if isinstance(message, ResultMessage):
+                    if self._echoed >= self._sent or self._interrupted:
+                        self._closing = True  # no more appends into this turn
+                        queue.put_nowait(message)
+                        break
+                    queue.put_nowait(_Partial(message))
+                    continue
                 queue.put_nowait(message)
         except Exception as e:
             queue.put_nowait(e)
@@ -347,6 +375,16 @@ class ClaudeAgentEngine:
         if self._client is not None:
             await self._client.interrupt()
 
+    async def append(self, text: str) -> bool:
+        """Send `text` into the running turn (streaming input). Verified with
+        claude-agent-sdk 0.2.165: it is read after the running tool finishes and answered
+        in the same turn (one ResultMessage)."""
+        if self._queue is None or self._client is None or self._interrupted or self._closing:
+            return False
+        self._sent += 1  # before the await: the pump must keep reading for this prompt
+        await self._client.query(text)
+        return True
+
     async def reset(self) -> None:
         await self._drop_client()
         self._session_id = None
@@ -369,3 +407,18 @@ class ClaudeAgentEngine:
 
 
 _DONE = object()
+
+
+@dataclass(frozen=True)
+class _Partial:
+    """A ResultMessage that does not end the turn (an appended prompt is still pending)."""
+
+    result: ResultMessage
+
+
+def _is_prompt_echo(message: Any) -> bool:
+    """A user prompt replayed by the CLI (`--replay-user-messages`), not a tool result."""
+    if not isinstance(message, UserMessage) or message.parent_tool_use_id:
+        return False
+    content = message.content
+    return isinstance(content, str) or not any(isinstance(b, ToolResultBlock) for b in content)

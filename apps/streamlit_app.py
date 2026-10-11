@@ -103,7 +103,13 @@ def main() -> None:
                     expanded=item.state == "running",
                     state="running" if item.state == "running" else "complete",
                 ):
-                    icons = {"running": "⏳", "success": "✅", "failure": "❌", "interrupted": "⏹"}
+                    icons = {
+                        "running": "⏳",
+                        "success": "✅",
+                        "failure": "❌",
+                        "interrupted": "⏹",
+                        "background": "🔄",
+                    }
                     for t in item.tools:
                         extra = f"（{t.duration}）" if t.duration else ""
                         st.write(f"{icons[t.state]} `{t.name}` {t.summary}{extra}")

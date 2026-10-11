@@ -47,7 +47,8 @@ InboundEvent = UserMessage | StopRequest | ResetRequest | ResumeRequest
 
 # ---------------------------------------------------------------- outbound
 
-ToolStatus = Literal["running", "success", "failure", "interrupted"]
+# background: the tool call returned while its command keeps running in the sandbox
+ToolStatus = Literal["running", "success", "failure", "interrupted", "background"]
 TurnStatus = Literal["thinking", "running_tool", "interrupting", "interrupted"]
 InterruptReason = Literal["crash", "shutdown", "user", "new_message"]
 
@@ -99,6 +100,14 @@ class StatusChanged:
     conversation_key: str
     turn_id: str
     status: TurnStatus
+
+
+@dataclass(frozen=True)
+class MessageAppended:
+    """A user message was added to the running turn (it is answered within that turn)."""
+
+    conversation_key: str
+    turn_id: str
 
 
 @dataclass(frozen=True)
@@ -157,6 +166,7 @@ OutboundEvent = (
     | ToolFinished
     | Heartbeat
     | StatusChanged
+    | MessageAppended
     | GuardBlocked
     | TurnFinished
     | TurnFailed

@@ -16,6 +16,12 @@ DM_THREAD = "-"
 _MENTION = re.compile(r"<@[A-Z0-9]+(\|[^>]*)?>")
 
 
+def slack_unescape(text: str) -> str:
+    """Slack escapes &, < and > in message text; the agent needs the characters
+    (`sleep 1 &amp;&amp; echo` -> `sleep 1 && echo`). `&amp;` goes last."""
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
 def make_key(team: str, channel: str, thread_ts: str | None) -> str:
     return f"slack:{team}:{channel}:{thread_ts or DM_THREAD}"
 
@@ -110,7 +116,7 @@ class SlackEventRouter:
         return not self._messages.seen(message_id)
 
     async def _emit(self, key: str, team: str, event: dict[str, Any]) -> None:
-        text = _MENTION.sub("", event.get("text", "")).strip()
+        text = slack_unescape(_MENTION.sub("", event.get("text", ""))).strip()
         message = UserMessage(
             conversation_key=key,
             user=event.get("user", ""),

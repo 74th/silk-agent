@@ -1,0 +1,29 @@
+# silk-agent Slack bot on the gke-session-sandbox cluster.
+#
+# Prerequisites (provided by gke-session-sandbox: k8s/platform/base.yaml):
+#   - namespaces session-sandbox-system / session-sandboxes
+#   - Role session-sandboxes/sandbox-management
+# Deploy with k8s/deploy.sh (builds the image, creates the Slack Secret from .env, applies this).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# No top-level `namespace:` (the RoleBinding lives in session-sandboxes); each resource sets it.
+labels:
+  - pairs:
+      app.kubernetes.io/name: silk-agent
+    includeSelectors: false
+resources:
+  - storageclass.yaml
+  - serviceaccount.yaml
+  - rbac.yaml
+  - pvc.yaml
+  - deployment.yaml
+configMapGenerator:
+  - name: silk-agent-config
+    namespace: session-sandbox-system
+    files:
+      - config/silk-agent.yaml
+      - config/sandbox-config.yaml
+      - config/mcp.json
+images:
+  - name: silk-agent
+    newName: us-central1-docker.pkg.dev/nnyn-dev/research-gke-agent-sandbox-with-sandboxd-images/silk-agent

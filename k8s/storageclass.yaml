@@ -1,0 +1,13 @@
+# Disk for the gke-session-sandbox SQLite repository. Retain: deleting the PVC keeps the
+# disk (session records); delete the PV / disk by hand after checking it.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: silk-agent-state-rwo
+provisioner: pd.csi.storage.gke.io
+parameters:
+  type: pd-balanced
+  csi.storage.k8s.io/fstype: ext4
+allowVolumeExpansion: true
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer

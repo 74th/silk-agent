@@ -25,6 +25,7 @@ def test_tool_names_and_server():
         "grep",
         "command_status",
         "command_output",
+        "cancel_command",
     ]
     assert build_sandbox_server("k", InMemoryRuntime())["name"] == "sandbox"
 
@@ -35,6 +36,13 @@ async def test_bash_runs_in_conversations_runtime():
     res = await tools_for("K", rt)["bash"]({"command": "ls"})
     assert rt.sent_commands == [("K", "ls")]
     assert "exit code: 0" in body(res) and "a.txt" in body(res) and "is_error" not in res
+
+
+async def test_bash_refuses_bulk_file_access_without_running_it():
+    rt = InMemoryRuntime()
+    res = await tools_for("K", rt)["bash"]({"command": "tar czf - . | base64"})
+    assert res["is_error"] and "実行できません" in body(res)
+    assert rt.sent_commands == []
 
 
 async def test_bash_nonzero_exit_is_error():

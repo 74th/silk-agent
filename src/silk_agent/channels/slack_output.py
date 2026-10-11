@@ -18,6 +18,7 @@ from silk_agent.core.events import (
     AssistantText,
     GuardBlocked,
     Heartbeat,
+    MessageAppended,
     Notice,
     OutboundEvent,
     StatusChanged,
@@ -81,7 +82,9 @@ class SlackOutput:
         key = event.conversation_key if hasattr(event, "conversation_key") else ""
         if isinstance(event, TurnStarted):
             await self._start_turn(event)
-        elif isinstance(event, ToolStarted | ToolFinished | StatusChanged | Heartbeat):
+        elif isinstance(
+            event, ToolStarted | ToolFinished | StatusChanged | Heartbeat | MessageAppended
+        ):
             conv = self._convs.get(key)
             if conv is not None:
                 conv.view.apply(event)

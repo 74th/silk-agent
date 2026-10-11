@@ -1,0 +1,57 @@
+# silk-agent settings for the Slack test deployment (mounted at /config/silk-agent.yaml).
+# Slack tokens come from the Secret silk-agent-slack (SLACK_BOT_TOKEN / SLACK_APP_TOKEN).
+slack:
+  app_token_secret: ""
+  bot_token_secret: ""
+  stop_words: ["停止", "中止", "中断", "STOP"]
+  interrupt_mode: append           # append | interrupt | queue
+  progress:
+    heartbeat_interval_seconds: 60
+    timezone: Asia/Tokyo
+    max_tools_shown: 20
+    tool_display: summary
+filter:
+  allowed_teams: [T8W42FC4U]
+  allowed_channels: []
+  allowed_users: []
+  max_message_chars: 8000
+input_guard:
+  provider: gemini
+  model: gemini-3.8-flash
+  project: nnyn-dev
+  location: global
+  policy_file: policies/input-guard.md
+  on_error: block
+output_sanitizer:
+  provider: model_armor
+  # `simple` only detects PII (basicConfig); silk-agent-test masks it (DLP inspect/deidentify).
+  template: projects/nnyn-dev/locations/us-central1/templates/silk-agent-test
+  endpoint: modelarmor.us-central1.rep.googleapis.com
+  on_sdp_match: mask
+  on_other_match: block
+  on_error: block
+  # pi_and_jailbreak flags ordinary shell commands; the bash tool refuses bulk file
+  # extraction instead (src/silk_agent/guards/bulk_files.py).
+  ignored_filters: [pi_and_jailbreak]
+session_store:
+  provider: agent_platform
+  project: nnyn-dev
+  location: us-central1
+  agent_runtime: projects/nnyn-dev/locations/us-central1/reasoningEngines/868017700884971520
+  ttl_seconds: 2592000
+agent:
+  provider: agent_platform
+  project: nnyn-dev
+  region: global
+  model: claude-haiku-5-5
+  max_turns: 50
+  max_budget_usd_per_turn: 2.0
+  idle_client_timeout_seconds: 600
+mcp:
+  config_file: /config/mcp.json
+skills:
+  source: null
+sandbox:
+  runtime: gke_session_sandbox
+  config_file: /config/sandbox-config.yaml
+  run_reconciler: true

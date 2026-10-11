@@ -8,14 +8,18 @@ from typing import Any
 
 from claude_agent_sdk import SdkMcpTool, create_sdk_mcp_server, tool
 
+from silk_agent.core.background import BackgroundCommands
 from silk_agent.core.commands import CommandTracker
 from silk_agent.core.ports import CommandResult, SandboxRuntime
+from silk_agent.guards.bulk_files import find_bulk_file_access
 
 log = logging.getLogger(__name__)
 
 SERVER_NAME = "sandbox"
 OUTPUT_LIMIT = 30_000
-DEFAULT_TIMEOUT = 120.0
+DEFAULT_TIMEOUT = 3600.0  # the command itself; the tool call waits FOREGROUND_SECONDS at most
+FOREGROUND_SECONDS = 20.0
+BACKGROUND_MARKER = "バックグラウンドで実行中です"
 READ_DEFAULT_LIMIT = 2000
 
 
@@ -65,41 +69,60 @@ _NUM = {"type": "number"}
 
 
 def build_sandbox_tools(
-    key: str, runtime: SandboxRuntime, tracker: CommandTracker | None = None
+    key: str,
+    runtime: SandboxRuntime,
+    tracker: CommandTracker | None = None,
+    background: BackgroundCommands | None = None,
+    foreground_seconds: float = FOREGROUND_SECONDS,
 ) -> list[SdkMcpTool[Any]]:
     """Tools bound to conversation `key`. The agent never chooses the sandbox."""
+    bg = background or BackgroundCommands(runtime, tracker)
 
     @tool(
         "bash",
-        "作業環境でシェルコマンドを実行する。結果が不明な場合は command_id が返り、"
-        "同じコマンドは再実行せず command_status で確認する。",
-        _obj({"command": _STR, "cwd": _STR, "timeout_seconds": _NUM}, ["command"]),
+        "作業環境でシェルコマンドを実行する。"
+        f"{int(foreground_seconds)}秒以内に終わらないコマンドは自動でバックグラウンド実行に切り替わり、"
+        "command_id がすぐ返る（run_in_background=true なら待たずに返る）。"
+        "バックグラウンドのコマンドは終了時に通知が届くので、待ったりポーリングしたりせず、"
+        "他の作業やユーザへの返答を続けること。"
+        "結果が不明な場合は同じコマンドを再実行せず command_status で確認する。",
+        _obj(
+            {
+                "command": _STR,
+                "cwd": _STR,
+                "timeout_seconds": _NUM,
+                "run_in_background": {"type": "boolean"},
+            },
+            ["command"],
+        ),
     )
     async def bash(args: dict[str, Any]) -> dict[str, Any]:
-        started_id: list[str] = []
-
-        async def on_started(command_id: str) -> None:
-            started_id.append(command_id)
-            if tracker is not None:
-                await tracker.started(key, command_id)
-
-        result: CommandResult | None = None
-        try:
-            result = await runtime.run_command(
-                key,
-                args["command"],
-                cwd=args.get("cwd"),
-                timeout_seconds=args.get("timeout_seconds") or DEFAULT_TIMEOUT,
-                on_started=on_started,
+        refused = find_bulk_file_access(args["command"])
+        if refused is not None:
+            log.warning("refused bulk file access (%s) in %s", refused, key)
+            return _text(
+                f"このコマンドは実行できません（{refused}操作は許可されていません）。"
+                "必要なファイルを個別に指定してください。",
+                error=True,
             )
-        finally:
-            # Keep the id only while the command may still be running (unknown / running);
-            # on completion, cancellation or an error it is no longer a running command.
-            may_run = result is not None and result.outcome in ("unknown", "running")
-            if tracker is not None and started_id and not may_run:
-                await tracker.finished(key, started_id[0])
-        assert result is not None  # an exception would have propagated
-        return format_command(result)
+        entry = await bg.start(
+            key,
+            args["command"],
+            cwd=args.get("cwd"),
+            timeout_seconds=args.get("timeout_seconds") or DEFAULT_TIMEOUT,
+        )
+        if not args.get("run_in_background"):
+            result = await bg.wait(entry, foreground_seconds)
+            if result is not None:
+                return format_command(result)
+        result = bg.detach(entry)
+        if result is not None:
+            return format_command(result)
+        return _text(
+            f"{BACKGROUND_MARKER}（command_id={entry.command_id}）。"
+            "終了すると通知が届きます。待たずに、他の作業やユーザへの返答を続けてください。"
+            "途中の出力は command_output、取り消しは cancel_command で行えます。"
+        )
 
     @tool(
         "read_file",
@@ -194,6 +217,9 @@ def build_sandbox_tools(
         _obj({"command_id": _STR}, ["command_id"]),
     )
     async def command_status(args: dict[str, Any]) -> dict[str, Any]:
+        entry = bg.find(key, args["command_id"])
+        if entry is not None and entry.result is None:
+            return _text(f"outcome: running（バックグラウンド）\ncommand: {entry.command}")
         result = await runtime.command_status(key, args["command_id"])
         if result.outcome == "unknown":
             return _text(
@@ -214,6 +240,19 @@ def build_sandbox_tools(
         )
         return _text(_clip(out) + f"\nnext_cursor: {cursor}")
 
+    @tool(
+        "cancel_command",
+        "バックグラウンドで実行中のコマンドを止める。",
+        _obj({"command_id": _STR}, ["command_id"]),
+    )
+    async def cancel_command(args: dict[str, Any]) -> dict[str, Any]:
+        if await bg.cancel(key, args["command_id"]):
+            return _text(f"止めました（command_id={args['command_id']}）。")
+        return _text(
+            f"実行中のバックグラウンドコマンドが見つかりません（command_id={args['command_id']}）。",
+            error=True,
+        )
+
     return [
         bash,
         read_file,
@@ -224,10 +263,16 @@ def build_sandbox_tools(
         grep,
         command_status,
         command_output,
+        cancel_command,
     ]
 
 
 def build_sandbox_server(
-    key: str, runtime: SandboxRuntime, tracker: CommandTracker | None = None
+    key: str,
+    runtime: SandboxRuntime,
+    tracker: CommandTracker | None = None,
+    background: BackgroundCommands | None = None,
 ) -> Any:
-    return create_sdk_mcp_server(SERVER_NAME, tools=build_sandbox_tools(key, runtime, tracker))
+    return create_sdk_mcp_server(
+        SERVER_NAME, tools=build_sandbox_tools(key, runtime, tracker, background)
+    )

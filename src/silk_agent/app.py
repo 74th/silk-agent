@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from silk_agent.config import Config
+from silk_agent.core.background import BackgroundCommands
+from silk_agent.core.commands import CommandTracker
 from silk_agent.core.filters import FilterChain, default_chain
 from silk_agent.core.lifecycle import new_bot_instance_id
 from silk_agent.core.orchestrator import ConversationOrchestrator
@@ -68,6 +73,47 @@ def build_skill_source(config: Config, cache_dir: Path) -> SkillSource | None:
     return LocalDirSkillSource(source, cache_dir)  # type: ignore[return-value]
 
 
+# HMAC key the library needs when `ensure` receives env (USER_EMAIL). It must stay the
+# same for the life of the sandboxes, so it comes from a Secret, not the ConfigMap.
+FINGERPRINT_KEY_ENV = "SILK_AGENT_SANDBOX_FINGERPRINT_KEY"
+
+
+def with_fingerprint_key(config_file: Path, key: str, out: Path) -> Path:
+    """Write a copy of the sandbox config with `environment_fingerprint_key` set (mode 0600)."""
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+    template = Path(data.get("template_file", "templates/sandbox.yaml"))
+    if not template.is_absolute():
+        # The library resolves a relative template next to the config file.
+        data["template_file"] = str(config_file.parent / template)
+    data["environment_fingerprint_key"] = key
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, allow_unicode=True)
+    return out
+
+
+def _make_incluster_loader_awaitable() -> None:
+    """Work around `SandboxManager.from_config` awaiting `load_incluster_config()`.
+
+    kubernetes_asyncio's `load_incluster_config` is synchronous, so inside a Pod the
+    `await` raises TypeError and the library falls back to a (missing) kubeconfig.
+    Remove once gke-session-sandbox calls it without `await`.
+    """
+    import inspect
+
+    from kubernetes_asyncio import config as kube_config
+
+    original = kube_config.load_incluster_config
+    if inspect.iscoroutinefunction(original):
+        return
+
+    async def load_incluster_config(*args: Any, **kwargs: Any) -> None:
+        original(*args, **kwargs)
+
+    kube_config.load_incluster_config = load_incluster_config  # type: ignore[assignment]
+
+
 async def build_runtime(
     config: Config, root: Path, work_dir: Path, env_provider: Any
 ) -> SandboxRuntime:
@@ -78,6 +124,12 @@ async def build_runtime(
     from silk_agent.sandbox.gke import GkeSessionSandboxRuntime
 
     config_file = root / (config.sandbox.config_file or "config/sandbox-config.yaml")
+    key = os.environ.get(FINGERPRINT_KEY_ENV, "")
+    if key:
+        config_file = await asyncio.to_thread(
+            with_fingerprint_key, config_file, key, work_dir / "sandbox-config.yaml"
+        )
+    _make_incluster_loader_awaitable()
     manager = await SandboxManager.from_config(str(config_file))
     return GkeSessionSandboxRuntime(manager, env_provider=env_provider)
 
@@ -96,10 +148,12 @@ async def build_services(
 ) -> Services:
     clock = clock or SystemClock()
     state_store, session_store = build_state_store(config)
+    built_runtime = runtime is None
     runtime = runtime or await build_runtime(config, root, work_dir, env_provider)
     skills = build_skill_source(config, work_dir / "skills-cache")
     bot_instance_id = new_bot_instance_id()
 
+    background = BackgroundCommands(runtime, CommandTracker(state_store))
     engine_factory = build_engine_factory(
         config,
         runtime,
@@ -109,6 +163,7 @@ async def build_services(
         session_store=session_store,
         skills=skills,
         state_store=state_store,
+        background=background,
     )
     orchestrator = ConversationOrchestrator(
         engine_factory,
@@ -135,10 +190,25 @@ async def build_services(
         state_store=state_store,
         bot_instance_id=bot_instance_id,
         cancel_commands=runtime.cancel_commands,
+        cancel_background=background.cancel_all,
         notice_source=runtime.pop_notices,
         notice_ack=runtime.ack_notices,
     )
+    # A backgrounded command reports its completion to its conversation.
+    background.on_finished = orchestrator.notify
     services = Services(orchestrator, runtime, state_store, bot_instance_id, skills)
+    if (
+        built_runtime
+        and start_background
+        and config.sandbox.runtime == "gke_session_sandbox"
+        and config.sandbox.run_reconciler
+    ):
+        # The Bot is the library's single "API process": it owns the SQLite repository,
+        # so the idle-suspend / retention reconciler runs here too.
+        from gke_session_sandbox import LifecycleReconciler  # pyright: ignore[reportMissingImports]
+
+        reconciler = LifecycleReconciler(runtime.manager)  # type: ignore[attr-defined]
+        services.background.append(asyncio.create_task(reconciler.run_forever()))
     if skills is not None and start_background:
         try:
             await skills.refresh()

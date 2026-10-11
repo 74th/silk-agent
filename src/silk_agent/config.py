@@ -24,7 +24,7 @@ class SlackConfig(_Model):
     app_token_secret: str = ""
     bot_token_secret: str = ""
     stop_words: list[str] = Field(default_factory=lambda: ["停止", "中止", "中断", "STOP"])
-    interrupt_mode: Literal["interrupt", "queue"] = "interrupt"
+    interrupt_mode: Literal["append", "interrupt", "queue"] = "append"
     progress: ProgressConfig = Field(default_factory=ProgressConfig)
 
 
@@ -52,6 +52,8 @@ class OutputSanitizerConfig(_Model):
     on_sdp_match: Literal["mask", "block"] = "mask"
     on_other_match: Literal["block"] = "block"
     on_error: Literal["block"] = "block"
+    # Model Armor filters (filter_results keys) whose matches are ignored on outputs.
+    ignored_filters: list[str] = Field(default_factory=lambda: ["pi_and_jailbreak"])
 
 
 class SessionStoreConfig(_Model):
@@ -84,6 +86,8 @@ class SkillsConfig(_Model):
 class SandboxConfig(_Model):
     runtime: Literal["gke_session_sandbox", "local_process"] = "gke_session_sandbox"
     config_file: str | None = None
+    # Run the library's LifecycleReconciler (idle suspend / retention) in this process.
+    run_reconciler: bool = True
 
 
 class Config(_Model):

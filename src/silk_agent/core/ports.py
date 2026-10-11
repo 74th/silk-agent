@@ -56,6 +56,12 @@ class AgentEngine(Protocol):
         """Stop the running turn. The iterator from run_turn then ends."""
         ...
 
+    async def append(self, text: str) -> bool:
+        """Add a user message to the running turn without stopping it (the model reads it
+        after the running tool finishes). False when no turn can take it; the caller then
+        queues the message as a new turn."""
+        ...
+
     async def reset(self) -> None:
         """Forget the conversation history; the next turn starts a new session."""
         ...

@@ -37,6 +37,7 @@ log = logging.getLogger(__name__)
 
 HISTORY_FOR_GUARD = 5
 NOTHING_RUNNING = "実行中の処理はありません。"
+BACKGROUND_STOPPED = "バックグラウンドで実行中のコマンド{n}件を停止しました。"
 INPUT_CHECK_FAILED = (
     "入力を確認できなかったため、処理しませんでした。しばらくしてからもう一度お試しください。"
 )
@@ -61,6 +62,7 @@ class ConversationOrchestrator:
         state_store: SessionStateStore | None = None,
         bot_instance_id: str = "",
         cancel_commands: Callable[[str], Awaitable[None]] | None = None,
+        cancel_background: Callable[[str], Awaitable[int]] | None = None,
         notice_source: Callable[[str], Awaitable[list[str]]] | None = None,
         notice_ack: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
@@ -75,6 +77,7 @@ class ConversationOrchestrator:
             notice_source=notice_source,
             notice_ack=notice_ack,
         )
+        self._cancel_background = cancel_background
         self._channel = channel
         self._guard = guard
         self._sanitizer = sanitizer
@@ -140,10 +143,26 @@ class ConversationOrchestrator:
         await session.submit(message)
 
     async def _handle_stop(self, request: StopRequest) -> None:
-        session = self._registry.get(request.conversation_key)
+        key = request.conversation_key
+        # Background commands first: they are stopped on request and send no completion.
+        background = 0
+        if self._cancel_background is not None:
+            try:
+                background = await self._cancel_background(key)
+            except Exception:
+                log.exception("failed to stop background commands for %s", key)
+        session = self._registry.get(key)
         stopped = await session.stop() if session is not None else False
-        if not stopped:
-            await self._channel.send(Notice(request.conversation_key, NOTHING_RUNNING))
+        if background:
+            await self._channel.send(Notice(key, BACKGROUND_STOPPED.format(n=background)))
+        elif not stopped:
+            await self._channel.send(Notice(key, NOTHING_RUNNING))
+
+    async def notify(self, key: str, text: str) -> None:
+        """A system notice for the agent (e.g. a background command finished). It joins the
+        running turn, or starts a turn so the agent can report to the user."""
+        session = await self._registry.get_or_create(key)
+        await session.notify(text)
 
     # ------------------------------------------------------------ outbound
 

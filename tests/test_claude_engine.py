@@ -1,7 +1,13 @@
 import asyncio
 from pathlib import Path
 
-from claude_agent_sdk import AssistantMessage, MirrorErrorMessage, ResultMessage, TextBlock
+from claude_agent_sdk import (
+    AssistantMessage,
+    MirrorErrorMessage,
+    ResultMessage,
+    TextBlock,
+    UserMessage,
+)
 
 from silk_agent.agent.engine import HOST_TOOLS, ClaudeAgentEngine, ClaudeEngineSettings
 from silk_agent.agent.summaries import display_name, summarize
@@ -63,6 +69,15 @@ class FakeSDKClient:
     async def hook(self, event, **inp):
         cb = self.options.hooks[event][0].hooks[0]
         await cb({"hook_event_name": event, **inp}, inp.get("tool_use_id"), None)
+
+    async def receive_messages(self):
+        """Like the CLI with --replay-user-messages: each prompt is echoed when consumed."""
+        echoed = 0
+        async for message in self.receive_response():
+            while echoed < len(self.queries):
+                echoed += 1
+                yield UserMessage(content=self.queries[echoed - 1])
+            yield message
 
     async def receive_response(self):
         for step in self.script:
@@ -189,6 +204,80 @@ async def test_interrupt_drains_stream_and_keeps_client(clock, tmp_path):
     assert isinstance(events[-1], TurnFinished)
     assert len(FakeSDKClient.instances) == 1
     assert FakeSDKClient.instances[0].queries == ["go", "next"]
+
+
+async def test_append_sends_into_the_running_turn(clock, tmp_path):
+    gate = asyncio.Event()
+
+    class Gated(FakeSDKClient):
+        async def receive_response(self):
+            yield text("working")
+            await gate.wait()
+            yield result()
+
+    eng = ClaudeAgentEngine(
+        "conv",
+        ClaudeEngineSettings(
+            model="claude-haiku-5-5", project="nnyn-dev", region="global", work_root=tmp_path
+        ),
+        clock,
+        client_factory=Gated,
+    )
+    assert await eng.append("too early") is False  # no turn running
+    collected: list = []
+
+    async def consume():
+        async for e in eng.run_turn(TurnRequest("conv", "t1", "go")):
+            collected.append(e)
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.05)
+    assert await eng.append("特に止まってない？") is True
+    gate.set()
+    await asyncio.wait_for(task, 2)
+    assert isinstance(collected[-1], TurnFinished)
+    assert FakeSDKClient.instances[-1].queries == ["go", "特に止まってない？"]
+    assert await eng.append("after") is False  # the turn is over
+
+
+async def test_prompt_appended_after_the_cli_turn_ended_is_still_answered(clock, tmp_path):
+    """The CLI already finished its turn when the append arrived: it answers the prompt in
+    a turn of its own. Both answers belong to our turn; one TurnFinished at the end."""
+    appended = asyncio.Event()
+
+    class LateAppend(FakeSDKClient):
+        async def receive_messages(self):
+            yield UserMessage(content="go")  # echo of the first prompt
+            yield text("A でした")
+            await appended.wait()  # the append is sent before the first result is read
+            yield result(result="A でした")
+            yield UserMessage(content="1+1 は？")  # consumed only now: a new CLI turn
+            yield text("2 です")
+            yield result(result="2 です")
+
+    eng = ClaudeAgentEngine(
+        "conv",
+        ClaudeEngineSettings(
+            model="claude-haiku-5-5", project="nnyn-dev", region="global", work_root=tmp_path
+        ),
+        clock,
+        client_factory=LateAppend,
+    )
+    collected: list = []
+
+    async def consume():
+        async for e in eng.run_turn(TurnRequest("conv", "t1", "go")):
+            collected.append(e)
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.05)
+    assert await eng.append("1+1 は？") is True
+    appended.set()
+    await asyncio.wait_for(task, 2)
+    texts = [e.text for e in collected if isinstance(e, AssistantText)]
+    assert texts == ["A でした", "2 です"]
+    assert [type(e) for e in collected].count(TurnFinished) == 1
+    assert isinstance(collected[-1], TurnFinished)
 
 
 async def test_mirror_error_becomes_warning(clock, tmp_path):

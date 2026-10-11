@@ -3,6 +3,7 @@ import asyncio
 from silk_agent.core.events import (
     AssistantText,
     Heartbeat,
+    MessageAppended,
     StatusChanged,
     ToolFinished,
     TurnFinished,
@@ -136,8 +137,47 @@ async def test_stop_when_idle(clock, channel):
     assert not channel.events
 
 
-async def test_new_message_interrupts_by_default(clock, channel):
+async def test_new_message_is_appended_to_the_running_turn_by_default(clock, channel):
     env = Env(clock, channel, lambda req: [Tool("bash", duration=100), Text(req.text)])
+    s = await env.send("k", "T1")
+    await channel.wait_for(TurnStarted)
+    await s.submit(UserMessage("k", "u", "特に止まってない？"))
+    # Not interrupted, no second engine, no new turn: the running turn gets the message.
+    assert env.engines["k"].appended == ["特に止まってない？"]
+    assert len(channel.of(MessageAppended)) == 1  # shown in the progress message, no post
+    assert env.engines["k"].interrupt_count == 0
+    await clock.advance(100)
+    await channel.wait_for(TurnFinished)
+    assert not channel.of(TurnInterrupted)
+    assert [r.text for r in env.engines["k"].requests] == ["T1"]
+    assert env.factory_calls == 1 and env.cancelled == []
+
+
+async def test_append_falls_back_to_a_queued_turn_when_the_turn_cannot_take_it(clock, channel):
+    env = Env(clock, channel, lambda req: [Tool("bash", duration=10), Text(req.text)])
+    s = await env.send("k", "T1")
+    await channel.wait_for(TurnStarted)
+
+    async def refuse(text):
+        return False
+
+    env.engines["k"].append = refuse  # e.g. the ResultMessage was already received
+    await s.submit(UserMessage("k", "u", "M"))
+    await clock.advance(10)
+    await channel.wait_for(TurnFinished, count=1)
+    await clock.advance(10)
+    await channel.wait_for(TurnFinished, count=2)
+    assert [r.text for r in env.engines["k"].requests] == ["T1", "M"]
+    assert not channel.of(TurnInterrupted)
+
+
+async def test_interrupt_mode_stops_the_turn_for_a_new_message(clock, channel):
+    env = Env(
+        clock,
+        channel,
+        lambda req: [Tool("bash", duration=100), Text(req.text)],
+        interrupt_mode="interrupt",
+    )
     s = await env.send("k", "T1")
     await channel.wait_for(TurnStarted)
     env.engines["k"]._scenarios = lambda req: [Text("answer:" + req.text)]

@@ -98,9 +98,22 @@ async def test_other_filter_blocks_even_with_sdp():
     assert r.status == "blocked" and "malicious_uri_filter_result" in r.reason
 
 
-async def test_jailbreak_blocks():
-    c = FakeClient([result(pi=pi())])
-    assert (await make(c).sanitize("x")).status == "blocked"
+async def test_jailbreak_match_is_ignored_by_default():
+    # Model Armor flags ordinary shell commands; bulk_files.py handles jailbreaks instead.
+    c = FakeClient([result(pi_and_jailbreak=pi())])
+    r = await make(c).sanitize("echo hello > a.txt && whoami")
+    assert (r.status, r.text) == ("pass", "echo hello > a.txt && whoami")
+
+
+async def test_jailbreak_with_sdp_is_masked():
+    c = FakeClient([result(pi_and_jailbreak=pi(), sdp=sdp("[EMAIL_ADDRESS]"))])
+    r = await make(c).sanitize("a@example.com")
+    assert (r.status, r.text) == ("masked", "[EMAIL_ADDRESS]")
+
+
+async def test_jailbreak_blocks_when_not_ignored():
+    c = FakeClient([result(pi_and_jailbreak=pi())])
+    assert (await make(c, ignored_filters=()).sanitize("x")).status == "blocked"
 
 
 async def test_on_sdp_match_block():

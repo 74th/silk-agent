@@ -137,9 +137,9 @@ async def test_stop_word_inside_sentence_is_a_message(clock, channel):
     await orch.handle(msg("go"))
     await channel.wait_for(ToolStarted)
     await orch.handle(msg("処理を停止して別のことをして"))
-    await channel.wait_for(TurnInterrupted)
-    assert channel.of(TurnInterrupted)[0].reason == "new_message"
-    assert len(engines["k"].requests) == 2
+    # Not a stop: the message is added to the running turn.
+    assert engines["k"].appended == ["処理を停止して別のことをして"]
+    assert engines["k"].interrupt_count == 0 and not channel.of(TurnInterrupted)
 
 
 async def test_stop_word_when_idle(clock, channel):

@@ -1,4 +1,4 @@
-from silk_agent.channels.slack_events import SlackEventRouter, make_key, parse_key
+from silk_agent.channels.slack_events import SlackEventRouter, make_key, parse_key, slack_unescape
 
 BOT = "UBOT"
 
@@ -200,3 +200,9 @@ async def test_attachments_are_listed_by_name():
         )
     )
     assert env.handled[0].attachments == ("a.log",)
+
+
+def test_slack_escapes_are_undone():
+    assert slack_unescape("sleep 300 &amp;&amp; echo done") == "sleep 300 && echo done"
+    assert slack_unescape("a &lt;b&gt; c") == "a <b> c"
+    assert slack_unescape("&amp;lt;") == "&lt;"  # a literal "&lt;" typed by the user

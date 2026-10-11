@@ -9,6 +9,7 @@ from silk_agent.core.events import (
     AssistantText,
     GuardBlocked,
     Heartbeat,
+    MessageAppended,
     Notice,
     StatusChanged,
     ToolFinished,
@@ -83,6 +84,18 @@ def test_view_rendering_running_and_tools():
     assert "✅ 成功 bash git clone https://x/y（3秒）" in lines
     assert "⏳ 実行中 docs/search query=silk" in lines
     assert lines[-1] == "停止するには『停止』と書き込んでください"
+
+
+def test_view_shows_appended_messages_while_running():
+    v = ProgressView(T0)
+    v.apply(tool_started(1, "bash", "sleep 300 && echo done"))
+    v.apply(MessageAppended(KEY, "t1"))
+    v.apply(MessageAppended(KEY, "t1"))
+    lines = v.render(T0).splitlines()
+    assert "📝 追加の指示 2件（実行中のツールが終わったら、この処理の続きで対応します）" in lines
+    v.apply(ToolFinished(KEY, "t1", "tu1", "success", "sleep 300 && echo done", T0, 300))
+    v.apply(TurnFinished(KEY, "t1", "", Usage(), finished_at=T0))
+    assert not any(line.startswith("📝") for line in v.render(T0).splitlines())
 
 
 def test_view_shows_latest_20_and_remaining_count():

@@ -11,6 +11,9 @@ from silk_agent.core.ports import SanitizeResult
 log = logging.getLogger(__name__)
 
 DEFAULT_CHUNK_CHARS = 8000
+# Filters whose matches do not stop an output. pi_and_jailbreak flags ordinary shell
+# commands in tool summaries; jailbreaks are handled by guards/bulk_files.py instead.
+DEFAULT_IGNORED_FILTERS = ("pi_and_jailbreak",)
 _FENCE = re.compile(r"^\s*(```|~~~)")
 
 
@@ -76,8 +79,10 @@ class ModelArmorSanitizer:
         endpoint: str | None = None,
         on_sdp_match: str = "mask",
         chunk_chars: int = DEFAULT_CHUNK_CHARS,
+        ignored_filters: tuple[str, ...] | list[str] = DEFAULT_IGNORED_FILTERS,
         client: Any | None = None,
     ) -> None:
+        self._ignored = frozenset(ignored_filters)
         self._template = template
         self._endpoint = endpoint
         self._on_sdp_match = on_sdp_match
@@ -118,17 +123,25 @@ class ModelArmorSanitizer:
             model_response_data=modelarmor_v1.DataItem(text=chunk),
         )
         response = await self._get_client().sanitize_model_response(request=request)
-        return self.interpret(response.sanitization_result, chunk, self._on_sdp_match)
+        return self.interpret(
+            response.sanitization_result, chunk, self._on_sdp_match, self._ignored
+        )
 
     @staticmethod
-    def interpret(result: Any, chunk: str, on_sdp_match: str = "mask") -> SanitizeResult:
+    def interpret(
+        result: Any,
+        chunk: str,
+        on_sdp_match: str = "mask",
+        ignored_filters: frozenset[str] | set[str] = frozenset(),
+    ) -> SanitizeResult:
         from google.cloud.modelarmor_v1 import FilterMatchState
 
         if result.filter_match_state != FilterMatchState.MATCH_FOUND:
             return SanitizeResult("pass", chunk)
 
         matched: dict[str, Any] = {}
-        for fr in result.filter_results.values():
+        ignored_match = False
+        for name, fr in result.filter_results.items():
             kind = type(fr).pb(fr).WhichOneof("filter_result")
             if kind is None:
                 continue
@@ -137,8 +150,13 @@ class ModelArmorSanitizer:
                 if _sdp_matched(sub):
                     matched["sdp"] = sub
             elif sub.match_state == FilterMatchState.MATCH_FOUND:
-                matched[kind] = sub
+                if name in ignored_filters:
+                    ignored_match = True
+                else:
+                    matched[kind] = sub
 
+        if not matched and ignored_match:
+            return SanitizeResult("pass", chunk)
         if not matched:
             # The overall state says MATCH_FOUND but we cannot tell which filter: fail closed.
             return SanitizeResult("blocked", "", "unidentified filter match")

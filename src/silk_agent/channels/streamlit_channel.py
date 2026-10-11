@@ -77,7 +77,7 @@ class StreamlitChannel:
 
 # ---------------------------------------------------------------- view model
 
-ToolState = Literal["running", "success", "failure", "interrupted"]
+ToolState = Literal["running", "success", "failure", "interrupted", "background"]
 
 
 @dataclass

@@ -28,29 +28,44 @@ class StaleGenerationError(Exception):
 
 
 class FakeCommands:
+    """Mirrors gke_session_sandbox.CommandTrackerClient (start / wait / get / read_output /
+    cancel)."""
+
     def __init__(self):
-        self.runs = []
+        self.runs = []  # (argv, cwd, timeout_seconds, command_id)
         self.mode = "ok"
         self.gate = asyncio.Event()
-        self.cancelled = False
+        self.cancelled = []
 
-    async def run(self, argv, cwd=".", timeout=None):  # noqa: ASYNC109
-        self.runs.append((argv, cwd, timeout))
+    async def start(self, argv, *, command_id, cwd="", timeout_seconds=0):
+        self.runs.append((argv, cwd, timeout_seconds, command_id))
         if self.mode == "unknown":
-            raise ExecutionOutcomeUnknown("cmd-77")
+            raise ExecutionOutcomeUnknown(command_id)
+        return {"command_id": command_id, "state": "running"}
+
+    async def wait(self, command_id):
         if self.mode == "block":
-            try:
-                await self.gate.wait()
-            except asyncio.CancelledError:
-                self.cancelled = True
-                raise
-        return SimpleNamespace(command_id="cmd-1", exit_code=0, stdout=b"hello\n", stderr=b"")
+            await self.gate.wait()
+            return SimpleNamespace(
+                command_id=command_id,
+                exit_code=-15,
+                stdout=b"",
+                stderr=b"",
+                stop_reason="cancelled",
+            )
+        return SimpleNamespace(
+            command_id=command_id, exit_code=0, stdout=b"hello\n", stderr=b"", stop_reason=None
+        )
+
+    async def cancel(self, command_id):
+        self.cancelled.append(command_id)
+        self.gate.set()
 
     async def get(self, command_id):
-        return SimpleNamespace(state="running", exit_code=None)
+        return {"command_id": command_id, "state": "running", "exit_code": None}
 
-    async def read_output(self, command_id, cursor=None):
-        return SimpleNamespace(text="out", cursor=3)
+    async def read_output(self, command_id, *, stream="stdout", cursor=0):
+        return SimpleNamespace(data=b"out", cursor=cursor + 3)
 
 
 class FakeFiles:
@@ -66,7 +81,7 @@ class FakeFiles:
         self.data[path] = data
 
     async def list(self, path):
-        return [SimpleNamespace(path=p, is_dir=False, size=len(d)) for p, d in self.data.items()]
+        return [SimpleNamespace(path=p, type="file", size=len(d)) for p, d in self.data.items()]
 
 
 class FakeHandle:
@@ -125,15 +140,15 @@ async def test_ensure_with_user_email_env_and_command_mapping():
 
     res = await rt.run_command("slack:T1:C1:1.0", "ls -la", cwd="src", on_started=on_started)
     assert mgr.ensured[0] == (("T1", "C1:1.0"), {"USER_EMAIL": "taro@example.com"})
-    argv, cwd, timeout = mgr.handles[("T1", "C1:1.0")].commands.runs[0]
-    assert argv == ["bash", "-lc", "ls -la"] and cwd == "src" and timeout == 120.0
+    argv, cwd, timeout, command_id = mgr.handles[("T1", "C1:1.0")].commands.runs[0]
+    assert argv == ["bash", "-lc", "ls -la"] and cwd == "src" and timeout == 120
     assert (res.outcome, res.exit_code, res.stdout, res.command_id) == (
         "completed",
         0,
         "hello\n",
-        "cmd-1",
+        command_id,
     )
-    assert started == ["cmd-1"]
+    assert started == [command_id]
 
 
 async def test_unknown_outcome_is_returned_with_id_and_never_resent():
@@ -147,8 +162,9 @@ async def test_unknown_outcome_is_returned_with_id_and_never_resent():
         seen.append(cid)
 
     res = await rt.run_command("slack:T1:C1:1.0", "make deploy", on_started=on_started)
-    assert (res.outcome, res.command_id) == ("unknown", "cmd-77")
-    assert seen == ["cmd-77"]
+    sent_id = cmds.runs[-1][3]
+    assert (res.outcome, res.command_id) == ("unknown", sent_id)
+    assert seen == [sent_id]
     assert [r[0][2] for r in cmds.runs] == ["echo warm", "make deploy"]  # exactly one send
 
 
@@ -188,7 +204,22 @@ async def test_cancel_commands_cancels_the_running_command():
     await asyncio.sleep(0.05)
     await rt.cancel_commands(key)
     res = await asyncio.wait_for(task, 2)
-    assert res.outcome == "cancelled" and cmds.cancelled
+    assert res.outcome == "cancelled" and cmds.cancelled == [cmds.runs[-1][3]]
+
+
+async def test_cancelling_the_waiting_tool_cancels_the_sandbox_command():
+    # An interrupted turn cancels the tool call; the command must not keep running.
+    rt, mgr = make()
+    key = "slack:T1:C1:1.0"
+    await rt.run_command(key, "warm")
+    cmds = mgr.handles[("T1", "C1:1.0")].commands
+    cmds.mode = "block"
+    task = asyncio.create_task(rt.run_command(key, "sleep 300 && echo done"))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert cmds.cancelled == [cmds.runs[-1][3]]
 
 
 async def test_status_and_output():
@@ -196,6 +227,7 @@ async def test_status_and_output():
     st = await rt.command_status("slack:T1:C1:1.0", "cmd-1")
     assert st.outcome == "running"
     assert await rt.command_output("slack:T1:C1:1.0", "cmd-1", 0) == ("out", 3)
+    assert await rt.command_output("slack:T1:C1:1.0", "cmd-1", 3) == ("out", 6)
 
 
 async def test_copy_skills_writes_under_dot_skills(tmp_path: Path):

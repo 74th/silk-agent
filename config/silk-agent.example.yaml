@@ -2,7 +2,7 @@ slack:
   app_token_secret: projects/nnyn-dev/secrets/silk-agent-slack-app-token
   bot_token_secret: projects/nnyn-dev/secrets/silk-agent-slack-bot-token
   stop_words: ["停止", "中止", "中断", "STOP"]
-  interrupt_mode: interrupt        # interrupt | queue
+  interrupt_mode: append           # append | interrupt | queue
   progress:
     heartbeat_interval_seconds: 60
     timezone: Asia/Tokyo

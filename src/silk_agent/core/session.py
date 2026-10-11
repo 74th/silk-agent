@@ -12,6 +12,7 @@ from typing import Literal
 from silk_agent.core.events import (
     Heartbeat,
     InterruptReason,
+    MessageAppended,
     StatusChanged,
     TurnFailed,
     TurnFinished,
@@ -33,10 +34,14 @@ log = logging.getLogger(__name__)
 
 SessionState = Literal["idle", "running", "interrupting"]
 
+SYSTEM_USER = "system"  # author of notices that the agent receives as a message
+
 
 @dataclass(frozen=True)
 class SessionSettings:
-    interrupt_mode: Literal["interrupt", "queue"] = "interrupt"
+    # append: add to the running turn (no interruption) / interrupt: stop it and start a
+    # new turn / queue: run after the current turn.
+    interrupt_mode: Literal["append", "interrupt", "queue"] = "append"
     heartbeat_interval_seconds: float = 60
     idle_timeout_seconds: float = 600
 
@@ -121,10 +126,34 @@ class AgentSession:
             return
         self._cancel_idle_timer()
         running = self._state != "idle"
+        if (
+            self._state == "running"
+            and self._settings.interrupt_mode == "append"
+            and self._engine is not None
+            and await self._engine.append(message.text)
+        ):
+            # Shown in the progress message, not as a separate post.
+            await self._sink(MessageAppended(self.key, self._turn_id or ""))
+            return
         self._queue.put_nowait(message)
         self._ensure_worker()
         if running and self._settings.interrupt_mode == "interrupt":
             await self._interrupt("new_message")
+
+    async def notify(self, text: str) -> None:
+        """A system notice: added to the running turn, otherwise run as a turn of its own.
+        It never interrupts a turn."""
+        if self._closing:
+            return
+        if (
+            self._state == "running"
+            and self._engine is not None
+            and await self._engine.append(text)
+        ):
+            return
+        self._cancel_idle_timer()
+        self._queue.put_nowait(UserMessage(self.key, SYSTEM_USER, text))
+        self._ensure_worker()
 
     async def stop(self) -> bool:
         """Interrupt the running turn. Returns False if nothing was running."""

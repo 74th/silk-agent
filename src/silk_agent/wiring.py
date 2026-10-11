@@ -10,6 +10,7 @@ from silk_agent.agent.engine import ClaudeAgentEngine, ClaudeEngineSettings
 from silk_agent.agent.mcp_config import load_mcp_servers
 from silk_agent.agent.sandbox_tools import build_sandbox_server
 from silk_agent.config import Config
+from silk_agent.core.background import BackgroundCommands
 from silk_agent.core.commands import CommandTracker
 from silk_agent.core.ports import (
     AgentEngineFactory,
@@ -45,7 +46,10 @@ def build_output_sanitizer(config: Config) -> OutputSanitizer:
     from silk_agent.guards.model_armor import ModelArmorSanitizer
 
     return ModelArmorSanitizer(
-        template=cfg.template, endpoint=cfg.endpoint, on_sdp_match=cfg.on_sdp_match
+        template=cfg.template,
+        endpoint=cfg.endpoint,
+        on_sdp_match=cfg.on_sdp_match,
+        ignored_filters=cfg.ignored_filters,
     )
 
 
@@ -62,15 +66,17 @@ def build_engine_factory(
     on_session_id: Callable[[str, str], None] | None = None,
     model: str | None = None,
     extra_env: dict[str, str] | None = None,
+    background: BackgroundCommands | None = None,
 ) -> AgentEngineFactory:
     mcp = load_mcp_servers((root / config.mcp.config_file) if config.mcp.config_file else None)
     prompt_path = root / "policies" / "agent-system.md"
     system_prompt = prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
 
     tracker = CommandTracker(state_store) if state_store is not None else None
+    bg = background or BackgroundCommands(runtime, tracker)
 
     def servers(key: str) -> dict[str, Any]:
-        return {"sandbox": build_sandbox_server(key, runtime, tracker), **mcp}
+        return {"sandbox": build_sandbox_server(key, runtime, tracker, bg), **mcp}
 
     async def on_skills(key: str, generation: SkillGeneration) -> None:
         await runtime.copy_skills(key, generation.root, generation.generation_id)

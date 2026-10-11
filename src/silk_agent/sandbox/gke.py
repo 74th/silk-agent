@@ -1,16 +1,17 @@
 """GkeSessionSandboxRuntime: SandboxRuntime on the `gke-session-sandbox` library.
 
-Written against the API documented in the library's README (`manager.ensure`,
-`session.commands.run`, `session.files.*`, `session.pending_context_events`,
-`manager.ack_context_event`). The library is imported lazily, so the rest of silk-agent
-works without it.
+Uses `manager.ensure`, `session.commands` (start / wait / get / read_output / cancel),
+`session.files`, `session.pending_context_events` and `manager.ack_context_event`.
+The library is imported lazily, so the rest of silk-agent works without it.
 """
 
 from __future__ import annotations
 
 import asyncio
-import itertools
+import contextlib
 import logging
+import math
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -48,8 +49,8 @@ class GkeSessionSandboxRuntime:
         self._handles: dict[str, Any] = {}
         self._pending: dict[str, list[str]] = {}
         self._events: dict[str, list[Any]] = {}
-        self._running: dict[str, set[asyncio.Future[Any]]] = {}
-        self._fallback_ids = itertools.count(1)
+        self._running: dict[str, dict[str, Any]] = {}  # conversation -> command id -> handle
+        self._cancelled: dict[str, set[str]] = {}
 
     # ------------------------------------------------------------ session
 
@@ -94,41 +95,55 @@ class GkeSessionSandboxRuntime:
         timeout_seconds: float | None = None,
         on_started: Callable[[str], Awaitable[None]] | None = None,
     ) -> CommandResult:
-        timeout = timeout_seconds or self._timeout
+        """Submit once with our own command ID, then wait for it by ID.
 
-        async def op(handle: Any) -> Any:
-            inner = asyncio.ensure_future(
-                handle.commands.run(["bash", "-lc", command], cwd=cwd or ".", timeout=timeout)
+        Only the submission may be retried (on a new generation); waiting never resends.
+        """
+        timeout = max(1, math.ceil(timeout_seconds or self._timeout))
+        command_id = uuid.uuid4().hex
+
+        async def submit(handle: Any) -> Any:
+            await handle.commands.start(
+                ["bash", "-lc", command],
+                command_id=command_id,
+                cwd=cwd or "",
+                timeout_seconds=timeout,
             )
-            self._running.setdefault(conversation_key, set()).add(inner)
-            try:
-                return await inner
-            except asyncio.CancelledError:
-                current = asyncio.current_task()
-                if inner.cancelled() and not (current and current.cancelling()):
-                    return None  # cancelled by cancel_commands()
-                raise
-            finally:
-                self._running[conversation_key].discard(inner)
+            return handle
 
         try:
-            # A command is sent at most once: retrying is limited to ensuring the session.
-            result = await self._with_session(conversation_key, op)
+            handle = await self._with_session(conversation_key, submit)
         except Exception as e:
             if type(e).__name__ == "ExecutionOutcomeUnknown":
-                command_id = getattr(e, "command_id", "") or f"unknown-{next(self._fallback_ids)}"
                 if on_started is not None:
                     await on_started(command_id)
                 return CommandResult(command_id, "unknown")
             raise
-        if result is None:
-            return CommandResult("", "cancelled")
-        command_id = str(getattr(result, "command_id", "") or "")
-        if on_started is not None and command_id:
-            await on_started(command_id)
+        running = self._running.setdefault(conversation_key, {})
+        running[command_id] = handle
+        try:
+            if on_started is not None:
+                await on_started(command_id)
+            result = await handle.commands.wait(command_id)
+        except asyncio.CancelledError:
+            # Nobody will wait for this command any more (the turn was interrupted):
+            # stop it instead of leaving it running in the sandbox.
+            self._cancelled.setdefault(conversation_key, set()).add(command_id)
+            with contextlib.suppress(Exception):
+                await asyncio.shield(handle.commands.cancel(command_id))
+            raise
+        except Exception as e:
+            if type(e).__name__ == "ExecutionOutcomeUnknown":
+                return CommandResult(command_id, "unknown")
+            raise
+        finally:
+            running.pop(command_id, None)
+        cancelled = command_id in self._cancelled.pop(conversation_key, set()) or (
+            getattr(result, "stop_reason", None) == "cancelled"
+        )
         return CommandResult(
             command_id,
-            "completed",
+            "cancelled" if cancelled else "completed",
             getattr(result, "exit_code", None),
             _text(getattr(result, "stdout", "")),
             _text(getattr(result, "stderr", "")),
@@ -143,31 +158,32 @@ class GkeSessionSandboxRuntime:
         except Exception:
             log.exception("command status lookup failed")
             return CommandResult(command_id, "unknown")
-        state = str(getattr(record, "state", "unknown")).lower()
-        outcome = {
-            "running": "running",
-            "completed": "completed",
-            "succeeded": "completed",
-            "failed": "completed",
-            "cancelled": "cancelled",
-        }.get(state.rsplit(".", 1)[-1], "unknown")
-        return CommandResult(command_id, outcome, getattr(record, "exit_code", None))  # type: ignore[arg-type]
+        state = str(record.get("state", "unknown"))
+        if state == "finished":
+            outcome = "cancelled" if record.get("stop_reason") == "cancelled" else "completed"
+        else:
+            outcome = "running" if state == "running" else "unknown"
+        return CommandResult(command_id, outcome, record.get("exit_code"))  # type: ignore[arg-type]
 
     async def command_output(
         self, conversation_key: str, command_id: str, cursor: int = 0
     ) -> tuple[str, int]:
-        async def op(handle: Any) -> Any:
-            return await handle.commands.read_output(command_id, cursor=cursor or None)
+        """stdout from a byte cursor (the cursor returned by the previous call)."""
 
-        out = await self._with_session(conversation_key, op)
-        text = _text(getattr(out, "text", None) or getattr(out, "data", ""))
-        return text, int(getattr(out, "cursor", cursor + len(text)))
+        async def op(handle: Any) -> Any:
+            return await handle.commands.read_output(command_id, stream="stdout", cursor=cursor)
+
+        page = await self._with_session(conversation_key, op)
+        return _text(page.data), int(page.cursor)
 
     async def cancel_commands(self, conversation_key: str) -> None:
-        """Cancelling a `commands.run` makes the library stop the process (SIGTERM, then
-        SIGKILL after 5s) through the tracker."""
-        for task in list(self._running.get(conversation_key, ())):
-            task.cancel()
+        """Ask the tracker to stop the running commands (SIGTERM, then SIGKILL)."""
+        for command_id, handle in list(self._running.get(conversation_key, {}).items()):
+            self._cancelled.setdefault(conversation_key, set()).add(command_id)
+            try:
+                await handle.commands.cancel(command_id)
+            except Exception:
+                log.exception("cancelling command %s failed", command_id)
 
     # ------------------------------------------------------------ files
 
@@ -196,7 +212,7 @@ class GkeSessionSandboxRuntime:
         return [
             FileEntry(
                 str(getattr(e, "path", getattr(e, "name", e))),
-                bool(getattr(e, "is_dir", False)),
+                getattr(e, "type", "") == "directory",
                 int(getattr(e, "size", 0) or 0),
             )
             for e in entries
@@ -230,6 +246,10 @@ class GkeSessionSandboxRuntime:
                 await handle.files.write(target, await asyncio.to_thread(file.read_bytes))
 
         await self._with_session(conversation_key, op)
+
+    @property
+    def manager(self) -> Any:
+        return self._manager
 
     async def aclose(self) -> None:
         close = getattr(self._manager, "close", None)
