@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "echo": {
+      "type": "http",
+      "url": "http://echo-mcp.session-sandbox-system.svc.cluster.local:8000/mcp",
+      "headers": {
+        "X_API_KEY": "${ECHO_MCP_API_KEY}"
+      }
+    }
+  }
+}

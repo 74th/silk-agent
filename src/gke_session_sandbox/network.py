@@ -119,4 +119,25 @@ def build_session_network_policies(
                 "spec": {"podSelector": selector, "egress": egress},
             }
         )
+    if config.network.allow_gke_metadata_server:
+        policies.append(
+            {
+                "apiVersion": "networking.k8s.io/v1",
+                "kind": "NetworkPolicy",
+                "metadata": {
+                    "name": f"sandbox-metadata-egress-{suffix}",
+                    "labels": copy.deepcopy(labels),
+                },
+                "spec": {
+                    "podSelector": selector,
+                    "policyTypes": ["Egress"],
+                    "egress": [
+                        {
+                            "to": [{"ipBlock": {"cidr": "169.254.169.254/32"}}],
+                            "ports": [{"protocol": "TCP", "port": 80}],
+                        }
+                    ],
+                },
+            }
+        )
     return tuple(policies)

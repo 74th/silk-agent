@@ -22,3 +22,13 @@ terraform/gke/*.json
 terraform/gke/*.key
 terraform/gke/*.pem
 terraform/gke/*.p12
+
+# Per-use-case Terraform state and provider cache.
+usecases/*/terraform/.terraform/
+usecases/*/terraform/*.tfstate
+usecases/*/terraform/*.tfstate.*
+usecases/*/terraform/*.tfplan
+usecases/*/terraform/*.plan
+usecases/*/terraform/terraform.tfvars
+usecases/*/terraform/terraform.tfvars.*
+!usecases/*/terraform/terraform.tfvars.example

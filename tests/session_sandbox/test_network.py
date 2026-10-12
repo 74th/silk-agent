@@ -69,6 +69,28 @@ def test_fqdn_rules_are_rendered_only_for_configured_names_and_ports() -> None:
     )
 
 
+def test_gke_metadata_server_is_denied_by_default_and_opt_in_is_scoped() -> None:
+    key = SessionKey(tenant_id="t", session_id="s")
+    default_policies = build_session_network_policies(
+        ManagerConfig(runtime={"image": "example.invalid/sandbox:v1"}), key, 1
+    )
+    assert all("metadata-egress" not in policy["metadata"]["name"] for policy in default_policies)
+
+    config = ManagerConfig(
+        runtime={"image": "example.invalid/sandbox:v1"},
+        network={"allow_gke_metadata_server": True},
+    )
+    policies = build_session_network_policies(config, key, 2)
+    (metadata,) = [p for p in policies if "metadata-egress" in p["metadata"]["name"]]
+    assert metadata["spec"]["egress"] == [
+        {
+            "to": [{"ipBlock": {"cidr": "169.254.169.254/32"}}],
+            "ports": [{"protocol": "TCP", "port": 80}],
+        }
+    ]
+    assert metadata["spec"]["podSelector"] == {"matchLabels": sandbox_pod_labels(key, 2)}
+
+
 def test_resource_labels_do_not_change_policy_pod_selectors() -> None:
     key = SessionKey(tenant_id="t", session_id="s")
     policies = build_session_network_policies(

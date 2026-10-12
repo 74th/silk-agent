@@ -1,0 +1,21 @@
+# The use case's ConfigMap (the files in this directory) on top of silk-agent's k8s/base. It is
+# used by ../k8s/kustomization.yaml, which adds the images. (kustomize only reads files from
+# below the kustomization's own directory, which is why this file sits next to the config files.)
+#
+# Outside the silk-agent repository, reference the base by tag instead of the relative path:
+#   github.com/<org>/silk-agent//k8s/base?ref=v0.1.0
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+labels:
+  - pairs:
+      app.kubernetes.io/name: silk-agent
+    includeSelectors: false
+resources:
+  - ../../../k8s/base
+configMapGenerator:
+  - name: silk-agent-config
+    namespace: session-sandbox-system
+    files:
+      - silk-agent.yaml
+      - sandbox-config.yaml
+      - mcp.json

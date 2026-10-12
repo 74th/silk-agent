@@ -1,0 +1,4 @@
+project_id    = "your-gcp-project"
+region        = "asia-northeast1"
+ksa_namespace = "session-sandboxes"
+ksa_name      = "bigquery-analysis"

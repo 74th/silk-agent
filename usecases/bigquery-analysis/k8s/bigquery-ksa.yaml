@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: bigquery-analysis
+  namespace: session-sandboxes
+  annotations:
+    iam.gke.io/gcp-service-account: "${GSA_EMAIL}"

@@ -197,6 +197,7 @@ class AllowedFQDN(StrictSettings):
 
 class NetworkSettings(StrictSettings):
     allowed_fqdns: tuple[AllowedFQDN, ...] = ()
+    allow_gke_metadata_server: StrictBool = False
     dns_namespace: StrictStr = "kube-system"
     dns_pod_selector: dict[StrictStr, StrictStr] = Field(
         default_factory=lambda: {"k8s-app": "kube-dns"}
