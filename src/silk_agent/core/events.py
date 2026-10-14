@@ -36,6 +36,9 @@ class UserMessage:
     sender: SenderInfo | None = None
     # "message" for a normal user post; anything else (edit, join, ...) is a system event.
     kind: str = "message"
+    # Stable inbox identity in distributed mode; empty for local/system messages.
+    input_id: str = ""
+    dispatch_attempt_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -64,7 +67,9 @@ InboundEvent = UserMessage | StopRequest | ResetRequest | ResumeRequest
 ToolStatus = Literal["running", "success", "failure", "interrupted", "background"]
 # preparing_sandbox: the sandbox is being created / resumed before the agent starts
 TurnStatus = Literal["thinking", "running_tool", "interrupting", "interrupted", "preparing_sandbox"]
-InterruptReason = Literal["crash", "shutdown", "user", "new_message"]
+InterruptReason = Literal[
+    "crash", "shutdown", "user", "reset", "drain", "lease_lost", "new_message"
+]
 
 
 @dataclass(frozen=True)

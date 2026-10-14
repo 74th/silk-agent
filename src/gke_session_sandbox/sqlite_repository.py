@@ -16,6 +16,7 @@ from .errors import (
     SessionLeaseLostError,
     StaleGenerationError,
 )
+from .file_operations import FileOperation, change_file_operation
 from .repository import LeaseToken, StoredSession, _serialize, _utc
 from .types import CommandRecord, CommandState, SessionEvent, SessionKey, SessionRecord, utc_now
 
@@ -72,6 +73,12 @@ class SQLiteSessionRepository:
                 holder TEXT NOT NULL,
                 expires_at TEXT NOT NULL,
                 transitions INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS file_operations (
+                key_hash TEXT NOT NULL,
+                operation_id TEXT NOT NULL,
+                record_json TEXT NOT NULL,
+                PRIMARY KEY (key_hash, operation_id)
             );
             """
         )
@@ -170,6 +177,35 @@ class SQLiteSessionRepository:
             record = SessionRecord.model_validate_json(row["record_json"])
             result.append(StoredSession(record, str(row["version"])))
         return tuple(result)
+
+    async def list_reconciliation_candidates(
+        self, *, limit: int = 100, cursor: str | None = None
+    ) -> tuple[tuple[StoredSession, ...], str | None]:
+        if limit < 1:
+            raise ValueError("page limit must be positive")
+        states = ("ready", "suspended", "suspending", "resuming", "terminating")
+        placeholders = ",".join("?" for _ in states)
+        params: tuple[object, ...] = (
+            states + ((cursor,) if cursor is not None else ()) + (limit + 1,)
+        )
+        cursor_clause = " AND key_hash > ?" if cursor is not None else ""
+        rows = self._db.execute(
+            "SELECT key_hash, record_json, version FROM sessions "
+            f"WHERE json_extract(record_json, '$.state') IN ({placeholders}){cursor_clause} "
+            "ORDER BY key_hash LIMIT ?",
+            params,
+        ).fetchall()
+        page = rows[:limit]
+        next_cursor = page[-1]["key_hash"] if len(rows) > limit and page else None
+        return (
+            tuple(
+                StoredSession(
+                    SessionRecord.model_validate_json(row["record_json"]), str(row["version"])
+                )
+                for row in page
+            ),
+            next_cursor,
+        )
 
     async def create(self, token: LeaseToken, record: SessionRecord) -> StoredSession:
         self._validate_record(record)
@@ -332,6 +368,97 @@ class SQLiteSessionRepository:
         if unacked_count > self._max_pending_events:
             raise RepositoryCapacityError("pending event count exceeds configured limit")
         _validate_key_hash(record.key_hash)
+
+    async def begin_file_operation(
+        self,
+        token: LeaseToken,
+        *,
+        operation_id: str,
+        generation: int,
+        executor_id: str,
+        expires_at: datetime,
+    ) -> StoredSession:
+        return self._change_file_operation(
+            token,
+            operation_id=operation_id,
+            generation=generation,
+            executor_id=executor_id,
+            expires_at=expires_at,
+        )
+
+    async def finish_file_operation(
+        self,
+        token: LeaseToken,
+        *,
+        operation_id: str,
+        generation: int,
+        executor_id: str,
+        confirmed: bool = True,
+    ) -> StoredSession:
+        return self._change_file_operation(
+            token,
+            operation_id=operation_id,
+            generation=generation,
+            executor_id=executor_id,
+            expires_at=None,
+            confirmed=confirmed,
+        )
+
+    def _change_file_operation(
+        self,
+        token: LeaseToken,
+        *,
+        operation_id: str,
+        generation: int,
+        executor_id: str,
+        expires_at: datetime | None,
+        confirmed: bool = True,
+    ) -> StoredSession:
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            self._assert_token(token, token.key_hash)
+            row = self._db.execute(
+                "SELECT record_json, version FROM sessions WHERE key_hash = ?", (token.key_hash,)
+            ).fetchone()
+            if row is None:
+                raise RepositoryConflictError("Sandbox record is missing")
+            operation_row = self._db.execute(
+                "SELECT record_json FROM file_operations WHERE key_hash = ? AND operation_id = ?",
+                (token.key_hash, operation_id),
+            ).fetchone()
+            current = SessionRecord.model_validate_json(row["record_json"])
+            operation = (
+                FileOperation.model_validate_json(operation_row["record_json"])
+                if operation_row is not None
+                else None
+            )
+            updated, operation, changed = change_file_operation(
+                current,
+                operation,
+                operation_id=operation_id,
+                executor_id=executor_id,
+                generation=generation,
+                now=_utc(self._clock()),
+                expires_at=expires_at,
+                confirmed=confirmed,
+            )
+            version = int(row["version"])
+            if changed:
+                self._db.execute(
+                    "INSERT OR REPLACE INTO file_operations(key_hash, operation_id, record_json) "
+                    "VALUES (?, ?, ?)",
+                    (token.key_hash, operation_id, operation.model_dump_json()),
+                )
+                version += 1
+                self._db.execute(
+                    "UPDATE sessions SET record_json = ?, version = ? WHERE key_hash = ?",
+                    (_serialize(updated), version, token.key_hash),
+                )
+            self._db.execute("COMMIT")
+            return StoredSession(updated, str(version))
+        except BaseException:
+            self._db.execute("ROLLBACK")
+            raise
 
     def _assert_token(self, token: LeaseToken, key_hash: str) -> None:
         if token.key_hash != key_hash:

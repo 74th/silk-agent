@@ -26,6 +26,7 @@ def state_to_dict(state: ConversationState) -> dict[str, Any]:
         "updated_at": state.updated_at.isoformat() if state.updated_at else None,
         "owner_user": state.owner_user,
         "owner_email": state.owner_email,
+        "progress_snapshot": state.progress_snapshot,
     }
 
 
@@ -42,6 +43,7 @@ def state_from_dict(data: dict[str, Any]) -> ConversationState:
         updated_at=datetime.fromisoformat(updated) if updated else None,
         owner_user=data.get("owner_user"),
         owner_email=data.get("owner_email"),
+        progress_snapshot=dict(data.get("progress_snapshot") or {}),
     )
 
 

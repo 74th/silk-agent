@@ -1,0 +1,1 @@
+"""Firestore-backed shared stores."""

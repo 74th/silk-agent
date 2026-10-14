@@ -44,6 +44,7 @@ class _Conv:
     channel: str
     thread_ts: str | None
     view: ProgressView
+    turn_id: str = ""
     ts: str = ""
     last_text: str = ""
     last_flush: datetime | None = None
@@ -81,8 +82,14 @@ class SlackOutput:
         except Exception:
             log.exception("slack output failed for %s", type(event).__name__)
 
+    async def send_durable(self, event: OutboundEvent) -> None:
+        """Deliver an Outbox event while allowing the Sender to record failures."""
+        await self._send(event)
+
     async def _send(self, event: OutboundEvent) -> None:
         key = event.conversation_key if hasattr(event, "conversation_key") else ""
+        if key and not isinstance(event, TurnStarted) and key not in self._convs:
+            await self._restore(key)
         if isinstance(event, TurnStarted):
             await self._start_turn(event)
         elif isinstance(
@@ -90,12 +97,20 @@ class SlackOutput:
         ):
             conv = self._convs.get(key)
             if conv is not None:
+                if self._event_turn_id(event) not in {None, conv.turn_id}:
+                    return
+                if conv.view.finished and isinstance(event, Heartbeat):
+                    return
                 conv.view.apply(event)
+                await self._save_snapshot(conv)
                 await self._schedule_flush(conv)
         elif isinstance(event, TurnFinished | TurnFailed):
             conv = self._convs.get(key)
             if conv is not None:
+                if self._event_turn_id(event) not in {None, conv.turn_id}:
+                    return
                 conv.view.apply(event)
+                await self._save_snapshot(conv)
                 await self._flush_now(conv)
         elif isinstance(event, TurnInterrupted):
             await self._interrupted(event)
@@ -116,7 +131,28 @@ class SlackOutput:
     async def _start_turn(self, event: TurnStarted) -> None:
         old = self._convs.get(event.conversation_key)
         if old is not None:
+            if old.turn_id == event.turn_id:
+                return
             await self._cancel_flush(old)
+        state = await self._get_state(event.conversation_key)
+        snapshot = state.progress_snapshot if state is not None else {}
+        saved_turn_id = snapshot.get("turn_id") if isinstance(snapshot, dict) else None
+        saved_ref = state.progress_ref if state is not None else {}
+        if saved_turn_id == event.turn_id and isinstance(saved_ref.get("ts"), str):
+            try:
+                view = ProgressView.from_dict(snapshot["view"])
+                conv = _Conv(
+                    event.conversation_key,
+                    saved_ref.get("channel", self._target(event.conversation_key)[0]),
+                    saved_ref.get("thread_ts"),
+                    view,
+                    event.turn_id,
+                    saved_ref["ts"],
+                )
+                self._convs[event.conversation_key] = conv
+                return
+            except (KeyError, TypeError, ValueError):
+                log.warning("could not restore progress snapshot for %s", event.conversation_key)
         channel, thread = self._target(event.conversation_key)
         view = ProgressView(
             event.started_at,
@@ -124,12 +160,13 @@ class SlackOutput:
             self._cfg.max_tools_shown,
             self._cfg.tool_display,
         )
-        conv = _Conv(event.conversation_key, channel, thread, view)
+        conv = _Conv(event.conversation_key, channel, thread, view, event.turn_id)
         self._convs[event.conversation_key] = conv
         text = view.render(self._clock.now())
         conv.ts = await self._post(channel, thread, text)
         conv.last_text, conv.last_flush = text, self._clock.now()
         await self._save_ref(conv)
+        await self._save_snapshot(conv)
 
     async def _schedule_flush(self, conv: _Conv) -> None:
         """Updates are batched to at most one `chat.update` per interval."""
@@ -270,6 +307,53 @@ class SlackOutput:
             await self._state_store.put(state)
         except Exception:
             log.exception("could not save the progress message position for %s", conv.key)
+
+    async def _save_snapshot(self, conv: _Conv) -> None:
+        if self._state_store is None:
+            return
+        try:
+            state = await self._state_store.get(conv.key) or ConversationState(conv.key)
+            state.progress_ref = {
+                "channel": conv.channel,
+                "ts": conv.ts,
+                "thread_ts": conv.thread_ts,
+            }
+            state.progress_snapshot = {
+                "turn_id": conv.turn_id,
+                "view": conv.view.to_dict(),
+            }
+            await self._state_store.put(state)
+        except Exception:
+            log.exception("could not save progress snapshot for %s", conv.key)
+
+    async def _restore(self, key: str) -> None:
+        state = await self._get_state(key)
+        if state is None or not state.progress_snapshot or not state.progress_ref:
+            return
+        data = state.progress_snapshot
+        ref = state.progress_ref
+        try:
+            turn_id = data.get("turn_id")
+            view_data = data.get("view")
+            if not isinstance(turn_id, str) or not isinstance(view_data, dict):
+                return
+            view = ProgressView.from_dict(view_data)
+            channel, thread = self._target(key)
+            self._convs[key] = _Conv(
+                key,
+                str(ref.get("channel", channel)),
+                ref.get("thread_ts") if isinstance(ref.get("thread_ts"), str) else thread,
+                view,
+                turn_id,
+                str(ref.get("ts", "")),
+            )
+        except (TypeError, ValueError):
+            log.warning("could not restore progress snapshot for %s", key)
+
+    @staticmethod
+    def _event_turn_id(event: OutboundEvent) -> str | None:
+        value = getattr(event, "turn_id", None)
+        return value if isinstance(value, str) else None
 
 
 def rewrite_as_crashed(old_text: str, fallback_stamp: str) -> str:

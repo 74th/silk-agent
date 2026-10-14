@@ -62,7 +62,13 @@ class FakeCommands:
         self.gate.set()
 
     async def get(self, command_id):
-        return {"command_id": command_id, "state": "running", "exit_code": None}
+        cancelled = command_id in self.cancelled
+        return {
+            "command_id": command_id,
+            "state": "finished" if cancelled else "running",
+            "stop_reason": "cancelled" if cancelled else None,
+            "exit_code": None,
+        }
 
     async def read_output(self, command_id, *, stream="stdout", cursor=0):
         return SimpleNamespace(data=b"out", cursor=cursor + 3)
@@ -207,19 +213,31 @@ async def test_cancel_commands_cancels_the_running_command():
     assert res.outcome == "cancelled" and cmds.cancelled == [cmds.runs[-1][3]]
 
 
-async def test_cancelling_the_waiting_tool_cancels_the_sandbox_command():
-    # An interrupted turn cancels the tool call; the command must not keep running.
+async def test_cancelling_the_waiting_tool_leaves_the_sandbox_command_running():
+    # Wait cancellation does not imply an explicit remote command cancellation.
     rt, mgr = make()
     key = "slack:T1:C1:1.0"
     await rt.run_command(key, "warm")
     cmds = mgr.handles[("T1", "C1:1.0")].commands
     cmds.mode = "block"
-    task = asyncio.create_task(rt.run_command(key, "sleep 300 && echo done"))
+    started = []
+
+    async def on_started(command_id):
+        started.append(command_id)
+
+    task = asyncio.create_task(rt.run_command(key, "sleep 300 && echo done", on_started=on_started))
     await asyncio.sleep(0.05)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert cmds.cancelled == [cmds.runs[-1][3]]
+    command_id = cmds.runs[-1][3]
+    assert started == [command_id]
+    assert cmds.cancelled == []
+    assert (await rt.command_status(key, command_id)).outcome == "running"
+
+    await rt.cancel_commands(key)
+    assert cmds.cancelled == [command_id]
+    assert (await rt.command_status(key, command_id)).outcome == "cancelled"
 
 
 async def test_status_and_output():

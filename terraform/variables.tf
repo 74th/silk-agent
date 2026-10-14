@@ -19,13 +19,30 @@ variable "agent_engine_display_name" {
 variable "model_armor_template_id" {
   description = "出力の sanitize に使う Model Armor テンプレート ID"
   type        = string
-  default     = "simple"
+  default     = "silk-agent-test"
 }
 
 variable "skills_bucket_name" {
   description = "Skills を置く GCS バケット名（グローバルに一意）"
   type        = string
   default     = "nnyn-dev-silk-agent-skills"
+}
+
+variable "command_output_bucket_name" {
+  description = "分散コマンド出力を保存する GCS バケット名（グローバルに一意）"
+  type        = string
+  default     = "nnyn-dev-silk-agent-command-output"
+}
+
+variable "command_output_retention_days" {
+  description = "コマンド出力オブジェクトを自動削除する保持日数"
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.command_output_retention_days > 0
+    error_message = "command_output_retention_days は正の値を指定してください。"
+  }
 }
 
 variable "slack_secret_ids" {
@@ -38,4 +55,21 @@ variable "bot_service_account_id" {
   description = "Bot が使うサービスアカウントのID。Workload Identity などで利用する。"
   type        = string
   default     = "silk-agent-bot"
+}
+
+variable "firestore_database_id" {
+  description = "分散実行用の Firestore database ID。use-existing モードでは既存IDを指定する。"
+  type        = string
+  default     = "silk-agent"
+}
+
+variable "firestore_database_mode" {
+  description = "Firestore database の扱い: create、use-existing、import-existing。"
+  type        = string
+  default     = "create"
+
+  validation {
+    condition     = contains(["create", "use-existing", "import-existing"], var.firestore_database_mode)
+    error_message = "firestore_database_mode は create、use-existing、import-existing のいずれかです。"
+  }
 }

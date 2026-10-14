@@ -73,22 +73,21 @@ class LifecycleReconciler:
 
     async def reconcile_once(self) -> tuple[str, ...]:
         errors: list[str] = []
-        for item in await self.manager.repository.list_records():
-            if item.record.state not in {
-                SessionState.READY,
-                SessionState.SUSPENDED,
-                SessionState.SUSPENDING,
-                SessionState.RESUMING,
-                SessionState.TERMINATING,
-            }:
-                continue
-            try:
-                async with self.manager._session_lease_by_hash(item.record.key_hash) as token:
-                    await self._reconcile_session(token, item.record.key_hash)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                errors.append(f"{item.record.key_hash}: {type(exc).__name__}: {exc}")
+        cursor = None
+        while True:
+            page, cursor = await self.manager.repository.list_reconciliation_candidates(
+                limit=100, cursor=cursor
+            )
+            for item in page:
+                try:
+                    async with self.manager._session_lease_by_hash(item.record.key_hash) as token:
+                        await self._reconcile_session(token, item.record.key_hash)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    errors.append(f"{item.record.key_hash}: {type(exc).__name__}: {exc}")
+            if cursor is None:
+                break
         return tuple(errors)
 
     async def _reconcile_session(self, token, key_hash: str) -> None:
@@ -479,27 +478,12 @@ class LifecycleReconciler:
         )
 
     async def recover_process_state(self) -> None:
-        """Clear in-flight filesystem counters left by the previous API process."""
-        for item in await self.manager.repository.list_records():
-            if item.record.active_file_operations == 0:
-                continue
-            async with self.manager._session_lease_by_hash(item.record.key_hash) as token:
-                stored = await self.manager.repository.get_by_hash(item.record.key_hash)
-                if stored is None or stored.record.active_file_operations == 0:
-                    continue
-                now = _aware(self.clock())
-                record = stored.record.model_copy(
-                    update={
-                        "active_file_operations": 0,
-                        "last_file_operation_at": now,
-                        "idle_since": now
-                        if stored.record.state is SessionState.READY
-                        else stored.record.idle_since,
-                    }
-                )
-                await self.manager.repository.compare_and_swap(
-                    token, record, expected_resource_version=stored.resource_version
-                )
+        """Keep unfinished file operations until their executor confirms completion.
+
+        A restart or an expired advisory deadline does not prove that an HTTP
+        file mutation stopped. Retain both durable operations and legacy
+        counters so another service cannot suspend their Sandbox prematurely.
+        """
 
     @staticmethod
     async def _set_gate(endpoint: str, accepting: bool) -> None:

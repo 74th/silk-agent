@@ -1,6 +1,10 @@
 import asyncio
 
-from silk_agent.agent.sandbox_tools import BACKGROUND_MARKER, build_sandbox_tools
+from silk_agent.agent.sandbox_tools import (
+    BACKGROUND_MARKER,
+    FOREGROUND_SECONDS,
+    build_sandbox_tools,
+)
 from silk_agent.core.background import BackgroundCommands
 from silk_agent.core.events import Notice, TurnFinished, UserMessage
 from silk_agent.core.orchestrator import ConversationOrchestrator
@@ -91,6 +95,26 @@ async def test_run_in_background_returns_immediately():
     assert BACKGROUND_MARKER in body(res)
 
 
+async def test_default_foreground_window_is_twenty_seconds(monkeypatch):
+    rt = SlowRuntime()
+    rt.release("quick command")
+    waited = []
+    original_wait = BackgroundCommands.wait
+
+    async def record_wait(background, entry, seconds):
+        waited.append(seconds)
+        return await original_wait(background, entry, seconds)
+
+    monkeypatch.setattr(BackgroundCommands, "wait", record_wait)
+    bash = {t.name: t.handler for t in build_sandbox_tools("K", rt)}["bash"]
+
+    result = await bash({"command": "quick command"})
+
+    assert FOREGROUND_SECONDS == 20.0
+    assert waited == [20.0]
+    assert "exit code: 0" in body(result)
+
+
 async def test_cancel_command_stops_it_without_a_completion_notice():
     rt = SlowRuntime()
     bg = BackgroundCommands(rt)
@@ -119,6 +143,128 @@ async def test_cancelled_tool_call_keeps_the_command_running():
     call.cancel()
     await asyncio.sleep(0.02)
     assert rt.cancelled == [] and len(bg.running("K")) == 1
+
+
+async def test_distributed_tools_use_persistent_command_ledger():
+    class Monitor:
+        async def detach(self, command_id):
+            return {"decision": "background", "command_id": command_id}
+
+        async def get_command(self, command_id):
+            return {"command_id": command_id, "state": "running"}
+
+        async def command_output(self, command_id, *, cursor, limit_bytes=65536):
+            return "archived output", cursor + 15
+
+        async def cancel(self, command_id, *, reason, send_cancel):
+            outcome = await send_cancel("K", command_id, "stable-request")
+            return {"command_id": command_id, "cancel_outcome": outcome}
+
+    async def send_cancel(_key, _command_id, request_id):
+        assert request_id == "stable-request"
+        return "accepted"
+
+    class RemoteWaitRuntime(SlowRuntime):
+        async def run_command(
+            self, key, command, *, cwd=None, timeout_seconds=None, on_started=None
+        ):
+            cid = f"cmd-{len(self.sent_commands) + 1}"
+            self.sent_commands.append((key, command))
+            if on_started is not None:
+                await on_started(cid)
+            try:
+                await self.gates.setdefault(command, asyncio.Event()).wait()
+            except asyncio.CancelledError:
+                # Cancelling the HTTP wait is distinct from cancelling the remote command.
+                raise
+            return CommandResult(cid, "completed", 0)
+
+    runtime = RemoteWaitRuntime()
+    background = BackgroundCommands(runtime, command_monitor=Monitor(), cancel_sender=send_cancel)
+    tools = {
+        item.name: item.handler
+        for item in build_sandbox_tools(
+            "K", runtime, background=background, foreground_seconds=0.01
+        )
+    }
+    started = await tools["bash"]({"command": "make build", "run_in_background": True})
+    assert BACKGROUND_MARKER in body(started)
+    assert "outcome: running" in body(await tools["command_status"]({"command_id": "cmd-1"}))
+    output = await tools["command_output"]({"command_id": "cmd-1"})
+    assert "archived output" in body(output) and "next_cursor: 15" in body(output)
+    cancelled = await tools["cancel_command"]({"command_id": "cmd-1"})
+    assert "停止要求を受け付けました" in body(cancelled)
+    assert runtime.cancelled == []
+
+
+async def test_distributed_stop_cancels_persisted_commands_and_reports_unknown():
+    class Monitor:
+        def __init__(self):
+            self.cursors = []
+            self.cancel_requests = []
+
+        async def list_for_stop(self, **kwargs):
+            self.cursors.append(kwargs["cursor"])
+            if kwargs["cursor"] is None:
+                return ({"command_id": "cmd-1"},), "next-page"
+            return ({"command_id": "cmd-2"},), None
+
+        async def cancel(self, command_id, *, reason, send_cancel):
+            outcome = await send_cancel("K", command_id, f"request-{command_id}")
+            self.cancel_requests.append((command_id, reason, outcome))
+            return {"cancel_outcome": outcome}
+
+    sent = []
+
+    async def send_cancel(key, command_id, request_id):
+        sent.append((key, command_id, request_id))
+        return "unknown"
+
+    monitor = Monitor()
+    background = BackgroundCommands(
+        InMemoryRuntime(), command_monitor=monitor, cancel_sender=send_cancel
+    )
+    report = await background.cancel_all_for_stop(
+        "K", conversation_generation=3, stop_seq=18, page_size=1
+    )
+    assert report.requested == 2 and report.unknown == 2 and report.confirmed == 0
+    assert monitor.cursors == [None, "next-page"]
+    assert monitor.cancel_requests == [
+        ("cmd-1", "user_stop", "unknown"),
+        ("cmd-2", "user_stop", "unknown"),
+    ]
+    assert [item[1] for item in sent] == ["cmd-1", "cmd-2"]
+
+
+async def test_worker_shutdown_orphans_foreground_command_without_remote_cancel():
+    class Monitor:
+        def __init__(self):
+            self.orphaned = []
+
+        async def orphan(self, command_id):
+            self.orphaned.append(command_id)
+            return {"decision": "orphaned"}
+
+    class RemoteWaitRuntime(SlowRuntime):
+        async def run_command(
+            self, key, command, *, cwd=None, timeout_seconds=None, on_started=None
+        ):
+            command_id = "cmd-foreground"
+            if on_started is not None:
+                await on_started(command_id)
+            try:
+                await self.gates.setdefault(command, asyncio.Event()).wait()
+            except asyncio.CancelledError:
+                raise
+            return CommandResult(command_id, "completed")
+
+    runtime, monitor = RemoteWaitRuntime(), Monitor()
+    background = BackgroundCommands(runtime, command_monitor=monitor)
+    entry = await background.start("K", "compile")
+    assert entry.command_id == "cmd-foreground"
+    assert await background.orphan_all("K") == 1
+    assert monitor.orphaned == ["cmd-foreground"]
+    assert runtime.cancelled == []
 
 
 # ---------------------------------------------------------------- conversation

@@ -353,6 +353,27 @@ async def test_session_id_is_reported(clock, tmp_path):
     assert seen == [("conv", "sid-1")]
 
 
+async def test_new_session_id_and_input_attempt_are_persisted_before_query(clock, tmp_path):
+    persisted = []
+
+    async def before_query(key, session_id, input_id, attempt_id):
+        assert FakeSDKClient.instances[0].queries == []
+        persisted.append((key, session_id, input_id, attempt_id))
+
+    eng = make(
+        clock,
+        tmp_path,
+        lambda n: [("msg", result())],
+        on_query_start=before_query,
+    )
+    request = TurnRequest(
+        "conv", "t1", "hello", input_id="input-1", dispatch_attempt_id="attempt-1"
+    )
+    _events = [event async for event in eng.run_turn(request)]
+    options = FakeSDKClient.instances[0].options
+    assert persisted == [("conv", options.session_id, "input-1", "attempt-1")]
+
+
 async def test_notices_are_prepended(clock, tmp_path):
     eng = make(clock, tmp_path, lambda n: [("msg", result())])
     await run(eng, "続けて", notices=("作業環境は削除されました",))

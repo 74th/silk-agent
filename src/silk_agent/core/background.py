@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from silk_agent.core.commands import CommandTracker
 from silk_agent.core.ports import CommandResult, SandboxRuntime
+from silk_agent.sandbox.monitor import CancelSender, CommandMonitor
 
 log = logging.getLogger(__name__)
 
@@ -36,10 +37,29 @@ class BackgroundCommand:
     started: asyncio.Event = field(default_factory=asyncio.Event)
 
 
+@dataclass(frozen=True)
+class CommandCancelReport:
+    requested: int = 0
+    confirmed: int = 0
+    accepted: int = 0
+    unknown: int = 0
+    rejected: int = 0
+    too_late: int = 0
+
+
 class BackgroundCommands:
-    def __init__(self, runtime: SandboxRuntime, tracker: CommandTracker | None = None) -> None:
+    def __init__(
+        self,
+        runtime: SandboxRuntime,
+        tracker: CommandTracker | None = None,
+        *,
+        command_monitor: CommandMonitor | None = None,
+        cancel_sender: CancelSender | None = None,
+    ) -> None:
         self._runtime = runtime
         self._tracker = tracker
+        self._command_monitor = command_monitor
+        self._cancel_sender = cancel_sender or getattr(runtime, "cancel_command", None)
         self._commands: dict[str, list[BackgroundCommand]] = {}
         self.on_finished: FinishedCallback | None = None
 
@@ -91,6 +111,20 @@ class BackgroundCommands:
         entry.backgrounded = True
         return None
 
+    async def detach_durable(self, entry: BackgroundCommand) -> CommandResult | None:
+        """Persist the foreground/background race before returning a tool response."""
+        if self._command_monitor is None or not entry.command_id:
+            return self.detach(entry)
+        decision = await self._command_monitor.detach(entry.command_id)
+        if decision is None:
+            return CommandResult(entry.command_id, "unknown")
+        if decision.get("decision") == "return_result":
+            result = _result_from_record(entry.command_id, decision)
+            entry.result = result
+            return result
+        entry.backgrounded = True
+        return None
+
     # ------------------------------------------------------------ queries / cancel
 
     def running(self, key: str) -> list[BackgroundCommand]:
@@ -102,12 +136,58 @@ class BackgroundCommands:
                 return entry
         return None
 
-    async def cancel(self, key: str, command_id: str) -> bool:
+    async def cancel(
+        self, key: str, command_id: str, *, reason: str = "command_tool"
+    ) -> bool | str:
         entry = self.find(key, command_id)
+        if self._command_monitor is not None:
+
+            async def send_cancel(
+                conversation_key: str, stable_command_id: str, request_id: str
+            ) -> str:
+                sender = self._cancel_sender
+                if sender is None:
+                    return "unknown"
+                outcome = await sender(conversation_key, stable_command_id, request_id)
+                return outcome if isinstance(outcome, str) else "unknown"
+
+            decision = await self._command_monitor.cancel(
+                command_id, reason=reason, send_cancel=send_cancel
+            )
+            if decision is None:
+                return False
+            outcome = str(decision.get("cancel_outcome", "unknown"))
+            if entry is not None and outcome in {"accepted", "unknown", "confirmed"}:
+                entry.cancelled = True
+                if entry.task is not None and not entry.task.done():
+                    entry.task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await entry.task
+            return outcome
         if entry is None or entry.result is not None:
             return False
         await self._cancel(entry)
         return True
+
+    async def status(self, key: str, command_id: str) -> CommandResult:
+        entry = self.find(key, command_id)
+        if self._command_monitor is not None:
+            record = await self._command_monitor.get_command(command_id)
+            if record is not None:
+                return _result_from_record(command_id, record)
+            return CommandResult(command_id, "unknown")
+        if entry is not None and entry.result is not None:
+            return entry.result
+        if entry is not None and entry.result is None:
+            return CommandResult(command_id, "running")
+        return await self._runtime.command_status(key, command_id)
+
+    async def output(self, key: str, command_id: str, cursor: int) -> tuple[str, int]:
+        if self._command_monitor is not None:
+            archived = await self._command_monitor.command_output(command_id, cursor=cursor)
+            if archived is not None:
+                return archived
+        return await self._runtime.command_output(key, command_id, cursor)
 
     async def cancel_all(self, key: str) -> int:
         """Stop every running command of the conversation (no completion notices)."""
@@ -115,6 +195,59 @@ class BackgroundCommands:
         for entry in entries:
             await self._cancel(entry)
         return len(entries)
+
+    async def orphan_all(self, key: str) -> int:
+        """Leave remote commands running while detaching this actor's foreground waits."""
+        entries = self.running(key)
+        for entry in entries:
+            if self._command_monitor is not None and entry.command_id:
+                await self._command_monitor.orphan(entry.command_id)
+            if entry.task is not None and not entry.task.done():
+                entry.task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await entry.task
+        return len(entries)
+
+    async def cancel_all_for_stop(
+        self, key: str, *, conversation_generation: int, stop_seq: int, page_size: int = 100
+    ) -> CommandCancelReport:
+        if page_size < 1:
+            raise ValueError("page_size must be positive")
+        if self._command_monitor is None:
+            count = await self.cancel_all(key)
+            return CommandCancelReport(requested=count, confirmed=count)
+        counts = {
+            "requested": 0,
+            "confirmed": 0,
+            "accepted": 0,
+            "unknown": 0,
+            "rejected": 0,
+            "too_late": 0,
+        }
+        cursor = None
+        while True:
+            records, cursor = await self._command_monitor.list_for_stop(
+                conversation_key=key,
+                conversation_generation=conversation_generation,
+                stop_seq=stop_seq,
+                limit=page_size,
+                cursor=cursor,
+            )
+            for record in records:
+                command_id = record.get("command_id")
+                if not isinstance(command_id, str) or not command_id:
+                    continue
+                outcome = await self.cancel(key, command_id, reason="user_stop")
+                if outcome is False:
+                    continue
+                counts["requested"] += 1
+                category = outcome if isinstance(outcome, str) else "unknown"
+                if category not in counts or category == "requested":
+                    category = "unknown"
+                counts[category] += 1
+            if cursor is None:
+                break
+        return CommandCancelReport(**counts)
 
     async def _cancel(self, entry: BackgroundCommand) -> None:
         entry.cancelled = True
@@ -153,7 +286,12 @@ class BackgroundCommands:
             if self._tracker is not None and entry.command_id and not may_run:
                 await self._tracker.finished(key, entry.command_id)
             self._forget(entry)
-        if entry.backgrounded and not entry.cancelled and self.on_finished is not None:
+        if (
+            entry.backgrounded
+            and not entry.cancelled
+            and self._command_monitor is None
+            and self.on_finished is not None
+        ):
             try:
                 await self.on_finished(key, finished_notice(entry))
             except Exception:
@@ -197,3 +335,35 @@ def finished_notice(entry: BackgroundCommand) -> str:
         f"<system-notice>{head}{body}</system-notice>\n"
         "この結果をユーザに簡潔に報告してください。続きの作業があれば進めてください。"
     )
+
+
+def _result_from_record(command_id: str, record: dict | object) -> CommandResult:
+    if not isinstance(record, dict):
+        return CommandResult(command_id, "unknown")
+    state = str(record.get("state", "unknown"))
+    result = record.get("result")
+    result_data = result if isinstance(result, dict) else {}
+    if state in {"finished", "completed"}:
+        return CommandResult(
+            command_id,
+            "completed",
+            result_data.get("exit_code") if isinstance(result_data.get("exit_code"), int) else None,
+            str(_stream_tail(result_data, "stdout")),
+            str(_stream_tail(result_data, "stderr")),
+        )
+    if state == "cancelled":
+        return CommandResult(command_id, "cancelled")
+    if state in {"intent", "running", "cancel_requested"}:
+        return CommandResult(command_id, "running")
+    return CommandResult(command_id, "unknown")
+
+
+def _stream_tail(result: dict, stream: str) -> str:
+    output = result.get("output")
+    if not isinstance(output, dict):
+        return ""
+    entry = output.get(stream)
+    if not isinstance(entry, dict):
+        return ""
+    tail = entry.get("tail")
+    return tail if isinstance(tail, str) else ""

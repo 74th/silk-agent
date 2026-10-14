@@ -38,7 +38,8 @@ from .files import FileClient
 from .kube import load_kube_client_config
 from .network import build_session_network_policies, sandbox_pod_labels
 from .repository import LeaseToken, StoredSession
-from .sqlite_repository import SQLiteSessionRepository
+from .repository_factory import create_local_repository
+from .repository_port import SessionRepository
 from .templates import TemplateRenderer
 from .types import (
     CommandState,
@@ -116,9 +117,7 @@ class SessionHandle:
 
         return FileClient(
             resolve_endpoint,
-            activity_hook=lambda delta: self._manager._adjust_file_activity(
-                self.key, self.generation, delta
-            ),
+            activity_context=lambda: self._manager._file_operation(self.key, self.generation),
         )
 
     async def refresh(self) -> SessionHandle:
@@ -136,7 +135,7 @@ class SandboxManager:
     def __init__(
         self,
         config: ManagerConfig,
-        repository: SQLiteSessionRepository,
+        repository: SessionRepository,
         backend: CoreSandboxBackend,
         *,
         renderer: TemplateRenderer | None = None,
@@ -170,6 +169,7 @@ class SandboxManager:
         *,
         kube_context: str | None = None,
         policy_factory: PolicyFactory | None = None,
+        repository: SessionRepository | None = None,
     ) -> SandboxManager:
         """Load config; create async Kubernetes API adapters (in-cluster or kubeconfig)."""
         config_file = Path(config_path)
@@ -188,12 +188,7 @@ class SandboxManager:
             ) from exc
 
         await load_kube_client_config(kube_context)
-        repository = SQLiteSessionRepository(
-            settings.repository_database_path,
-            require_mount=settings.repository_require_mount,
-            max_pending_events=settings.max_pending_events,
-            lease_duration_seconds=settings.session_lease_duration_seconds,
-        )
+        repository = repository if repository is not None else create_local_repository(settings)
         api_client = client.ApiClient()
         # kubernetes_asyncio's generated clients satisfy the backend protocols at runtime.
         core_api: Any = client.CoreV1Api(api_client)
@@ -850,16 +845,37 @@ class SandboxManager:
             token, changed, expected_resource_version=stored.resource_version
         )
 
-    async def _adjust_file_activity(self, key: SessionKey, generation: int, delta: int) -> None:
-        if delta == 1:
-            handle = await self.ensure(key)
-            if handle.generation != generation:
-                raise StaleGenerationError("session handle refers to an older generation")
+    @asynccontextmanager
+    async def _file_operation(self, key: SessionKey, generation: int) -> AsyncIterator[None]:
+        operation_id = uuid.uuid4().hex
+        handle = await self.ensure(key)
+        if handle.generation != generation:
+            raise StaleGenerationError("session handle refers to an older generation")
         async with self._session_lease(key) as token:
             stored = await self._current_record(key, generation)
             if stored.record.state is not SessionState.READY:
                 raise ResourceOwnershipError("file operation requires a ready session")
-            await self.repository.adjust_file_operations(token, delta)
+            await self.repository.begin_file_operation(
+                token,
+                operation_id=operation_id,
+                generation=generation,
+                executor_id=self._holder_identity,
+                expires_at=utc_now()
+                + timedelta(seconds=self.config.session_lease_duration_seconds),
+            )
+        confirmed = False
+        try:
+            yield
+            confirmed = True
+        finally:
+            async with self._session_lease(key) as token:
+                await self.repository.finish_file_operation(
+                    token,
+                    operation_id=operation_id,
+                    generation=generation,
+                    executor_id=self._holder_identity,
+                    confirmed=confirmed,
+                )
 
     def _handle(self, key: SessionKey, record: SessionRecord) -> SessionHandle:
         return SessionHandle(self, key, record.generation, record)

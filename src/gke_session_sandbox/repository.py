@@ -39,6 +39,7 @@ class CoordinationV1Api(Protocol):
 class LeaseToken:
     key_hash: str
     holder_identity: str
+    epoch: int = 0
 
 
 @dataclass(frozen=True, slots=True)

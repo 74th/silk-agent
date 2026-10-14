@@ -10,7 +10,7 @@ member="principal://iam.googleapis.com/projects/${number}/locations/global/workl
 
 # aiplatform.user: Claude / Gemini on Agent Platform and Agent Platform Sessions.
 # modelarmor.user: sanitizeModelResponse.
-for role in roles/aiplatform.user roles/modelarmor.user; do
+for role in roles/aiplatform.user roles/modelarmor.user roles/datastore.user; do
   gcloud projects add-iam-policy-binding "${project}" \
     --member="${member}" --role="${role}" --condition=None --quiet >/dev/null
   echo "granted ${role} to ${member}"

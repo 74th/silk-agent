@@ -54,6 +54,7 @@ class MemoryRepository:
         self.holders: dict[str, str] = {}
         self.version = 0
         self.deleted = False
+        self.file_operations = {}
 
     async def acquire_lease(self, key: SessionKey, holder: str):
         return await self.acquire_lease_by_hash(key.stable_hash(), holder)
@@ -123,6 +124,51 @@ class MemoryRepository:
         return await self.compare_and_swap(
             token, record, expected_resource_version=stored.resource_version
         )
+
+    async def begin_file_operation(
+        self,
+        token,
+        *,
+        operation_id,
+        generation,
+        executor_id,
+        expires_at,
+    ):
+        return await self._change_file_operation(
+            token, operation_id, generation, executor_id, expires_at
+        )
+
+    async def finish_file_operation(
+        self, token, *, operation_id, generation, executor_id, confirmed=True
+    ):
+        return await self._change_file_operation(
+            token, operation_id, generation, executor_id, None, confirmed=confirmed
+        )
+
+    async def _change_file_operation(
+        self, token, operation_id, generation, executor_id, expires_at, confirmed=True
+    ):
+        from gke_session_sandbox.file_operations import change_file_operation
+
+        stored = self.records[token.key_hash]
+        key = (token.key_hash, operation_id)
+        record, operation, changed = change_file_operation(
+            stored.record,
+            self.file_operations.get(key),
+            operation_id=operation_id,
+            generation=generation,
+            executor_id=executor_id,
+            expires_at=expires_at,
+            now=datetime.now(UTC),
+            confirmed=confirmed,
+        )
+        if not changed:
+            return stored
+        saved = await self.compare_and_swap(
+            token, record, expected_resource_version=stored.resource_version
+        )
+        self.file_operations[key] = operation
+        return saved
 
 
 class FakeBackend:

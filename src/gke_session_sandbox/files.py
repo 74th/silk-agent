@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import AsyncIterable, Awaitable, Callable, Iterable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePosixPath
@@ -16,17 +17,13 @@ from .errors import FileOperationError, FileTransferLimitExceeded, WorkspaceRead
 
 EndpointResolver = Callable[[], Awaitable[str]]
 FileActivityHook = Callable[[int], Awaitable[None]]
+FileActivityContext = Callable[[], AbstractAsyncContextManager[None]]
 
 
 def _tracks_activity(method):
     async def wrapped(self, *args, **kwargs):
-        if self._activity_hook is not None:
-            await self._activity_hook(1)
-        try:
+        async with self._track_activity():
             return await method(self, *args, **kwargs)
-        finally:
-            if self._activity_hook is not None:
-                await self._activity_hook(-1)
 
     wrapped.__name__ = method.__name__
     wrapped.__doc__ = method.__doc__
@@ -54,6 +51,7 @@ class FileClient:
         transfer_limit_bytes: int = 64 * 1024 * 1024,
         request_timeout: float = 30,
         activity_hook: FileActivityHook | None = None,
+        activity_context: FileActivityContext | None = None,
     ) -> None:
         if min(response_limit_bytes, transfer_limit_bytes) <= 0 or request_timeout <= 0:
             raise ValueError("file limits and request_timeout must be positive")
@@ -63,8 +61,23 @@ class FileClient:
         self._transfer_limit = transfer_limit_bytes
         self._request_timeout = request_timeout
         self._activity_hook = activity_hook
+        self._activity_context = activity_context
         self._http_session: aiohttp.ClientSession | None = None
         self._base: str | None = None
+
+    @asynccontextmanager
+    async def _track_activity(self):
+        if self._activity_context is not None:
+            async with self._activity_context():
+                yield
+        else:
+            if self._activity_hook is not None:
+                await self._activity_hook(1)
+            try:
+                yield
+            finally:
+                if self._activity_hook is not None:
+                    await self._activity_hook(-1)
 
     async def __aenter__(self) -> FileClient:
         self._http_session = aiohttp.ClientSession(

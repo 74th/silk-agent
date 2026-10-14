@@ -41,6 +41,8 @@ class TurnRequest:
     notices: tuple[str, ...] = ()
     # Claude session to resume when the engine has to (re)connect; None = start a new one.
     resume_session_id: str | None = None
+    input_id: str = ""
+    dispatch_attempt_id: str = ""
 
 
 class AgentEngine(Protocol):
@@ -157,6 +159,7 @@ class ConversationState:
     # for conversations that were started before this was recorded.
     owner_user: str | None = None
     owner_email: str | None = None
+    progress_snapshot: dict[str, Any] = field(default_factory=dict)
 
 
 # Environment variable that carries the e-mail address of the user who started the

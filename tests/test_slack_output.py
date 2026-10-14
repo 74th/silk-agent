@@ -147,6 +147,19 @@ def test_view_interrupted_variants():
     assert "「続けて」" in text
 
 
+def test_interrupted_turn_keeps_background_command_visible():
+    v = ProgressView(T0)
+    v.apply(tool_started(1, summary="make build"))
+    v.apply(ToolFinished(KEY, "t1", "tu1", "background", "make build", T0, 20))
+    v.apply(TurnInterrupted(KEY, "t1", "drain", T0))
+
+    text = v.render(T0).splitlines()
+
+    assert text[0].startswith("⚠️ Workerの縮退により中断")
+    assert "🔄 バックグラウンドで実行中 bash make build（20秒）" in text
+    assert any("「続けて」" in line for line in text)
+
+
 def test_tool_display_name_only_and_duration_format():
     v = ProgressView(T0, tool_display="name")
     v.apply(tool_started(1, "bash", "secret-ish summary"))
@@ -259,6 +272,34 @@ async def test_progress_position_is_saved_in_state(clock):
     await out.send(TurnStarted(KEY, "t1", clock.now()))
     ref = (await store.get(KEY)).progress_ref
     assert ref == {"channel": "C1", "ts": "201.0", "thread_ts": "100.1"}
+
+
+async def test_sender_restart_restores_progress_view_and_slack_reference(clock):
+    store = InMemoryStateStore()
+    client = FakeSlackClient()
+    first, _ = make_output(clock, client, store)
+    await first.send(TurnStarted(KEY, "t1", clock.now()))
+    first_ref = (await store.get(KEY)).progress_ref["ts"]
+    await first.send(tool_started(1, at=clock.now()))
+    saved = await store.get(KEY)
+    assert saved.progress_snapshot["turn_id"] == "t1"
+    assert saved.progress_snapshot["view"]["tools"][0]["name"] == "bash"
+
+    restarted, _ = make_output(clock, client, store)
+    await restarted.send(tool_started(2, summary="restored", at=clock.now()))
+    assert len(client.posts) == 1
+    assert client.updates[-1]["ts"] == first_ref
+    assert "restored" in client.updates[-1]["text"]
+
+
+async def test_heartbeat_after_terminal_does_not_reopen_progress(clock):
+    out, client = make_output(clock, store=InMemoryStateStore())
+    await out.send(TurnStarted(KEY, "t1", clock.now()))
+    await out.send(TurnFinished(KEY, "t1", "", Usage(), finished_at=clock.now()))
+    updates = len(client.updates)
+    await out.send(Heartbeat(KEY, "t1", clock.now()))
+    assert len(client.updates) == updates
+    assert client.updates[-1]["text"].startswith("✅ 完了")
 
 
 async def test_replies_notices_and_blocks(clock):

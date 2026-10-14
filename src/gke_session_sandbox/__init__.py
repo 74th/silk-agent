@@ -50,6 +50,7 @@ from .manager import SandboxManager, SessionHandle
 from .network import build_session_network_policies, sandbox_pod_labels
 from .reconciler import LifecycleReconciler
 from .repository import ConfigMapSessionRepository, LeaseToken, StoredSession
+from .repository_port import SessionRepository
 from .sqlite_repository import SQLiteSessionRepository
 from .templates import RenderedTemplate, TemplateRenderer
 from .types import (
@@ -123,6 +124,7 @@ __all__ = [
     "SessionKey",
     "SessionHandle",
     "SessionRecord",
+    "SessionRepository",
     "SessionState",
     "StoredSession",
     "StaleGenerationError",

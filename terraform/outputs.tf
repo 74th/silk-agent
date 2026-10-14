@@ -13,6 +13,11 @@ output "skills_bucket" {
   value       = google_storage_bucket.skills.name
 }
 
+output "firestore_database_id" {
+  description = "分散実行の Firestore database ID"
+  value       = var.firestore_database_id
+}
+
 output "bot_service_account" {
   description = "Bot が使うサービスアカウント"
   value       = google_service_account.bot.email

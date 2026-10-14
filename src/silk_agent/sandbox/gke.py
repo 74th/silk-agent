@@ -8,7 +8,6 @@ The library is imported lazily, so the rest of silk-agent works without it.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import math
 import uuid
@@ -121,23 +120,22 @@ class GkeSessionSandboxRuntime:
             raise
         running = self._running.setdefault(conversation_key, {})
         running[command_id] = handle
+        wait_cancelled = False
         try:
             if on_started is not None:
                 await on_started(command_id)
             result = await handle.commands.wait(command_id)
         except asyncio.CancelledError:
-            # Nobody will wait for this command any more (the turn was interrupted):
-            # stop it instead of leaving it running in the sandbox.
-            self._cancelled.setdefault(conversation_key, set()).add(command_id)
-            with contextlib.suppress(Exception):
-                await asyncio.shield(handle.commands.cancel(command_id))
+            # Preserve the handle so a separate explicit cancel can still target it.
+            wait_cancelled = True
             raise
         except Exception as e:
             if type(e).__name__ == "ExecutionOutcomeUnknown":
                 return CommandResult(command_id, "unknown")
             raise
         finally:
-            running.pop(command_id, None)
+            if not wait_cancelled:
+                running.pop(command_id, None)
         cancelled = command_id in self._cancelled.pop(conversation_key, set()) or (
             getattr(result, "stop_reason", None) == "cancelled"
         )
@@ -184,6 +182,8 @@ class GkeSessionSandboxRuntime:
                 await handle.commands.cancel(command_id)
             except Exception:
                 log.exception("cancelling command %s failed", command_id)
+            else:
+                self._running.get(conversation_key, {}).pop(command_id, None)
 
     # ------------------------------------------------------------ files
 
