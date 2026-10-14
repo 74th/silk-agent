@@ -98,7 +98,14 @@ class CommandTrackerClient:
         return self._session
 
     async def _record(
-        self, command_id: str, method: str, path: str, body=None, *, ambiguous=False
+        self,
+        command_id: str,
+        method: str,
+        path: str,
+        body=None,
+        *,
+        ambiguous=False,
+        expect_json=True,
     ) -> dict:
         """A request whose response must be a JSON object (a command record)."""
         record = await self._request(command_id, method, path, body, ambiguous=ambiguous)
@@ -109,7 +116,14 @@ class CommandTrackerClient:
         return record
 
     async def _request(
-        self, command_id: str, method: str, path: str, body=None, *, ambiguous=False
+        self,
+        command_id: str,
+        method: str,
+        path: str,
+        body=None,
+        *,
+        ambiguous=False,
+        expect_json=True,
     ):
         try:
             if self._endpoint is None:
@@ -128,7 +142,7 @@ class CommandTrackerClient:
                     raise RuntimeConnectionError(
                         f"tracker returned HTTP {response.status}: {detail}"
                     )
-                if not payload:
+                if not payload or not expect_json:
                     return None
                 return await _decode_json(payload, command_id)
         except ExecutionOutcomeUnknown:
@@ -257,20 +271,32 @@ class CommandTrackerClient:
         return await self.wait(accepted["command_id"], check=check)
 
     async def cancel(self, command_id: str) -> None:
-        await self._request(command_id, "POST", f"/v1/commands/{command_id}/cancel", {})
+        await self._request(
+            command_id, "POST", f"/v1/commands/{command_id}/cancel", {}, expect_json=False
+        )
 
     async def stdin(self, command_id: str, data: bytes | None) -> None:
         body = {"eof": True} if data is None else {"input": base64.b64encode(data).decode("ascii")}
-        await self._request(command_id, "POST", f"/v1/commands/{command_id}/stdin", body)
+        await self._request(
+            command_id, "POST", f"/v1/commands/{command_id}/stdin", body, expect_json=False
+        )
 
     async def signal(self, command_id: str, name: str) -> None:
         await self._request(
-            command_id, "POST", f"/v1/commands/{command_id}/signal", {"signal": name}
+            command_id,
+            "POST",
+            f"/v1/commands/{command_id}/signal",
+            {"signal": name},
+            expect_json=False,
         )
 
     async def resize_tty(self, command_id: str, cols: int, rows: int) -> None:
         await self._request(
-            command_id, "POST", f"/v1/commands/{command_id}/resize", {"cols": cols, "rows": rows}
+            command_id,
+            "POST",
+            f"/v1/commands/{command_id}/resize",
+            {"cols": cols, "rows": rows},
+            expect_json=False,
         )
 
 

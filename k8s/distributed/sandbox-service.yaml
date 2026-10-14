@@ -61,6 +61,18 @@ spec:
           port: 8080
   egress:
     - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: session-sandboxes
+          podSelector:
+            matchLabels:
+              session-sandbox.example.com/managed: "true"
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8081
+    - to:
         - ipBlock:
             cidr: 169.254.169.254/32
       ports:

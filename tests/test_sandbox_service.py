@@ -865,3 +865,69 @@ async def test_command_status_output_and_cancel_use_the_recorded_sandbox_generat
         assert canceled == ["cmd-1"]
     finally:
         await client.close()
+
+
+async def test_request_scoped_clients_close_on_success_and_failure():
+    from silk_agent.sandbox.service import _call_and_close
+
+    class Client:
+        def __init__(self):
+            self.closed = 0
+
+        async def read(self, fail=False):
+            if fail:
+                raise OSError("response lost")
+            return b"content"
+
+        async def close(self):
+            self.closed += 1
+
+    resource = Client()
+    assert await _call_and_close(resource, "read") == b"content"
+    assert resource.closed == 1
+    try:
+        await _call_and_close(resource, "read", fail=True)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("client failure must propagate")
+    assert resource.closed == 2
+
+
+async def test_invalid_file_path_returns_400_without_ensuring_sandbox():
+    async def review(_token, _audience):
+        return {
+            "authenticated": True,
+            "audiences": ["silk-sandbox"],
+            "user": {"username": "system:serviceaccount:silk:worker"},
+        }
+
+    class Manager:
+        async def ensure(self, _key):
+            raise AssertionError("invalid path must not reach the manager")
+
+    client = await _client(
+        review,
+        manager=Manager(),
+        authorizer=lambda *_: None,
+        owner_provider=lambda *_: None,
+        operation_store=object(),
+    )
+    try:
+        response = await client.put(
+            "/v1/files/write",
+            headers={"Authorization": "Bearer test-token"},
+            json={
+                "request_id": "invalid",
+                "conversation_key": "c",
+                "owner_epoch": 1,
+                "conversation_generation": 1,
+                "turn_id": "t",
+                "origin_seq": 1,
+                "path": "/workspace/invalid",
+                "data_base64": "",
+            },
+        )
+        assert response.status == 400
+    finally:
+        await client.close()

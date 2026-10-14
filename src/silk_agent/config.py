@@ -117,6 +117,8 @@ class DistributedExecutionConfig(_Model):
     sandbox_service_audience: str = "silk-agent-sandbox-service"
     sandbox_service_allowed_ksas: list[str] = Field(default_factory=list)
     sandbox_service_port: int = Field(default=8080, ge=1, le=65535)
+    # Liveness/readiness/metrics endpoint of the Gateway, Worker and Control roles.
+    health_port: int = Field(default=9090, ge=1, le=65535)
 
     @model_validator(mode="after")
     def lease_renewal_precedes_expiration(self) -> DistributedExecutionConfig:

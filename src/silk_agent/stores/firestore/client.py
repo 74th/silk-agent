@@ -22,12 +22,23 @@ def create_firestore_client(
     The emulator gets anonymous credentials and an explicit endpoint. Merely inheriting
     FIRESTORE_EMULATOR_HOST is rejected so a test cannot silently change its target.
     """
+    return _create(firestore.AsyncClient, config, emulator_host)
+
+
+def create_watch_firestore_client(
+    config: DistributedExecutionConfig, *, emulator_host: str | None = None
+) -> firestore.Client:
+    """Synchronous client; the async client has no snapshot listener support."""
+    return _create(firestore.Client, config, emulator_host)
+
+
+def _create(client_class, config: DistributedExecutionConfig, emulator_host: str | None):
     environment_host = os.environ.get(_EMULATOR_ENV)
     if environment_host and environment_host != emulator_host:
         raise ValueError(f"pass emulator_host explicitly to use {_EMULATOR_ENV}")
 
     if emulator_host is None:
-        return firestore.AsyncClient(
+        return client_class(
             project=config.firestore_project,
             database=config.firestore_database,
         )
@@ -42,7 +53,7 @@ def create_firestore_client(
         previous = os.environ.get(_EMULATOR_ENV)
         os.environ[_EMULATOR_ENV] = host
         try:
-            return firestore.AsyncClient(
+            return client_class(
                 project=config.firestore_project,
                 database=config.firestore_database,
                 credentials=AnonymousCredentials(),

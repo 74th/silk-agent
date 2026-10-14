@@ -1,0 +1,426 @@
+# The three roles that run next to the Sandbox Service (sandbox-service.yaml).
+#
+# All Deployments are committed with replicas: 0 so applying this file never connects to Slack
+# or starts an SDK by accident. Enable one at a time (see k8s/distributed/README.md); the Worker
+# runs with one replica until the acceptance run, then two.
+#
+# Credential split: only the Gateway holds the Slack app token, only Gateway/Control hold the bot
+# token, and the Worker holds no Slack secret at all. No role mounts a volume with SQLite state.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: silk-agent-gateway
+  namespace: session-sandbox-system
+# Workload Identity only; no Kubernetes API token is needed by this role.
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: silk-agent-worker
+  namespace: session-sandbox-system
+# Workload Identity only; no Kubernetes API token is needed by this role.
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: silk-agent-control
+  namespace: session-sandbox-system
+# Workload Identity only; no Kubernetes API token is needed by this role.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: silk-agent-gateway
+  namespace: session-sandbox-system
+spec:
+  # Committed disabled: enabling a role is a deliberate step (see README / runbook).
+  replicas: 0
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: silk-agent-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: silk-agent-gateway
+    spec:
+      serviceAccountName: silk-agent-gateway
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: silk-agent
+          command: [silk-agent, gateway]
+          ports:
+            - name: health
+              containerPort: 9090
+          env:
+            - name: LOG_LEVEL
+              value: INFO
+            - name: SILK_AGENT_CONFIG
+              value: /config/silk-agent-distributed.yaml
+            - name: HOME
+              value: /home/app
+          envFrom:
+            - secretRef:
+                name: silk-agent-slack
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/app
+      volumes:
+        - name: config
+          configMap:
+            name: silk-agent-sandbox-service-config
+        - name: tmp
+          emptyDir: {}
+        - name: home
+          emptyDir: {}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: silk-agent-worker
+  namespace: session-sandbox-system
+spec:
+  # Committed disabled: enabling a role is a deliberate step (see README / runbook).
+  replicas: 0
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: silk-agent-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: silk-agent-worker
+    spec:
+      serviceAccountName: silk-agent-worker
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: silk-agent
+          command: [silk-agent, worker, run]
+          ports:
+            - name: health
+              containerPort: 9090
+          env:
+            - name: LOG_LEVEL
+              value: INFO
+            - name: SILK_AGENT_CONFIG
+              value: /config/silk-agent-distributed.yaml
+            - name: HOME
+              value: /home/app
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              memory: 8Gi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/app
+            - name: sandbox-token
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: silk-agent-sandbox-service-config
+        - name: tmp
+          emptyDir: {}
+        - name: home
+          emptyDir: {}
+        - name: sandbox-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: silk-agent-sandbox-service
+                  expirationSeconds: 3600
+                  path: silk-sandbox
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: silk-agent-control
+  namespace: session-sandbox-system
+spec:
+  # Committed disabled: enabling a role is a deliberate step (see README / runbook).
+  replicas: 0
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: silk-agent-control
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: silk-agent-control
+    spec:
+      serviceAccountName: silk-agent-control
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: control
+          image: silk-agent
+          command: [silk-agent, control]
+          ports:
+            - name: health
+              containerPort: 9090
+          env:
+            - name: LOG_LEVEL
+              value: INFO
+            - name: SILK_AGENT_CONFIG
+              value: /config/silk-agent-distributed.yaml
+            - name: HOME
+              value: /home/app
+            # Control only posts to Slack: the bot token, never the app token.
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: silk-agent-slack
+                  key: SLACK_BOT_TOKEN
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: home
+              mountPath: /home/app
+      volumes:
+        - name: config
+          configMap:
+            name: silk-agent-sandbox-service-config
+        - name: tmp
+          emptyDir: {}
+        - name: home
+          emptyDir: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: silk-agent-gateway
+  namespace: session-sandbox-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: silk-agent-gateway
+  # No ingress: probes come from the kubelet. Add a rule for the chosen metrics scraper.
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 8080
+    - ports:
+        - protocol: TCP
+          port: 443
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: silk-agent-worker
+  namespace: session-sandbox-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: silk-agent-worker
+  # No ingress: probes come from the kubelet. Add a rule for the chosen metrics scraper.
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: silk-agent-sandbox-service
+      ports:
+        - protocol: TCP
+          port: 8080
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 8080
+    - ports:
+        - protocol: TCP
+          port: 443
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: silk-agent-control
+  namespace: session-sandbox-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: silk-agent-control
+  # No ingress: probes come from the kubelet. Add a rule for the chosen metrics scraper.
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 8080
+    - ports:
+        - protocol: TCP
+          port: 443
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

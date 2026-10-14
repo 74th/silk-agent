@@ -139,6 +139,14 @@ class InboxStore(Protocol):
 
     async def list_pending_controls(self, *, limit: int = 100) -> Sequence[Mapping[str, Any]]: ...
 
+    async def list_authorized_controls(
+        self, conversation_key: str, *, limit: int = 100
+    ) -> Sequence[Mapping[str, Any]]: ...
+
+    async def mark_control_handled(
+        self, *, conversation_key: str, input_id: str, owner: OwnershipToken, now: datetime
+    ) -> bool: ...
+
     async def resolve_control_authorization(
         self,
         *,
@@ -245,6 +253,8 @@ class ConversationStore(Protocol):
     ) -> bool: ...
 
     async def begin_reset(self, *, owner: OwnershipToken, reset_seq: int) -> bool: ...
+
+    async def allocate_output_sequence(self, conversation_key: str) -> int: ...
 
     async def complete_reset(
         self, *, owner: OwnershipToken, now: datetime
@@ -457,6 +467,8 @@ class OutboxStore(Protocol):
     ) -> bool:
         """Persist output only after sanitization and while its owner epoch is current."""
         ...
+
+    async def list_conversations_with_pending(self, *, limit: int = 100) -> Sequence[str]: ...
 
     async def claim_next(
         self,

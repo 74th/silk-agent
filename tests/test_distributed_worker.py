@@ -126,6 +126,7 @@ async def test_worker_creates_one_actor_per_active_conversation_and_closes_remov
     assert await worker.run_once() == 2
     assert actors["conversation-a"].started == 1
     assert actors["conversation-b"].started == 1
+    assert worker.usage == (2, 2)
 
     del ownership.tokens["conversation-a"]
     assert await worker.run_once() == 1
@@ -218,6 +219,7 @@ async def test_control_only_assignment_uses_actor_without_creating_an_sdk_actor(
     assert sdk_actors == []
     assert len(control_actors) == 1 and control_actors[0].started == 1
     assert ownership.sdk_active == set()
+    assert worker.usage == (1, 0)
 
 
 @pytest.mark.asyncio
@@ -419,8 +421,312 @@ async def test_worker_quiesce_returns_stop_evidence_without_releasing_owner():
     assert isinstance(evidence["evidence_id"], str)
     assert actors[0].closed == 1
     assert ownership.released == []
-    assert await worker.quiesce(owner) is None
+    # This process closed that epoch itself, so a repeated request is still provable ...
+    assert (await worker.quiesce(owner)) is not None
+    # ... but an epoch it never ran, or another incarnation, is not.
+    unknown_epoch = OwnershipToken(
+        owner.conversation_key,
+        owner.worker_id,
+        owner.worker_incarnation,
+        owner.epoch + 1,
+        owner.conversation_generation,
+        owner.expires_at,
+    )
+    assert await worker.quiesce(unknown_epoch) is None
+    other = OwnershipToken(
+        owner.conversation_key,
+        owner.worker_id,
+        "pod-a:boot-2",
+        owner.epoch,
+        owner.conversation_generation,
+        owner.expires_at,
+    )
+    assert await worker.quiesce(other) is None
 
 
 async def _resolved(value):
     return value
+
+
+@pytest.mark.asyncio
+async def test_worker_undrain_resumes_assignment_processing():
+    clock = Clock()
+    ownership = Ownership([])
+    directory = FakeSharedStore()
+    await directory.register(WorkerRecord("worker-a", "pod-a:boot-1", 2, 0, 0, True, clock.now()))
+    worker = DistributedWorker(
+        ownership,
+        clock,
+        worker_id="worker-a",
+        worker_incarnation="pod-a:boot-1",
+        actor_factory=Actor,
+        subscribe=no_watch,
+        worker_directory=directory,
+    )
+    assert await worker.run_once() == 0
+    await directory.set_draining(
+        worker_id="worker-a", incarnation="pod-a:boot-1", draining=False, now=clock.now()
+    )
+    ownership.tokens["new-conversation"] = token("new-conversation")
+    assert await worker.run_once() == 1
+
+
+@pytest.mark.asyncio
+async def test_renewal_exception_closes_actor_without_releasing_ownership():
+    class Unavailable(Ownership):
+        async def renew(self, *args, **kwargs):
+            raise ConnectionError("store offline")
+
+    ownership = Unavailable([token("conversation-a")])
+    actors = []
+    worker = DistributedWorker(
+        ownership,
+        Clock(),
+        worker_id="worker-a",
+        worker_incarnation="pod-a:boot-1",
+        actor_factory=lambda owner: actors.append(Actor(owner)) or actors[-1],
+        subscribe=no_watch,
+    )
+    await worker.run_once()
+    await worker._renew_actors()
+    assert actors[0].closed == 1
+    assert worker.actors == ()
+    assert ownership.released == []
+
+
+@pytest.mark.asyncio
+async def test_long_drain_keeps_renewing_lease_and_releases_latest_token():
+    import asyncio
+
+    clock = Clock()
+    ownership = Ownership([token("conversation-a")])
+    directory = FakeSharedStore()
+    await directory.register(WorkerRecord("worker-a", "pod-a:boot-1", 2, 0, 0, False, clock.now()))
+    renewed = asyncio.Event()
+    original_renew = ownership.renew
+
+    async def renew(*args, **kwargs):
+        value = await original_renew(*args, **kwargs)
+        renewed.set()
+        return value
+
+    ownership.renew = renew
+
+    async def drain(actor, grace):
+        await renewed.wait()
+        await actor.aclose()
+        return True
+
+    worker = DistributedWorker(
+        ownership,
+        clock,
+        worker_id="worker-a",
+        worker_incarnation="pod-a:boot-1",
+        actor_factory=Actor,
+        subscribe=no_watch,
+        worker_directory=directory,
+        drain_actor=drain,
+        renew_seconds=0.01,
+    )
+    await worker.run_once()
+    await directory.set_draining(
+        worker_id="worker-a", incarnation="pod-a:boot-1", draining=True, now=clock.now()
+    )
+    assert await asyncio.wait_for(worker.run_once(), timeout=1) == 0
+    assert renewed.is_set()
+    assert ownership.released == ["conversation-a"]
+
+
+@pytest.mark.asyncio
+async def test_continuous_watch_signals_do_not_starve_lease_renewal():
+    import asyncio
+
+    clock = Clock()
+    ownership = Ownership([token("conversation-a")])
+    stop = asyncio.Event()
+    original = ownership.renew
+    calls = []
+
+    async def renew(*args, **kwargs):
+        calls.append(True)
+        stop.set()
+        return await original(*args, **kwargs)
+
+    ownership.renew = renew
+
+    def busy_watch(on_change, on_error):
+        async def send_signals():
+            while not stop.is_set():
+                on_change()
+                await asyncio.sleep(0)
+
+        task = asyncio.create_task(send_signals())
+
+        class Handle:
+            def unsubscribe(self):
+                task.cancel()
+
+        return Handle()
+
+    worker = DistributedWorker(
+        ownership,
+        clock,
+        worker_id="worker-a",
+        worker_incarnation="pod-a:boot-1",
+        actor_factory=Actor,
+        subscribe=busy_watch,
+        renew_seconds=0.01,
+    )
+    await asyncio.wait_for(worker.run(stop), timeout=1)
+    assert calls
+
+
+@pytest.mark.asyncio
+async def test_cancelling_assignment_loop_closes_actors_before_returning():
+    import asyncio
+
+    actors = []
+    started = asyncio.Event()
+
+    class StartedActor(Actor):
+        async def start(self):
+            await super().start()
+            started.set()
+
+    ownership = Ownership([token("conversation-a")])
+    worker = DistributedWorker(
+        ownership,
+        Clock(),
+        worker_id="worker-a",
+        worker_incarnation="pod-a:boot-1",
+        actor_factory=lambda owner: actors.append(StartedActor(owner)) or actors[-1],
+        subscribe=no_watch,
+    )
+    task = asyncio.create_task(worker.run(asyncio.Event()))
+    await started.wait()
+    await asyncio.sleep(0)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert actors[0].closed == 1
+    assert ownership.released == ["conversation-a"]
+
+
+@pytest.mark.asyncio
+async def test_all_sdk_actors_start_shutdown_within_one_process_grace_window():
+    import asyncio
+
+    stopping = []
+    all_stopping = asyncio.Event()
+
+    async def drain(actor, grace):
+        stopping.append(actor.token.conversation_key)
+        if len(stopping) == 2:
+            all_stopping.set()
+        await all_stopping.wait()
+        await actor.aclose()
+        return True
+
+    ownership = Ownership([token("conversation-a"), token("conversation-b")])
+    worker = DistributedWorker(
+        ownership,
+        Clock(),
+        worker_id="worker-a",
+        worker_incarnation="pod-a:boot-1",
+        actor_factory=Actor,
+        subscribe=no_watch,
+        drain_actor=drain,
+    )
+    await worker.run_once()
+    await asyncio.wait_for(worker.aclose(), timeout=1)
+    assert set(ownership.released) == {"conversation-a", "conversation-b"}
+
+
+class IdleActor(Actor):
+    def __init__(self, tok):
+        super().__init__(tok)
+        self.idle = True
+        self.rebound = []
+
+    def is_idle(self):
+        return self.idle
+
+    async def rebind_after_reset(self, tok):
+        self.rebound.append(tok)
+        self.token = tok
+
+
+@pytest.mark.asyncio
+async def test_idle_actor_is_closed_then_released_only_after_the_idle_period():
+    clock = Clock()
+    owner = token("conversation-a")
+    ownership = Ownership([owner])
+    actors = {}
+
+    def actor_factory(tok):
+        actors[tok.conversation_key] = IdleActor(tok)
+        return actors[tok.conversation_key]
+
+    worker = DistributedWorker(
+        ownership,
+        clock,
+        worker_id="worker-a",
+        worker_incarnation="pod-a:boot-1",
+        actor_factory=actor_factory,
+        subscribe=no_watch,
+        idle_close_seconds=600,
+        lease_seconds=3600,
+        renew_seconds=20,
+    )
+    await worker.run_once()
+    await worker._renew_actors()
+    assert worker.actors == ("conversation-a",)
+
+    clock.value += timedelta(seconds=599)
+    await worker._renew_actors()
+    assert ownership.released == [] and worker.usage == (1, 1)
+
+    actors["conversation-a"].idle = False  # a new turn resets the idle period
+    await worker._renew_actors()
+    actors["conversation-a"].idle = True
+    await worker._renew_actors()  # idle period starts when idleness is first observed
+    clock.value += timedelta(seconds=599)
+    await worker._renew_actors()
+    assert ownership.released == []
+
+    clock.value += timedelta(seconds=2)
+    await worker._renew_actors()
+    assert ownership.released == ["conversation-a"]
+    assert actors["conversation-a"].closed == 1
+    assert worker.actors == () and worker.usage == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_actor_survives_its_own_reset_successor_but_not_a_foreign_takeover():
+    clock = Clock()
+    owner = token("conversation-a")
+    ownership = Ownership([owner])
+    actors = {}
+
+    def actor_factory(tok):
+        actors[tok.conversation_key] = IdleActor(tok)
+        return actors[tok.conversation_key]
+
+    worker = DistributedWorker(
+        ownership,
+        clock,
+        worker_id="worker-a",
+        worker_incarnation="pod-a:boot-1",
+        actor_factory=actor_factory,
+        subscribe=no_watch,
+    )
+    await worker.run_once()
+    successor = OwnershipToken("conversation-a", "worker-a", "pod-a:boot-1", 2, 2, owner.expires_at)
+    ownership.tokens["conversation-a"] = successor
+    assert await worker.run_once() == 1
+    actor = actors["conversation-a"]
+    assert actor.rebound == [successor] and actor.closed == 0
+
+    foreign = OwnershipToken("conversation-a", "worker-a", "pod-a:boot-1", 4, 3, owner.expires_at)
+    ownership.tokens["conversation-a"] = foreign
+    await worker.run_once()
+    assert actor.closed == 1 and worker.actors == ()

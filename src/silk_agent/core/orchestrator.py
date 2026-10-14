@@ -98,6 +98,9 @@ class ConversationOrchestrator:
         distributed_rate_limit: Callable[[UserMessage], Awaitable[bool]] | None = None,
         initial_owner_recorder: Callable[[UserMessage], Awaitable[None]] | None = None,
         outbox_sink: Callable[[OutboundEvent], Awaitable[None]] | None = None,
+        input_completed: Callable[[str], Awaitable[None]] | None = None,
+        input_started: Callable[[str], Awaitable[bool]] | None = None,
+        input_uncertain: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._clock = clock
         self._hooks = hooks
@@ -113,6 +116,9 @@ class ConversationOrchestrator:
             notice_source=notice_source,
             notice_ack=notice_ack,
             sandbox_ready=sandbox_ready,
+            input_completed=input_completed,
+            input_started=input_started,
+            input_uncertain=input_uncertain,
         )
         self._cancel_background = cancel_background
         self._channel = channel
@@ -155,6 +161,18 @@ class ConversationOrchestrator:
             await self._handle_message(UserMessage(event.conversation_key, event.user, RESUME_TEXT))
 
     async def _handle_message(self, message: UserMessage) -> None:
+        if not await self.prepare_message(message):
+            return
+        session = await self._registry.get_or_create(message.conversation_key)
+        await session.submit(message)
+
+    async def prepare_message(self, message: UserMessage) -> bool:
+        """Apply normal input checks and durable management updates without submitting.
+
+        Distributed actors call this before fencing the Inbox transition and submitting
+        through DurableInputDelivery. The in-process path continues through
+        ``_handle_message`` and submits to the same AgentSession registry.
+        """
         key = message.conversation_key
         if self._filters is not None:
             decision = self._filters.check(
@@ -164,7 +182,7 @@ class ConversationOrchestrator:
                 self._input(message, "filtered", filter=decision.reason)
                 if decision.reply:
                     await self._channel.send(Notice(key, decision.reply))
-                return
+                return False
 
         if self._distributed_rate_limit is not None:
             if not await self._distributed_rate_limit(message):
@@ -172,12 +190,12 @@ class ConversationOrchestrator:
                 await self._channel.send(
                     Notice(key, "送信が多すぎます。少し待ってから送ってください。")
                 )
-                return
+                return False
 
         if self._stop_words.matches(message.text):
             self._input(message, "stop_word")
             await self._handle_stop(StopRequest(key, message.user))
-            return
+            return False
 
         history = (
             list(await self._guard_history_loader(key))
@@ -193,25 +211,24 @@ class ConversationOrchestrator:
             else:
                 self._input(message, "guard_failed", reason="input guard failed")
                 await self._channel.send(GuardBlocked(key, "input", INPUT_CHECK_FAILED))
-                return
+                return False
         if verdict is not None and verdict.decision != "allow":
             reason = verdict.reason or "入力がポリシーに違反している可能性があります。"
             self._input(
                 message, "review" if verdict.decision == "review" else "blocked", reason=reason
             )
             await self._channel.send(GuardBlocked(key, "input", reason))
-            return
+            return False
 
         if self._guard_history_recorder is not None:
             if not await self._guard_history_recorder(message):
                 log.warning("could not save accepted input history for current owner")
-                return
+                return False
         else:
             self._history[key].append(message.text)
         self._input(message, "accepted")
         await self._record_owner(message)
-        session = await self._registry.get_or_create(key)
-        await session.submit(message)
+        return True
 
     async def _record_owner(self, message: UserMessage) -> None:
         """The user of the first accepted message owns the conversation (it is saved before
@@ -252,6 +269,12 @@ class ConversationOrchestrator:
         stop_task = asyncio.create_task(session.stop()) if session is not None else None
         background = await background_task
         stopped = await stop_task if stop_task is not None else False
+        await self.report_stop(key, background, stopped)
+
+    async def report_stop(
+        self, key: str, background: int | CommandCancelReport, stopped: bool
+    ) -> None:
+        """Tell the user what a stop request cancelled (shared with the distributed path)."""
         if isinstance(background, CommandCancelReport) and background.requested:
             if background.confirmed:
                 await self._channel.send(

@@ -19,6 +19,7 @@ from silk_agent.channels.slack_events import (
 )
 from silk_agent.core.distributed_ports import InboxStore
 from silk_agent.core.ports import Clock
+from silk_agent.distributed.metrics import METRICS
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +118,7 @@ class SlackSocketGateway:
                     participating=normalized.mark_participating,
                 )
         except Exception as exc:
+            METRICS.inc("gateway_persist_failures_total")
             # Do not include the Slack body in logs: it can contain user content.
             log.error(
                 "could not persist Socket Mode event (%s); leaving it unacknowledged",
@@ -124,6 +126,7 @@ class SlackSocketGateway:
             )
             raise
         await send_response(SocketModeResponse(envelope_id=envelope_id))
+        METRICS.inc("gateway_events_total", result="accepted" if normalized else "ignored")
         if normalized is not None and self._on_accepted is not None:
             task = asyncio.create_task(self._run_accepted(normalized))
             self._tasks.add(task)

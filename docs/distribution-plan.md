@@ -468,4 +468,80 @@ Slackなしで再実行するFirestore Emulator、標準テスト、直接Sandbo
 
 Gateway / Worker / Control / Sandbox Service の役割別起動factoryとKubernetes Deploymentは未完了のため、2Workerでの実SDK・Sandbox・Slack受け入れ、drain後のPod削除、実負荷計測はまだ実施していない。この検証記録は、それらを成功扱いしない。
 
-2026-10-14の追加確認では、Workerのdrain期限をdirectoryから読み、期限までの残り時間をactor drainへ渡す処理を追加した。期限前のdrain失敗ではownershipを保持し、期限後の再試行には0秒を渡す。Worker終了時はSIGTERM fallbackとして25秒を上限に保存・停止を試し、停止未確認ではownershipを解放しない。期限付きdrain deadlineのWorkerRecord往復と旧形式document読込も確認した。`uv run pytest -q` は681件成功・50件除外、`uv run ruff check .`、`uv run ruff format --check .`、`uv run pyrefly check`、`git diff --check` は成功。さらに実Firestore `nnyn-dev/silk-agent` の専用prefixでWorker登録、drain deadline設定、heartbeat後のdeadline保持、undrain時のdeadline消去を確認し、検証documentを削除した。Workerの本番role factoryが未実装のため、実際のSDK保存・中断を含むdrain経路はまだ接続・受け入れ確認していない。
+2026-10-14の追加確認では、Workerのdrain期限をdirectoryから読み、期限までの残り時間をactor drainへ渡す処理を追加した。期限前のdrain失敗ではownershipを保持し、期限後の再試行には0秒を渡す。Worker終了時はSIGTERM fallbackとして25秒を上限に保存・停止を試し、停止未確認ではownershipを解放しない。期限付きdrain deadlineのWorkerRecord往復と旧形式document読込も確認した。read-only migration exportではSQLiteとAgent Platformのfixtureを使い、秘密値を含めないこと、重複・欠落・世代/UID差異をdry-runで検出すること、0600 snapshot新規作成を確認した。`uv run pytest -q` は687件成功・51件除外、`uv run ruff check .`、`uv run ruff format --check .`、`uv run pyrefly check`、`git diff --check` は成功。さらに実Firestore `nnyn-dev/silk-agent` の専用prefixでWorker登録、drain deadline設定、heartbeat後のdeadline保持、undrain時のdeadline消去を確認し、検証documentを削除した。Workerの本番role factoryが未実装のため、実際のSDK保存・中断を含むdrain経路はまだ接続・受け入れ確認していない。
+
+## 16. 旧状態のread-only exportとdry-run照合
+
+旧Sandbox SQLiteとAgent Platform control sessionsの状態を、Firestoreへ書き込まずに収集する。
+
+```sh
+silk-agent migration export \
+  --config CONFIG \
+  --sqlite-db /path/to/sessions.sqlite3 \
+  --output migration-snapshot.json
+```
+
+JSONには会話キー、SDK session ID、開始者、Sandbox generation、Pod/PVC UID、稼働中command ID、環境fingerprintを含む。出力ファイルはmode `0600` で新規作成し、既存ファイルは上書きしない。`--target-snapshot` を指定すると、共通するsandbox key hashのgeneration・Pod UID・PVC UIDを比較する。missing/orphaned sandbox record、重複ID、稼働中command不一致、generation/UID不一致があれば、import前に調査する。exportは旧DBとAgent Platform Sessionsを読み取るだけで、importや起動中サービス停止は行わない。
+
+```sh
+silk-agent migration export \
+  --config CONFIG \
+  --sqlite-db /path/to/sessions.sqlite3 \
+  --target-snapshot migration-target.json
+```
+
+このexportは照合作業用であり、それだけで新Firestoreへのimport可能を意味しない。importは旧Gateway/Botとreconcilerを停止し、source hash/versionを固定した別手順で実施する。
+
+## 17. Control allocator起動配線
+
+2026-10-14にControl roleの割当ループを追加した。`silk-agent control --config CONFIG` はFirestoreの割当待ち会話をページングし、稼働中Workerを候補として既存のtransactional allocatorへ渡す。allocation leaseとWorker leaseはdistributed configの`lease_seconds`を使い、割当がない場合も周期的に再照会する。Controlの起動経路はSlack tokenとAgent SDKを読み込まない。fake依存による割当・Worker不在時のテスト、CLI parser、distributed以外のconfig拒否は確認済み。専用prefixを実Firestoreに作成し、`list_waiting`の結果一致後に検証documentを削除した。追加後の`uv run pytest -q`は695件成功、51件をintegration markerで除外。ruff、format、pyrefly、diff checkも成功した。Firestore Emulatorの追加照会試験は、実行環境にJava 8+ JREがなく起動できなかった。
+
+Worker起動部品として、Kubernetesの`POD_NAME`と`POD_UID`から起動UUID付きincarnationを作るidentityと、WorkerDirectoryへ登録・heartbeatする`WorkerHeartbeat`を追加した。heartbeatは使用数を検査し、既存のdirectory transaction経由で管理者のdrain状態を保持する。さらに`DistributedConversationActor`がDispatcher、Orchestrator入力検査、`DurableInputDelivery`、AgentSessionの入力完了callbackをつなぐ。queued入力の引継ぎ時はguard/rate limitを繰り返さない。fakeでidentity、登録拒否、usage境界、heartbeat値、通常入力の完了、queued入力の再開を確認した。追加後の全unit suiteは699件成功、51件をintegration markerで除外し、ruff / format / pyrefly / diff checkも成功。
+
+Worker roleの構成factoryとCLI起動経路、実Firestore watch、Outboxのsequence allocator、Sandbox remote identity、Controlの認可済みstop/reset handlerは未接続であり、12.1は未完了。
+
+これはControl roleの一部であり、control authorization/reset/recovery、Worker actor factory、Gateway/Worker/ControlのKubernetes Deploymentは未接続である。OpenSpec 12.1は未完了のままとする。
+
+## 18. Slackを使わない直接検証（2026-10-15）
+
+稼働中の `gke_nnyn-dev_us-central1-a_silk-agent-gke` でSandbox Serviceを読み取り確認した。Deploymentは1/1 Ready、PodはRunningで再起動0。port-forward経由で `/healthz`、`/readyz`、`/metrics` が200を返した。認証なしのsession statusは401、短命の正しい `silk-agent-worker` tokenはTokenReviewを通過したうえで、所有権のない検証用会話に403を返した。誤audience tokenは401、許可外の `default` KSA tokenは403。GETのみを実行し、会話・Sandbox・Firestore documentは作成していない。
+
+コード側では `uv run pytest -q` が700件成功、51件をintegration markerで除外した。`ruff check .`、`ruff format --check .`、`pyrefly check`、`git diff --check` は成功。`kubectl kustomize` は `k8s/base`、`k8s/overlays/dev`、`k8s/platform`、`k8s/distributed` をrenderできた。`k8s/distributed` は現状Sandbox Serviceだけを含み、4役割Deploymentはまだない。Worker heartbeatとassignment watchを同じ寿命で管理する `WorkerProcessRuntime`、Heartbeat用usage計数も追加し、関連テスト16件と型検査を通した。
+
+Firestore Emulatorはこの実行環境にJava 8+ JREがないため起動できず、今回のemulator suiteは未実行。実Firestoreでの読み書き確認は前回の専用prefix検証記録を参照。実Slackを必要としない直接API・unit・manifest確認は進んだが、Worker本番factory/CLI、実Worker watch、認可済みcontrol handler、Outbox sequence allocatorが未接続なので、実WorkerによるSDK turn・Sandbox command・STOP/drain経路はまだ検証できない。
+
+## 19. Slackなしの追加検証と移行実装（2026-10-15）
+
+前節のJava未導入による制約は、既存の公式cloud-sdk emulatorコンテナをlocalhostだけに公開して解消した。Firestore EmulatorのInbox/ownership/command/recovery/Outbox/Sandbox repositoryと追加の移行import統合試験は39件成功した。新しいcreate-only importはfull Sandbox record、SDK ID、owner、世代、Pod/PVC UIDを保ち、source version/hashとcutover/import-complete markerで途中再実行を照合する。同じsourceの再実行は既存データを変更せず、sourceや対象が変われば上書きを拒否する。停止宣言とdry-runをCLIに追加し、既存command IDのGETのみでrunning/finished/cancelled/unknownを分類する。結果不明のコマンドは再startせずorphaned/heldで扱う。切替前と入力受付後を区別した[移行・ロールバック手順](distributed-migration-runbook.md)を追加した。markerは受付を自動遮断するlockではなく、operatorが新旧Deploymentの停止・起動を管理する。
+
+Workerの継続検証で、watch通知が連続したときのlease更新飢餓、drain中のlease更新停止、undrain後に新規担当を再開できない問題を修正した。lease更新例外はActorを閉じ、停止未確認の所有権を成功として解放しない。assignment loopのキャンセル時にもActorを閉じ、全Actorのshutdownを同時に開始して25秒のprocess猶予を共有する。Heartbeat側の障害時に他のtaskを永久待ちしないようWorkerProcessRuntimeも修正した。継続watch、長いdrain、store障害、undrain、キャンセル、複数Actor同時終了をfakeで確認した。本番Worker factoryの未実装は残っている。
+
+実SDK、interrupt後の次turn、Agent Platform履歴の再接続・tool途中からの復元、Sessions/管理state、Gemini、Model Armorは実サービスで12件成功（160.13秒）。Slackへの接続・投稿は行っていない。SDK試験のSandboxはLocalProcessRuntimeであり、本番Worker→GKEを通す統合受け入れとは区別する。
+
+GKE直接API試験でSandboxのReady後にもfile/command通信が失敗することを検出した。Sandbox ServiceのNetworkPolicyに、`session-sandboxes`のmanagedラベルを持つPod宛てのTCP8080/8081 Egressだけを追加した。Sandbox自身のEgressは変更していない。不正な絶対/上位/予約パスはバックエンド操作前に400で拒否するようにした。最初の失敗は検証入力に絶対パスを使っていた点とEgress不足の両方による。
+
+実trackerの取消応答はHTTP202のplain-text bodyであり、JSON解析の失敗がServiceでunknownに変わっていた。制御系のcancel/stdin/signal/TTY変更では成功応答のbodyを解析しないよう修正し、実応答と同じHTTPAccepted/NoContentで回帰テストを追加した。Serviceが毎回生成するfile/command HTTP clientを成功時・例外時とも閉じる修正も加えた。CLIの構造化formatterはrequest ID/status/route/duration/error_typeを明示allowlistで出力し、任意のextraや例外reprは出力しない。役割全体の指標配線は未完了のため12.6は未完了のままとする。
+
+Terraformは`terraform plan -var-file=terraform.tfvars.example`で差分なし（作成/変更/削除0）。不要なapplyやGKE state変更はしていない。Sandbox Serviceの新イメージとNetworkPolicyはserver dry-run後にGKEへapplyした。実Slack、2つの本番Worker Pod、SDK→GKE全経路、実process SIGKILL、実負荷測定は未実施であり、14.7/14.8は完了扱いにしない。
+
+最終GKE試験は2026-10-15 00:33:57〜00:35:04 JST（UTCは前日15:33:57〜15:35:04）、`gke_nnyn-dev_us-central1-a_silk-agent-gke` / Firestore `nnyn-dev/silk-agent` で1件成功（pytest全体67.54秒）。配置imageは `us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:4ae78f88350bb7e34f2834d1720197ce6f1691884b05f239d1d1206bd5213e0f`。command `validation-command-b48831b0b06c4c57b5a7a4b929e0e03b` は同じIDで二度受付後も出力が`once`一行だけで、ownership epoch 1→2の交代直後もrunning、その後generation 1のままexit 0。旧epochのstartは409。Monitor 2つのclaim合計は1、completion inputは1件。別command `validation-cancel-b48831b0b06c4c57b5a7a4b929e0e03b` はcancel_requested後、trackerがcancelledを返した。ファイルwrite/readも成功。これは検証processが直接登録したWorker recordとownership APIによる交代であり、実Worker PodやSDKのdrainを試したものではない。[機械可読の実行結果](gke-session-sandbox/validation/distributed-service-20261015.json)を保存した。後始末後、`session-sandboxes` にSandbox/Pod/PVCが残らないことを確認した。検証専用emulatorコンテナも停止済み。
+
+通常試験は747件成功・53件を既定markerで除外、Ruff check/format、pyrefly、OpenSpec strict validation、git diff checkは成功。Terraform fmt/validateとdistributed kustomizeも成功。実Slackは未実施のまま、OpenSpecは78/84。未完了は12.1（Worker/Control本番配線）、12.3（4役割配置）、12.6（全体指標/probe）、13.4（完成した本番配線に対応する総合runbook）、14.7（実2Workerを含む受け入れ・人のSlack検証）、14.8（実負荷測定）。13.2/13.3/13.5は実装とfixture/emulatorで確認して完了とし、実データの切替・移行は行っていない。
+
+## 20. 役割別の本番配線とSlack手前までの検証（2026-10-15）
+
+前節で未接続だった配線を追加した。実Slackへの接続・投稿、実Worker Podの起動、GCP/GKEへのapplyは行っていない。
+
+**Worker role。** `silk-agent worker run --config CONFIG`（`worker`は管理サブコマンドと並ぶため`run`を付けた。design.mdの`worker --config`と異なる）。`distributed/worker_role.py`の`WorkerActorFactory`が、割当ごとに独立した`ConversationOrchestrator`と`AgentSession`を持つ`DistributedConversationActor`を作る。Sandboxは`RemoteSandboxRuntime`で、所有権のepoch/世代/turn/origin_seqをactorの`identity()`から渡す。出力は`SanitizedOutboxSink`へ送り、sequenceは`FirestoreConversationStore.allocate_output_sequence`で採番する（世代をまたいで単調）。会話状態は`FirestoreSessionStateStore`で所有権付きの`commit_turn_state`に書く。Workerへ渡すSecretはなく、SDK履歴はAgent Platform Sessionsを使う。assignment watchは同期クライアントの`on_snapshot`（`worker_reservation_watch`）。
+
+**制御操作。** 認可済みのstop/resetは`WorkerControlHandler`が適用し、`controls`のdocumentを`handled`にする。stopは`DistributedStopCoordinator`（SDK中断と台帳のcommand cancelを並行）、resetはstop完了後に世代を進め、同じactorが新しい所有権を引き継ぐ（`DistributedWorker`が自分のreset後継だけを受け入れ、他のepoch差は従来どおり閉じる）。idle会話は`distributed.idle_close_seconds`の後にSDKを閉じてからreleaseし、容量を返す。drainは`DistributedConversationActor.drain`（期限までturnを待ち、期限後に中断。コマンドは継続）。
+
+**Control role。** 割当loopに加えて、(1)`ControlAuthorizer`によるstop/reset候補の認可（`control_policy.py`、通常入力と同じallow-list/guest/external方針）、(2)`OutboxSenderLoop`による会話単位のSlack配送（bot tokenのみ。進捗は`FirestoreProgressStateStore`でSender専有のフィールドに保存）、(3)`RecoveryLoop`による失効所有権の回復を動かす。回復は`quiesce_requests`のFirestore mailbox経由で旧incarnationに停止を要求し、同じプロセスがそのepochのSDKを閉じた証拠だけで解放する。応答がなければ`recovery_blocked`のまま。`silk-agent recovery list|confirm-stopped`で手動解除する（証拠文字列必須、期限未到来は拒否）。
+
+**観測。** 各役割は`:9090`に`/healthz`（loopのtick停止）、`/readyz`（各loopの初回完了、Gatewayはsocket接続）、`/metrics`を持つ。Sandbox Serviceは従来の`:8080`。指標は`distributed/metrics.py`（会話ID・本文をlabelにしない、series上限あり）。lease更新失敗、uncertain出力/入力、割当待ち数、稼働SDK数、受信→投入・stop・配送の遅延、メモリを出す。Firestore操作数はCloud Monitoringを使う。ログは明示許可したフィールドだけを出す。
+
+**配置。** `k8s/distributed/roles.yaml`に3 Deployment（Worker・Gateway・Control）、役割別KSA、NetworkPolicy、probe、resource limitを追加した。**3つとも`replicas: 0`**で、適用しても接続・SDK起動は起きない。WorkerはSandbox Serviceと別Pod、projected tokenとdownward APIのPod identityを使い、Secretを持たない。ControlはSlack bot tokenだけ、GatewayだけがSocket Modeのapp tokenを持つ。どのroleもPVC/SQLiteを使わない。Terraformに役割別のIAM（`silk-agent-worker`: aiplatform/modelarmor/datastore + bucket読取、`-gateway`/`-control`: datastore + 必要なSlack secretのみ）を追加した。`terraform plan`は10 add / 0 change / 0 destroy。**applyはしていない。**
+
+**検証。** `uv run pytest -q`は776件成功（55件はintegration/gke markerで除外）、`ruff check`、`ruff format --check`、`pyrefly check`、`git diff --check`、`openspec validate --strict`、`kubectl kustomize`（base/dev/platform/distributed）は成功。Firestore Emulator（localhostのみ公開した公式emulatorコンテナ）でinbox/repository/migrationに加えて新規の`test_worker_role_emulator.py`を含む41件成功。新規のemulator試験は、割当→fake SDKでturn完了→Outbox（sequence単調）→認可済みSTOPの適用とcontrol closure→RESET後に同じactorが世代2を引き継ぎ次の入力が完了、および、失効所有権が停止証拠なしでは`recovery_blocked`、証拠後に`waiting`へ戻ることを確認する。実Firestoreは今回は使っていない。
+
+**未実施・既知の限界。** 実Slack、実Worker Pod 2台、実SDK→GKE Sandboxを通した全経路、実processのSIGKILL、実負荷測定（OpenSpec 14.7 / 14.8）。イメージは再ビルド・再pushしておらず、`k8s/distributed/kustomization.yaml`のdigestは役割追加前のまま（有効化前に更新が必要）。output originは「その会話で最後に渡した入力」で近似している。assignment watchは実Firestoreで通しては確認しておらず、actorの入力/制御の読取は1秒周期のpollingである。

@@ -104,20 +104,20 @@
 
 ## 12. 起動配線とデプロイ設定（11完了後、D1/D11）
 
-- [ ] 12.1 `cli.py` / `app.py` を役割別factoryへ分け、gateway/worker/control/sandbox-serviceコマンドを追加する。不要な役割のcredentialやSDKを初期化しない。検証: `tests/test_cli.py` と役割別起動fakeで生成依存を確認する。
+- [x] 12.1 `cli.py` / `app.py` を役割別factoryへ分け、gateway/worker/control/sandbox-serviceコマンドを追加する。不要な役割のcredentialやSDKを初期化しない。検証: `tests/test_cli.py` と役割別起動fakeで生成依存を確認する。 実装済み: `gateway` / `control` / `worker run`（`worker` は管理サブコマンドと並ぶため `run` を付けた。design の `worker --config` からの変更）/ `sandbox-service`。Workerは`worker_role.py`、ControlはallocatorにControlAuthorizer・OutboxSenderLoop・RecoveryLoopを加え、役割ごとにSlack資格情報を限定する（Workerは不要、Controlはbot tokenのみ）。`tests/test_cli.py`、`tests/test_worker_runtime.py`、`tests/integration/test_worker_role_emulator.py`（Firestore Emulator + fake SDK/Sandbox）で割当→turn→Outbox→STOP→RESET→回復を確認。
 - [x] 12.2 in-process slack/Streamlit経路を既存adapterで維持し、分散データとの混在をconfigで拒否する。検証: `tests/test_streamlit_channel.py`、`test_slack_bot.py`、ローカルruntimeの回帰が通る。
-- [ ] 12.3 `k8s/base/` とoverlayに4役割のDeployment、Sandbox Service、KSA/RBAC、NetworkPolicy、probe、resource limitを追加する。WorkerとSandboxを別Podにし、Sandboxの既存Egressを維持する。検証: kustomize出力にSQLite volumeがなく、WorkerへSlack secretが配布されない。
+- [x] 12.3 `k8s/base/` とoverlayに4役割のDeployment、Sandbox Service、KSA/RBAC、NetworkPolicy、probe、resource limitを追加する。WorkerとSandboxを別Podにし、Sandboxの既存Egressを維持する。検証: kustomize出力にSQLite volumeがなく、WorkerへSlack secretが配布されない。 `k8s/distributed/roles.yaml` にGateway/Worker/Controlの3 Deployment、KSA、NetworkPolicy、probe、resource limitを追加（Sandbox Serviceは既存）。3つとも `replicas: 0`。`tests/test_distributed_manifest.py` と `kubectl kustomize` で、SQLite/PVCが無いこと、WorkerにSlack Secretが渡らないこと、Controlはbot tokenだけであること、Worker KSAがSandbox Serviceの許可/ingressと一致することを確認。実クラスタへのapplyは未実施（Terraformの役割別IAMも `plan` のみで10 add / 0 change / 0 destroy）。
 - [x] 12.4 `terraform/` にFirestoreのcreate/use-existing/import設定、API有効化、index、役割別IAMを追加する。GKE独立stateと既存DBを破壊しない。検証: terraform fmt/validateとレビュー用planで意図しないreplace/deleteがないことを記録する。
 - [x] 12.5 `config/silk-agent.example.yaml`、`k8s/overlays/dev/config/`、`usecases/template/`、`usecases/bigquery-analysis/` の起動・設定例を更新する。環境fingerprint用secretを維持する。検証: config/example/usecase設定をPydanticで読み込み、distributedと各usecaseのkustomize buildが通る。
-- [ ] 12.6 request IDと状態を含む構造化ログ、design D11の指標、liveness/readinessを実装する。会話IDをmetric labelにせず秘密情報を出さない。検証: failpointでlease失敗/uncertain/待機数が観測でき、ログに本文・tokenが含まれない。
+- [x] 12.6 request IDと状態を含む構造化ログ、design D11の指標、liveness/readinessを実装する。会話IDをmetric labelにせず秘密情報を出さない。検証: failpointでlease失敗/uncertain/待機数が観測でき、ログに本文・tokenが含まれない。 `distributed/metrics.py`・`health.py`・`logging.py`。各役割の `:9090` に `/healthz`（loop停止）、`/readyz`、`/metrics`。lease更新失敗・uncertain・割当待ち・稼働SDK・受信→投入/stop/配送の遅延・メモリを会話IDなしで出力。`tests/test_distributed_health.py` が各failpointの観測、label数上限、ログに本文/tokenが出ないことを確認。Firestore操作数はCloud Monitoringの指標を使う（アプリ内では数えない）。
 
 ## 13. 移行ツールと運用文書（12完了後）
 
-- [ ] 13.1 `distributed/migration.py` にSQLite/旧管理Sessionsのread-only exportとdry-run照合を実装する。件数、会話キー、SDK ID、owner、Sandbox世代、Pod/PVC UIDを出力する。検証: fixtureで欠落・重複・generation不一致を検出し、dry-runで書込みが0件となる。
-- [ ] 13.2 停止した旧系からFirestoreへのimportを実装する。source hash/versionで冪等にし、不一致を上書きせず止める。検証: 途中失敗後の再実行で二重記録がなく、完了済みデータを変更しない。
-- [ ] 13.3 進行中コマンドを同じIDで照合する移行処理を実装する。旧Bot停止時のcancel挙動を考慮し、無停止移行とは説明しない。検証: running/finished/unknown fixtureで再startがなく、引継ぎ分類が正しい。
-- [ ] 13.4 `docs/distribution-plan.md` とrunbookに構築、切替、増設、全Worker drain、縮退、recovery_blocked解除、uncertain調査を記載する。検証: コマンドの引数・resource名が実装と一致し、旧系/新系を同時起動する手順がない。
-- [ ] 13.5 rollback手順を切替前と入力受付後に分ける。後者では古いsnapshotへ即復帰せず、最新状態の保全と整合を必要とする。管理PVCは移行成功後まで削除しない。検証: fixtureでsource保全と切替markerを確認し、READMEの既知制限を更新する。
+- [x] 13.1 `distributed/migration.py` にSQLite/旧管理Sessionsのread-only exportとdry-run照合を実装する。件数、会話キー、SDK ID、owner、Sandbox世代、Pod/PVC UIDを出力する。検証: fixtureで欠落・重複・generation不一致を検出し、dry-runで書込みが0件となる。
+- [x] 13.2 停止した旧系からFirestoreへのimportを実装する。source hash/versionで冪等にし、不一致を上書きせず止める。検証: 途中失敗後の再実行で二重記録がなく、完了済みデータを変更しない。`test_migration_import.py` とemulatorでsource hash衝突拒否、dry-run書込み0、UID/世代を復元できることを確認。
+- [x] 13.3 進行中コマンドを同じIDで照合する移行処理を実装する。旧Bot停止時のcancel挙動を考慮し、無停止移行とは説明しない。検証: running/finished/cancelled/unknown/照会例外のfixtureで再startがなく、引継ぎ分類が正しい。`migration reconcile-commands` は既存tracker IDへのGETだけを行う。
+- [x] 13.4 `docs/distribution-plan.md` とrunbookに構築、切替、増設、全Worker drain、縮退、recovery_blocked解除、uncertain調査を記載する。検証: コマンドの引数・resource名が実装と一致し、旧系/新系を同時起動する手順がない。 `docs/distributed-operations-runbook.md` に構築・起動順序・増設・全Worker drain・縮退・recovery_blocked解除・uncertain調査・観測・既知の制限を記載し、`distribution-plan.md` §20 に実装との対応を追記。`tests/test_distributed_runbook.py` が全 `silk-agent` コマンドを実CLIで解析し、`deployment/...` 名をmanifestと照合し、旧系/新系を同時起動する手順が無いことを確認。
+- [x] 13.5 rollback手順を切替前と入力受付後に分ける。後者では古いsnapshotへ即復帰せず、最新状態の保全と整合を必要とする。管理PVCは移行成功後まで削除しない。検証: fixtureでsource保全と切替markerを確認し、READMEの既知制限を更新した。`docs/distributed-migration-runbook.md` に入力受付前/後と自動逆移行未提供の境界を記録。
 
 ## 14. 統合・障害試験とリリース条件（全実装後）
 

@@ -128,6 +128,31 @@ class FirestoreOutboxWriter:
 class FirestoreOutboxStore(FirestoreOutboxWriter):
     """Conversation-ordered output claims for independent Slack Sender processes."""
 
+    async def list_conversations_with_pending(self, *, limit: int = 100) -> tuple[str, ...]:
+        """Bounded page of conversations that have output waiting for a Sender."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        query = (
+            self.client.collection(f"{self.collection_prefix}_outbox")
+            .where(
+                filter=FieldFilter(
+                    "status",
+                    "in",
+                    [OutputDeliveryState.PENDING.value, OutputDeliveryState.DISPATCHING.value],
+                )
+            )
+            .limit(limit)
+        )
+        try:
+            keys: dict[str, None] = {}
+            async for snapshot in query.stream():
+                key = (snapshot.to_dict() or {}).get("conversation_key")
+                if isinstance(key, str) and key:
+                    keys[key] = None
+            return tuple(keys)
+        except Exception as exc:
+            raise convert_firestore_error("list_outbox_conversations", exc) from None
+
     async def claim_next(
         self,
         *,

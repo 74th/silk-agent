@@ -59,7 +59,7 @@ flowchart TB
     API --> GCS[(Large output storage)]
 ```
 
-同一イメージから `silk-agent gateway|worker|control|sandbox-service --config ...` を起動する。既存 `silk-agent slack` と Streamlit はローカル/in-process 開発経路として残すが、分散配置と同じ会話データへ同時接続させない。初期 replicas は役割ごとに1、Worker は2台で受け入れ確認する。Control 内の役割は別 task、Sandbox Service 内の監視も API のリクエスト寿命から独立する。
+同一イメージから `silk-agent gateway|worker run|control|sandbox-service --config ...` を起動する（`worker` は既存の管理サブコマンド `status|drain|undrain` と並ぶため、Worker の起動は `worker run`）。既存 `silk-agent slack` と Streamlit はローカル/in-process 開発経路として残すが、分散配置と同じ会話データへ同時接続させない。初期 replicas は役割ごとに1、Worker は2台で受け入れ確認する。Control 内の役割は別 task、Sandbox Service 内の監視も API のリクエスト寿命から独立する。
 
 GKE と同リージョンの Firestore Native mode Standard edition を使う。常時稼働する DB を追加しないため Cloud SQL/Redis は初期案から外した。Firestore watch と再照会で配送し、Pub/Sub の二重永続化問題を増やさない。参考料金と公式ソースは distribution-plan.md に集約する。
 

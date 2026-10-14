@@ -17,6 +17,8 @@ from silk_agent.distributed.gateway import (
     SlackEventNormalizer,
     SlackSocketGateway,
 )
+from silk_agent.distributed.health import RoleHealth, process_memory_collector, serve_health
+from silk_agent.distributed.metrics import METRICS
 from silk_agent.slack_app import load_tokens
 from silk_agent.stores.firestore.client import create_firestore_client
 from silk_agent.stores.firestore.conversations import FirestoreConversationStore
@@ -97,21 +99,32 @@ async def run_gateway(config: Config) -> None:
                 loop.add_signal_handler(sig, stop.set)
             except NotImplementedError:  # pragma: no cover - non-unix
                 pass
-        enrichment_task = asyncio.create_task(enricher.run_forever(stop))
+        health = RoleHealth("gateway")
+        METRICS.add_collector(process_memory_collector)
+        health.set_ready("socket", False)
+        enrichment_task = asyncio.create_task(
+            enricher.run_forever(stop, on_tick=health.loop("enrichment", 120))
+        )
+        health_task = asyncio.create_task(
+            serve_health(health, config.distributed.health_port, stop)
+        )
         try:
             await socket.connect()
+            health.set_ready("socket", True)
             log.info(
                 "distributed Slack Gateway connected",
                 extra={"workspace_team": workspace_team},
             )
             await stop.wait()
         finally:
+            health.set_ready("socket", False)
             gateway.stop_accepting()
             await socket.close()
             await gateway.aclose()
             stop.set()
             enrichment_task.cancel()
-            await asyncio.gather(enrichment_task, return_exceptions=True)
+            health_task.cancel()
+            await asyncio.gather(enrichment_task, health_task, return_exceptions=True)
     finally:
         await http_session.close()
         database.close()

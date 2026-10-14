@@ -771,6 +771,68 @@ class FirestoreInboxStore:
         except Exception as exc:
             raise convert_firestore_error("list_pending_controls", exc) from None
 
+    async def list_authorized_controls(
+        self, conversation_key: str, *, limit: int = 100
+    ) -> tuple[Mapping[str, Any], ...]:
+        """Authorized controls of one conversation that its owner has not handled yet."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        query = (
+            self._collection("conversations")
+            .document(self._conversation_id(conversation_key))
+            .collection("controls")
+            .where(filter=FieldFilter("authorization_state", "==", "authorized"))
+            .limit(limit)
+        )
+        try:
+            records = [snapshot.to_dict() or {} async for snapshot in query.stream()]
+        except Exception as exc:
+            raise convert_firestore_error("list_authorized_controls", exc) from None
+        return tuple(sorted(records, key=lambda item: item.get("seq", 0)))
+
+    async def mark_control_handled(
+        self, *, conversation_key: str, input_id: str, owner: OwnershipToken, now: datetime
+    ) -> bool:
+        """Close an authorized control once its stop/reset effect is complete."""
+        _validate_time(now, "now")
+        conversation_ref = self._collection("conversations").document(
+            self._conversation_id(conversation_key)
+        )
+        owner_ref = self._collection("ownership").document(self._conversation_id(conversation_key))
+        control_ref = self._control_ref(conversation_key, input_id)
+        queue_ref = self._control_queue_ref(conversation_key, input_id)
+        transaction = self.client.transaction()
+
+        @async_transactional
+        async def handled(transaction: firestore.AsyncTransaction) -> bool:
+            owner_snapshot = await owner_ref.get(transaction=transaction)
+            conversation_snapshot = await conversation_ref.get(transaction=transaction)
+            control_snapshot = await control_ref.get(transaction=transaction)
+            queue_snapshot = await queue_ref.get(transaction=transaction)
+            if not (owner_snapshot.exists and conversation_snapshot.exists):
+                return False
+            if (
+                not control_snapshot.exists
+                or (control_snapshot.to_dict() or {}).get("authorization_state") != "authorized"
+            ):
+                return False
+            if not ownership_matches(
+                owner_snapshot.to_dict() or {},
+                conversation_snapshot.to_dict() or {},
+                owner,
+                now=now,
+            ):
+                return False
+            transaction.update(control_ref, {"authorization_state": "handled", "handled_at": now})
+            if queue_snapshot.exists:
+                transaction.update(queue_ref, {"authorization_state": "handled"})
+            return True
+
+        try:
+            return await handled(transaction)
+        except Exception as exc:
+            raise convert_firestore_error("mark_control_handled", exc) from None
+
     async def resolve_control_authorization(
         self,
         *,

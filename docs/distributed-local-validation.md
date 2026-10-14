@@ -3,6 +3,7 @@
 These checks run without Slack credentials, a live SDK, a GKE cluster, or production
 Firestore. The Firestore tests pass an explicit emulator host to the client factory;
 they do not infer an emulator endpoint from ambient ADC settings.
+The emulator requires a Java 8+ JRE on `PATH`.
 
 ## Start the local Firestore emulator
 
@@ -10,10 +11,9 @@ In terminal 1:
 
 ```sh
 gcloud emulators firestore start \
-  --host=127.0.0.1 \
-  --port=8787 \
+  --host-port=127.0.0.1:8787 \
   --database-mode=firestore-native \
-  --database-edition=standard
+  --edition=standard
 ```
 
 Leave it running while the tests execute. Stop it with Ctrl+C afterward.
@@ -128,3 +128,95 @@ stops while the sandbox preparation callback is blocked and verifies no engine q
 starts afterward. These tests do not use a live SDK, Sandbox command execution, or
 real Socket Mode transport. STOP during a live Sandbox ensure and reset against a live
 SDK turn remain open, along with drain and process-kill scenarios in OpenSpec task 14.5.
+
+## Emulator without a host Java installation
+
+The following Docker command was used successfully on 2026-10-15. It binds only to
+localhost and keeps emulator state separate from ADC/production Firestore:
+
+```sh
+docker run --rm -d --name silk-distributed-firestore-validation \
+  -p 127.0.0.1:8787:8787 \
+  gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
+  gcloud emulators firestore start --host-port=0.0.0.0:8787 \
+  --database-mode=firestore-native --edition=standard
+
+SILK_AGENT_FIRESTORE_EMULATOR_HOST=127.0.0.1:8787 uv run pytest -q -m integration \
+  tests/integration/test_firestore_inbox_emulator.py \
+  tests/integration/test_firestore_repository_emulator.py \
+  tests/integration/test_migration_import_emulator.py
+
+docker stop silk-distributed-firestore-validation
+```
+
+This suite now includes create-only migration import, repeated import without
+updates, source conflicts, and decoding the imported Sandbox with its generation
+and resource UIDs preserved. Partial-failure recovery, zero-write dry-run and
+command-ID classification are also covered by `tests/test_migration_import.py`.
+See [the migration runbook](distributed-migration-runbook.md).
+
+## Explicit GKE Sandbox Service acceptance without Slack
+
+This test uses production APIs in the explicitly named development cluster and
+creates a temporary gVisor Sandbox and workspace PVC. It calls real Firestore and
+the deployed Service API with a short-lived projected Worker token. It uses no
+Slack token and starts no Slack connection or post. It registers a validation
+Worker record and manipulates ownership directly; it does not start a Worker Pod
+or exercise a live SDK through a production role factory.
+
+```sh
+SILK_AGENT_GKE_CONTEXT=gke_nnyn-dev_us-central1-a_silk-agent-gke \
+SILK_AGENT_GKE_REPORT=/tmp/silk-distributed-service-report.json \
+uv run pytest -q -m gke tests/gke/test_distributed_service_live.py
+```
+
+It verifies relative-path file write/read, one execution for duplicate command
+IDs, background execution through ownership release/reacquisition, rejection of
+the old epoch, output retrieval, competing Monitor claims and one completion
+input, and explicit cancellation through to the tracker's final cancelled state.
+Monitor discovery is scoped to the test's command ID so other conversations are
+not polled. Cleanup terminates only that random conversation's Sandbox and removes
+its owned workspace PVCs and test Firestore records. The JSON report contains
+identifiers, timestamps and outcomes, without credentials or transcript content.
+
+The service's Egress policy must allow REST/tracker ports 8080/8081 only toward
+managed Sandbox Pods in `session-sandboxes`. Its previous HTTPS-only policy let
+creation reach Ready while blocking file/command traffic. This test exposed and
+verified the correction. Sandbox egress policy remains unchanged.
+
+The real SDK, interrupt/next-turn behavior, Agent Platform history restoration,
+Gemini and Model Armor can also be verified without Slack:
+
+```sh
+SILK_AGENT_TEST_RUNTIME=projects/nnyn-dev/locations/us-central1/reasoningEngines/868017700884971520 \
+SILK_AGENT_TEST_TEMPLATE=projects/nnyn-dev/locations/us-central1/templates/silk-agent-test \
+uv run pytest -q -m integration \
+  tests/integration/test_claude_live.py \
+  tests/integration/test_resume_live.py \
+  tests/integration/test_session_store_live.py \
+  tests/integration/test_state_live.py \
+  tests/integration/test_guards_live.py
+```
+
+These SDK tests use a local process Sandbox. Passing them and the GKE API test
+separately does not establish end-to-end SDK-to-GKE behavior through production
+Worker/Control roles. Real Slack acceptance remains a separate human activity.
+
+## Worker/Control role composition (2026-10-15)
+
+`tests/integration/test_worker_role_emulator.py` composes the production `WorkerActorFactory`,
+`DistributedWorker` and Control's allocation/recovery loops against the Firestore Emulator,
+with a fake SDK engine and in-memory Sandbox. It checks: allocation, turn completion and a
+monotonic Outbox sequence, an authorized STOP applied and closed by the Worker, a RESET after
+which the same actor keeps the assignment at generation 2 and serves the next input, and an
+expired ownership that stays `recovery_blocked` until the old incarnation answers a quiesce
+request with SDK-closed evidence. The emulator can run from the official image bound to
+localhost only:
+
+```sh
+docker run -d --rm --name silk-firestore-emu -p 127.0.0.1:8787:8787 \
+  gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators \
+  gcloud emulators firestore start --host-port=0.0.0.0:8787 --database-mode=firestore-native
+SILK_AGENT_FIRESTORE_EMULATOR_HOST=127.0.0.1:8787 uv run pytest -q -m integration \
+  tests/integration/test_worker_role_emulator.py
+```

@@ -360,6 +360,68 @@ resource "google_project_iam_member" "gke_sandbox_service_firestore" {
   member  = "principal://iam.googleapis.com/projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/session-sandbox-system/sa/silk-agent-sandbox-service"
 }
 
+# Role-specific GKE identities for the distributed deployment (k8s/distributed/roles.yaml).
+# Each KSA gets only what its role needs: the Worker has no Slack secret, Control has no Slack
+# app token, and only the Sandbox Service (above) manages Sandbox resources.
+locals {
+  gke_principal_prefix = "principal://iam.googleapis.com/projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/session-sandbox-system/sa"
+  gke_role_project_roles = {
+    # Claude / Gemini / Sessions, Model Armor, and Firestore state.
+    worker  = ["roles/aiplatform.user", "roles/modelarmor.user", "roles/datastore.user"]
+    gateway = ["roles/datastore.user"]
+    control = ["roles/datastore.user"]
+  }
+  gke_role_project_bindings = merge([
+    for role, roles in local.gke_role_project_roles : {
+      for item in roles : "${role}/${item}" => {
+        member = "${local.gke_principal_prefix}/silk-agent-${role}"
+        role   = item
+      }
+    }
+  ]...)
+  # Secret IDs by name so a role never receives a token it does not use.
+  gke_role_slack_secrets = {
+    gateway = ["silk-agent-slack-bot-token", "silk-agent-slack-app-token"]
+    control = ["silk-agent-slack-bot-token"]
+  }
+  gke_role_slack_bindings = merge([
+    for role, secrets in local.gke_role_slack_secrets : {
+      for secret in secrets : "${role}/${secret}" => {
+        member = "${local.gke_principal_prefix}/silk-agent-${role}"
+        secret = secret
+      }
+    }
+  ]...)
+}
+
+resource "google_project_iam_member" "gke_role" {
+  for_each = local.gke_role_project_bindings
+  project  = var.project_id
+  role     = each.value.role
+  member   = each.value.member
+}
+
+resource "google_secret_manager_secret_iam_member" "gke_role_slack" {
+  for_each  = { for key, item in local.gke_role_slack_bindings : key => item if contains(var.slack_secret_ids, item.secret) }
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.slack[each.value.secret].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = each.value.member
+}
+
+# The Worker reads archived command output (the Sandbox Service writes it) and Skills.
+resource "google_storage_bucket_iam_member" "gke_worker_output_reader" {
+  bucket = google_storage_bucket.command_output.name
+  role   = "roles/storage.objectViewer"
+  member = "${local.gke_principal_prefix}/silk-agent-worker"
+}
+
+resource "google_storage_bucket_iam_member" "gke_worker_skills_reader" {
+  bucket = google_storage_bucket.skills.name
+  role   = "roles/storage.objectViewer"
+  member = "${local.gke_principal_prefix}/silk-agent-worker"
+}
+
 resource "google_storage_bucket_iam_member" "skills_reader" {
   bucket = google_storage_bucket.skills.name
   role   = "roles/storage.objectViewer"

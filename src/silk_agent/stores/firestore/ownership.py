@@ -58,6 +58,32 @@ class FirestoreOwnershipStore:
         except Exception as exc:
             raise convert_firestore_error("get_ownership", exc) from None
 
+    async def list_expired(
+        self, *, before: datetime, limit: int = 100
+    ) -> tuple[OwnershipToken, ...]:
+        """Ownerships whose lease ended before ``before`` and that are not yet released.
+
+        Includes ``recovering`` ones so blocked recoveries are retried by Control.
+        """
+        _validate_utc(before, "before")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        # Live phases only (bounded by Worker capacity); released documents are never scanned.
+        query = self._collection("ownership").where(
+            filter=FieldFilter("phase", "in", ["assigned", "active", "recovering"])
+        )
+        try:
+            tokens = []
+            async for snapshot in query.stream():
+                token = decode_record(snapshot.to_dict() or {}, OwnershipToken)
+                if token.expires_at < before:
+                    tokens.append(token)
+                    if len(tokens) >= limit:
+                        break
+            return tuple(tokens)
+        except Exception as exc:
+            raise convert_firestore_error("list_expired_ownership", exc) from None
+
     async def list_for_worker(
         self, *, worker_id: str, worker_incarnation: str
     ) -> tuple[OwnershipToken, ...]:

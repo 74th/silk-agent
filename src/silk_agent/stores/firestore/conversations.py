@@ -8,6 +8,7 @@ from typing import Any
 
 from google.cloud import firestore
 from google.cloud.firestore_v1.async_transaction import async_transactional
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from silk_agent.core.distributed_models import OwnershipToken
 from silk_agent.core.distributed_ports import ConversationStore
@@ -24,6 +25,8 @@ _PATCH_FIELDS = frozenset(
         "progress_ref",
         "progress_snapshot",
         "history_uncertain",
+        "running_command_ids",
+        "bot_instance_id",
     }
 )
 _TURN_STATUSES = frozenset(
@@ -53,6 +56,26 @@ class FirestoreConversationStore:
             return snapshot.to_dict() if snapshot.exists else None
         except Exception as exc:
             raise convert_firestore_error("get_conversation", exc) from None
+
+    async def list_waiting(self, *, limit: int = 100) -> tuple[str, ...]:
+        """Return a bounded page of conversation keys awaiting Worker allocation."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        try:
+            query = (
+                self._collection("conversations")
+                .where(filter=FieldFilter("allocation_state", "==", "waiting"))
+                .limit(limit)
+            )
+            keys = []
+            async for snapshot in query.stream():
+                data = snapshot.to_dict() or {}
+                key = data.get("conversation_key")
+                if isinstance(key, str) and key:
+                    keys.append(key)
+            return tuple(keys)
+        except Exception as exc:
+            raise convert_firestore_error("list_waiting_conversations", exc) from None
 
     async def load_guard_history(self, conversation_key: str) -> tuple[str, ...]:
         conversation = await self.get_conversation(conversation_key)
@@ -148,6 +171,49 @@ class FirestoreConversationStore:
             return await update(transaction)
         except Exception as exc:
             raise convert_firestore_error("commit_turn_state", exc) from None
+
+    async def allocate_output_sequence(self, conversation_key: str) -> int:
+        """Reserve the next per-conversation Outbox sequence; never reset with generation."""
+        conversation_ref = self._collection("conversations").document(
+            self._conversation_id(conversation_key)
+        )
+        transaction = self.client.transaction()
+
+        @async_transactional
+        async def allocate(transaction: firestore.AsyncTransaction) -> int:
+            snapshot = await conversation_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise ValueError("conversation does not exist")
+            current = (snapshot.to_dict() or {}).get("next_output_seq", 1)
+            if not isinstance(current, int) or isinstance(current, bool) or current < 1:
+                raise ValueError("conversation next_output_seq is invalid")
+            transaction.update(conversation_ref, {"next_output_seq": current + 1})
+            return current
+
+        try:
+            return await allocate(transaction)
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise convert_firestore_error("allocate_output_sequence", exc) from None
+
+    async def update_progress(
+        self,
+        conversation_key: str,
+        *,
+        progress_ref: Mapping[str, Any],
+        progress_snapshot: Mapping[str, Any],
+    ) -> None:
+        """Sender-owned progress fields; they do not bump the owner's state version."""
+        patch = {"progress_ref": dict(progress_ref), "progress_snapshot": dict(progress_snapshot)}
+        _validate_patch(patch)
+        conversation_ref = self._collection("conversations").document(
+            self._conversation_id(conversation_key)
+        )
+        try:
+            await conversation_ref.update(patch)
+        except Exception as exc:
+            raise convert_firestore_error("update_progress", exc) from None
 
     async def begin_reset(self, *, owner: OwnershipToken, reset_seq: int) -> bool:
         if reset_seq < 1:
@@ -310,6 +376,17 @@ def _validate_patch(patch: Mapping[str, Any]) -> None:
         raise ValueError("progress_snapshot must be a mapping")
     if "history_uncertain" in patch and not isinstance(patch["history_uncertain"], bool):
         raise ValueError("history_uncertain must be a bool")
+    if "running_command_ids" in patch and (
+        not isinstance(patch["running_command_ids"], list)
+        or not all(isinstance(item, str) for item in patch["running_command_ids"])
+    ):
+        raise ValueError("running_command_ids must be a list of strings")
+    if (
+        "bot_instance_id" in patch
+        and patch["bot_instance_id"] is not None
+        and not isinstance(patch["bot_instance_id"], str)
+    ):
+        raise ValueError("bot_instance_id must be a string or None")
 
 
 def conversation_store(

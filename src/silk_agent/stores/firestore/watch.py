@@ -38,6 +38,22 @@ def firestore_watch_factory(query: SnapshotQuery) -> WatchFactory:
     return subscribe
 
 
+def worker_reservation_watch(
+    client, *, collection_prefix: str, worker_id: str, incarnation: str
+) -> WatchFactory:
+    """Wake a Worker when its incarnation's reservation set changes (sync client)."""
+    from silk_agent.stores.firestore.ids import document_id
+
+    reservations = (
+        client.collection(f"{collection_prefix}_workers")
+        .document(document_id(worker_id, prefix="worker"))
+        .collection("incarnations")
+        .document(document_id(incarnation, prefix="incarnation"))
+        .collection("reservations")
+    )
+    return firestore_watch_factory(reservations)
+
+
 class FirestoreWatchAdapter[T]:
     """Re-query durable work on watch signals and after every reconnection.
 

@@ -616,6 +616,20 @@ class AgentSessionRegistry:
     def sessions(self) -> list[AgentSession]:
         return list(self._sessions.values())
 
+    def set_input_tracking_callbacks(
+        self,
+        *,
+        completed: InputCompletion | None,
+        started: InputStart | None,
+        uncertain: InputUncertain | None,
+    ) -> None:
+        """Install durable input callbacks before creating any conversation session."""
+        if self._sessions:
+            raise RuntimeError("input tracking callbacks must be set before sessions are created")
+        self._input_completed = completed
+        self._input_started = started
+        self._input_uncertain = uncertain
+
     async def shutdown(self, grace_seconds: float | None = None) -> None:
         await asyncio.gather(*(s.shutdown(grace_seconds) for s in self.sessions()))
 

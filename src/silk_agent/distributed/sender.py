@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from silk_agent.core.distributed_models import OutputDeliveryState
 from silk_agent.core.distributed_ports import OutboxStore
 from silk_agent.core.ports import Clock
+from silk_agent.distributed.metrics import METRICS
 
 SlackDelivery = Callable[[Mapping[str, Any]], Awaitable[Mapping[str, str] | None]]
 
@@ -61,6 +62,7 @@ class OutboxSender:
         except Exception as exc:
             retry_after = _retry_after(exc)
             if retry_after is not None:
+                METRICS.inc("outputs_total", result="retry")
                 now = self._clock.now()
                 await self._outbox.mark_delivery(
                     output_id=output_id,
@@ -71,6 +73,7 @@ class OutboxSender:
                     updated_at=now,
                 )
                 return True
+            METRICS.inc("outputs_total", result="uncertain")
             await self._outbox.mark_delivery(
                 output_id=output_id,
                 expected=OutputDeliveryState.DISPATCHING,
@@ -79,6 +82,18 @@ class OutboxSender:
                 updated_at=self._clock.now(),
             )
             return True
+        METRICS.inc("outputs_total", result="delivered")
+        created = record.get("created_at")
+        if isinstance(created, str):
+            try:
+                created = datetime.fromisoformat(created)
+            except ValueError:
+                created = None
+        if isinstance(created, datetime) and created.tzinfo is not None:
+            METRICS.observe(
+                "output_delivery_latency_seconds",
+                max(0.0, (self._clock.now() - created).total_seconds()),
+            )
         await self._outbox.mark_delivery(
             output_id=output_id,
             expected=OutputDeliveryState.DISPATCHING,

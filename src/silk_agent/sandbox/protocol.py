@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
 from typing import Literal
 
-from pydantic import Field, StrictInt, StrictStr
+from pydantic import Field, StrictInt, StrictStr, field_validator
 
 from gke_session_sandbox.types import StrictModel
 
@@ -75,12 +76,22 @@ class CommandControlResponse(StrictModel):
 class FileReadRequest(CommandIdentity):
     path: StrictStr = Field(min_length=1)
 
+    @field_validator("path")
+    @classmethod
+    def validate_workspace_path(cls, value: str) -> str:
+        if not value or "\x00" in value or value.startswith("/"):
+            raise ValueError("workspace path must be relative")
+        parts = PurePosixPath(value).parts
+        if ".." in parts or (parts and parts[0] == ".session-runtime"):
+            raise ValueError("workspace path is outside the public workspace")
+        return value
+
 
 class FileWriteRequest(FileReadRequest):
     data_base64: StrictStr
 
 
-class FileListRequest(CommandIdentity):
+class FileListRequest(FileReadRequest):
     path: StrictStr = "."
 
 

@@ -7,6 +7,25 @@ import pytest
 from silk_agent.cli import CONFIG_ENV, build_parser, main
 
 
+def test_migration_export_parser_requires_database_and_supports_target_snapshot():
+    args = build_parser().parse_args(
+        [
+            "migration",
+            "export",
+            "--config",
+            "config.yaml",
+            "--sqlite-db",
+            "sessions.sqlite3",
+            "--target-snapshot",
+            "target.json",
+        ]
+    )
+    assert args.command == "migration"
+    assert args.migration_action == "export"
+    assert args.sqlite_db == "sessions.sqlite3"
+    assert args.target_snapshot == "target.json"
+
+
 def test_config_is_required(monkeypatch):
     monkeypatch.delenv(CONFIG_ENV, raising=False)
     with pytest.raises(SystemExit) as e:
@@ -53,6 +72,29 @@ def test_worker_admin_parser_supports_all_worker_actions():
     assert args.wait and args.timeout == 120
 
 
+def test_worker_run_parser_and_factory_reject_in_process_config():
+    args = build_parser().parse_args(["worker", "run", "--config", "worker.yaml"])
+    assert (args.command, args.action, args.config) == ("worker", "run", "worker.yaml")
+
+
+async def test_worker_factory_rejects_in_process_config_before_credentials():
+    from silk_agent.config import Config, ConfigError
+    from silk_agent.distributed.worker_role import run_worker
+
+    with pytest.raises(ConfigError, match="execution_mode"):
+        await run_worker(Config())
+
+
+def test_recovery_admin_parser_requires_evidence_for_manual_release():
+    args = build_parser().parse_args(
+        ["recovery", "confirm-stopped", "slack:T:C:1", "--evidence", "node fenced"]
+    )
+    assert (args.recovery_action, args.conversation_key) == ("confirm-stopped", "slack:T:C:1")
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["recovery", "confirm-stopped", "slack:T:C:1"])
+    assert build_parser().parse_args(["recovery", "list"]).recovery_action == "list"
+
+
 def test_sandbox_service_parser_accepts_config():
     args = build_parser().parse_args(["sandbox-service", "--config", "worker.yaml"])
     assert args.command == "sandbox-service"
@@ -63,6 +105,20 @@ def test_gateway_parser_accepts_config():
     args = build_parser().parse_args(["gateway", "--config", "gateway.yaml"])
     assert args.command == "gateway"
     assert args.config == "gateway.yaml"
+
+
+def test_control_parser_accepts_config():
+    args = build_parser().parse_args(["control", "--config", "control.yaml"])
+    assert args.command == "control"
+    assert args.config == "control.yaml"
+
+
+async def test_control_factory_rejects_in_process_config_before_firestore():
+    from silk_agent.config import Config, ConfigError
+    from silk_agent.distributed.control_runtime import run_control
+
+    with pytest.raises(ConfigError, match="execution_mode"):
+        await run_control(Config())
 
 
 async def test_gateway_factory_rejects_in_process_config_before_credentials():
@@ -150,3 +206,46 @@ def test_worker_drain_all_command_sets_global_and_per_worker_barriers(
     assert directory.records[0].drain_deadline_at is not None
     assert fake_client.closed
     assert "worker=worker-a" in capsys.readouterr().out
+
+
+def test_migration_import_defaults_to_read_only_and_closes_client(monkeypatch, tmp_path, capsys):
+    import json
+
+    from silk_agent.distributed import migration_import
+    from silk_agent.stores.firestore import client as firestore_client
+    from tests.test_migration_import import Target, importable_snapshot
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("unused: true\n")
+    source_path = tmp_path / "source.json"
+    source_path.write_text(json.dumps(importable_snapshot()))
+    target = Target()
+    client = SimpleNamespace(closed=False)
+
+    def close():
+        client.closed = True
+
+    client.close = close
+    monkeypatch.setattr(
+        "silk_agent.cli.load_config",
+        lambda _path: SimpleNamespace(
+            execution_mode="distributed", distributed=SimpleNamespace(firestore_prefix="test")
+        ),
+    )
+    monkeypatch.setattr(firestore_client, "create_firestore_client", lambda _config: client)
+    monkeypatch.setattr(migration_import, "FirestoreImportTarget", lambda *_args, **_kwargs: target)
+    main(
+        [
+            "migration",
+            "import",
+            "--config",
+            str(config_path),
+            "--snapshot",
+            str(source_path),
+            "--legacy-stopped",
+        ]
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["dry_run"] and report["created"] == 0
+    assert target.documents == {}
+    assert client.closed

@@ -114,8 +114,11 @@ def create_app(
                 status=exc.status,
                 headers={"X-Request-ID": request_id},
             )
-        except Exception:
-            logger.error("sandbox service request failed", extra={"request_id": request_id})
+        except Exception as exc:
+            logger.error(
+                "sandbox service request failed",
+                extra={"request_id": request_id, "error_type": type(exc).__name__},
+            )
             response = web.json_response(
                 {
                     "error": {"code": "internal_error", "message": "request failed"},
@@ -131,7 +134,7 @@ def create_app(
         key = (method, status)
         count, total_seconds = metrics.get(key, (0, 0.0))
         metrics[key] = (count + 1, total_seconds + elapsed)
-        route = getattr(request.match_info.route.resource, "canonical", request.path)
+        route = getattr(request.match_info.route.resource, "canonical", "<unmatched>")
         logger.info(
             "sandbox service request",
             extra={
@@ -321,7 +324,9 @@ async def _start_command(request: web.Request) -> web.Response:
         raise ServiceError(409, "intent_stopped", "command is behind an owner or stop barrier")
 
     try:
-        result = await handle.commands.start(
+        result = await _call_and_close(
+            handle.commands,
+            "start",
             ["bash", "-lc", command.command],
             command_id=command.request_id,
             cwd=command.cwd,
@@ -360,7 +365,7 @@ async def _command_status(request: web.Request) -> web.Response:
         raise ServiceError(400, "invalid_request", "request_id must match command_id")
     handle, operation = await _command_handle(request, command_request, command_id)
     try:
-        record = await handle.commands.get(command_id)
+        record = await _call_and_close(handle.commands, "get", command_id)
     except Exception:
         record = {"state": "unknown"}
     raw_state = record.get("state") if isinstance(record, Mapping) else None
@@ -387,7 +392,9 @@ async def _command_output(request: web.Request) -> web.Response:
     if output_request.request_id != command_id:
         raise ServiceError(400, "invalid_request", "request_id must match command_id")
     handle, operation = await _command_handle(request, output_request, command_id)
-    page = await handle.commands.read_output(
+    page = await _call_and_close(
+        handle.commands,
+        "read_output",
         command_id,
         stream=output_request.stream,
         cursor=output_request.cursor,
@@ -409,7 +416,7 @@ async def _cancel_command(request: web.Request) -> web.Response:
     command_id = request.match_info["command_id"]
     handle, _operation = await _command_handle(request, cancel_request, command_id)
     try:
-        await handle.commands.cancel(command_id)
+        await _call_and_close(handle.commands, "cancel", command_id)
         response_state = "cancel_requested"
     except Exception:
         response_state = "unknown"
@@ -456,7 +463,7 @@ async def _read_file(request: web.Request) -> web.Response:
     file_request = _validate_request(FileReadRequest, await _json_body(request))
     handle, _owner = await _owned_handle(request, file_request)
     try:
-        data = await handle.files.read(file_request.path)
+        data = await _call_and_close(handle.files, "read", file_request.path)
     except FileNotFoundError as exc:
         raise ServiceError(404, "not_found", "file does not exist") from exc
     if len(data) > MAX_FILE_BYTES:
@@ -472,7 +479,7 @@ async def _read_file(request: web.Request) -> web.Response:
 async def _list_files(request: web.Request) -> web.Response:
     list_request = _validate_request(FileListRequest, await _json_body(request))
     handle, _owner = await _owned_handle(request, list_request)
-    entries = await handle.files.list(list_request.path)
+    entries = await _call_and_close(handle.files, "list", list_request.path)
     if len(entries) > 1000:
         raise ServiceError(413, "listing_too_large", "directory contains too many entries")
     response = FileListResponse(
@@ -513,7 +520,7 @@ async def _write_file(request: web.Request) -> web.Response:
             ).model_dump(mode="json"),
             status=202,
         )
-    await handle.files.write(file_request.path, data)
+    await _call_and_close(handle.files, "write", file_request.path, data)
     response = FileWriteResponse(
         request_id=file_request.request_id,
         sandbox_generation=handle.generation,
@@ -555,7 +562,7 @@ async def _sync_skills(request: web.Request) -> web.Response:
     failed_paths: list[str] = []
     for relative_path, content in decoded:
         try:
-            await handle.files.write(f".skills/{relative_path}", content)
+            await _call_and_close(handle.files, "write", f".skills/{relative_path}", content)
         except Exception:
             failed_paths.append(relative_path)
     response = SkillsSyncResponse(
@@ -661,7 +668,7 @@ def _command_request_hash(command: CommandStartRequest) -> str:
 
 async def _existing_command_state(handle: Any, command_id: str) -> CommandStartState:
     try:
-        record = await handle.commands.get(command_id)
+        record = await _call_and_close(handle.commands, "get", command_id)
     except Exception:
         # A 404 may mean the start was not committed, or that the tracker is
         # between recovery states. Never turn that uncertainty into a resend.
@@ -785,3 +792,13 @@ async def _token_review(token: str, audience: str) -> Mapping[str, Any]:
         }
     finally:
         await api_client.close()
+
+
+async def _call_and_close(resource: Any, method: str, *args: Any, **kwargs: Any) -> Any:
+    """SessionHandle creates a new HTTP client per property access; always close it."""
+    try:
+        return await getattr(resource, method)(*args, **kwargs)
+    finally:
+        close = getattr(resource, "close", None)
+        if close is not None:
+            await close()

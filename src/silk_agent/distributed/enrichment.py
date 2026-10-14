@@ -54,10 +54,18 @@ class SlackSenderEnricher:
         await asyncio.gather(*(self._enrich(record) for record in records))
         return len(records)
 
-    async def run_forever(self, stop: asyncio.Event, *, poll_seconds: float = 5.0) -> None:
+    async def run_forever(
+        self,
+        stop: asyncio.Event,
+        *,
+        poll_seconds: float = 5.0,
+        on_tick: Callable[[], None] | None = None,
+    ) -> None:
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
         while not stop.is_set():
+            if on_tick is not None:
+                on_tick()
             try:
                 processed = await self.run_once()
             except Exception as exc:
@@ -186,10 +194,18 @@ class ControlAuthorizer:
                 resolved += 1
         return resolved
 
-    async def run_forever(self, stop: asyncio.Event, *, poll_seconds: float = 5.0) -> None:
+    async def run_forever(
+        self,
+        stop: asyncio.Event,
+        *,
+        poll_seconds: float = 5.0,
+        on_tick: Callable[[], None] | None = None,
+    ) -> None:
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
         while not stop.is_set():
+            if on_tick is not None:
+                on_tick()
             try:
                 resolved = await self.run_once()
             except Exception as exc:
