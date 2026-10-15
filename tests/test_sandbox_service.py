@@ -1004,3 +1004,68 @@ async def test_command_uses_the_renewed_owner_token_after_a_slow_sandbox_start()
         assert accepted_with == [renewed]
     finally:
         await client.close()
+
+
+async def test_repeat_cancel_of_an_already_finished_command_reports_cancelled_not_unknown():
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    owner = OwnershipToken("slack:T:C:5", "w", "i", 2, 4, now + timedelta(seconds=60))
+
+    class Commands:
+        async def cancel(self, _command_id):
+            raise RuntimeError("tracker: command already finished")
+
+        async def get(self, _command_id):
+            return {"state": "finished", "stop_reason": "cancelled"}
+
+    class Manager:
+        async def ensure(self, _key):
+            return SimpleNamespace(generation=3, commands=Commands())
+
+    class Operations:
+        async def get_operation(self, _id):
+            return {
+                "operation_kind": "command_start",
+                "conversation_key": owner.conversation_key,
+                "conversation_generation": 4,
+                "turn_id": "t",
+                "origin_seq": 1,
+                "sandbox_generation": 3,
+            }
+
+    async def review(_token, audience):
+        return {
+            "authenticated": True,
+            "audiences": [audience],
+            "user": {"username": "system:serviceaccount:silk:worker"},
+        }
+
+    async def authorize(_ksa, _key):
+        return True
+
+    async def owner_provider(_key):
+        return owner
+
+    client = await _client(
+        review,
+        manager=Manager(),
+        authorizer=authorize,
+        owner_provider=owner_provider,
+        operation_store=Operations(),
+        clock=lambda: now,
+    )
+    try:
+        response = await client.post(
+            "/v1/commands/c1/cancel",
+            json={
+                "request_id": "r",
+                "conversation_key": owner.conversation_key,
+                "owner_epoch": 2,
+                "conversation_generation": 4,
+                "turn_id": "t",
+                "origin_seq": 1,
+            },
+            headers={"Authorization": "Bearer token"},
+        )
+        assert (await response.json())["state"] == "cancelled"
+    finally:
+        await client.close()

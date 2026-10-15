@@ -413,7 +413,15 @@ async def _cancel_command(request: web.Request) -> web.Response:
         await _call_and_close(handle.commands, "cancel", command_id)
         response_state = "cancel_requested"
     except Exception:
+        # A second stop path (the turn's own cancel) may already have ended the command; the
+        # tracker then rejects the repeat. A finished command is stopped, not unknown.
         response_state = "unknown"
+        try:
+            record = await _call_and_close(handle.commands, "get", command_id)
+            if isinstance(record, Mapping) and record.get("state") == "finished":
+                response_state = "cancelled"
+        except Exception:
+            pass
     response = CommandControlResponse(
         request_id=cancel_request.request_id,
         command_id=command_id,
