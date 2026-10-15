@@ -45,15 +45,20 @@ def _secret_names(deployment):
     return names
 
 
-def test_three_roles_are_committed_disabled_with_probes_and_limits():
+def test_three_roles_have_probes_limits_and_the_released_replica_counts():
     deployments = _deployments()
     assert set(deployments) == {
         "silk-agent-gateway",
         "silk-agent-worker",
         "silk-agent-control",
     }
+    replicas = {name: item["spec"]["replicas"] for name, item in deployments.items()}
+    assert replicas == {
+        "silk-agent-gateway": 1,
+        "silk-agent-worker": 2,
+        "silk-agent-control": 1,
+    }
     for deployment in deployments.values():
-        assert deployment["spec"]["replicas"] == 0
         container = _container(deployment)
         assert container["image"] == "silk-agent"
         for probe in ("startupProbe", "readinessProbe", "livenessProbe"):

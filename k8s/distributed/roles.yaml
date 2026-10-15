@@ -1,8 +1,7 @@
 # The three roles that run next to the Sandbox Service (sandbox-service.yaml).
 #
-# All Deployments are committed with replicas: 0 so applying this file never connects to Slack
-# or starts an SDK by accident. Enable one at a time (see k8s/distributed/README.md); the Worker
-# runs with one replica until the acceptance run, then two.
+# Released with Gateway 1 / Control 1 / Worker 2 replicas (Worker 2 is the acceptance setting).
+# Re-applying this file keeps those counts; change them here, not with `kubectl scale`.
 #
 # Credential split: only the Gateway holds the Slack app token, only Gateway/Control hold the bot
 # token, and the Worker holds no Slack secret at all. No role mounts a volume with SQLite state.
@@ -37,8 +36,7 @@ metadata:
   name: silk-agent-gateway
   namespace: session-sandbox-system
 spec:
-  # Committed disabled: enabling a role is a deliberate step (see README / runbook).
-  replicas: 0
+  replicas: 1
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -130,8 +128,7 @@ metadata:
   name: silk-agent-worker
   namespace: session-sandbox-system
 spec:
-  # Committed disabled: enabling a role is a deliberate step (see README / runbook).
-  replicas: 0
+  replicas: 2
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -195,10 +192,10 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: "1"
-              memory: 4Gi
+              cpu: 500m
+              memory: 1Gi
             limits:
-              memory: 8Gi
+              memory: 2Gi
 
           securityContext:
             allowPrivilegeEscalation: false
@@ -238,8 +235,7 @@ metadata:
   name: silk-agent-control
   namespace: session-sandbox-system
 spec:
-  # Committed disabled: enabling a role is a deliberate step (see README / runbook).
-  replicas: 0
+  replicas: 1
   strategy:
     type: RollingUpdate
     rollingUpdate:
