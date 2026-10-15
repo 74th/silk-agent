@@ -55,13 +55,11 @@ log = logging.getLogger(__name__)
 HISTORY_FOR_GUARD = 5
 NOTHING_RUNNING = "実行中の処理はありません。"
 BACKGROUND_STOPPED = "バックグラウンドで実行中のコマンド{n}件を停止しました。"
-BACKGROUND_STOP_ACCEPTED = (
-    "バックグラウンドコマンド{n}件へ停止要求を送信しました。"
-    "停止が完了したかは、必要に応じて「コマンドの状態を教えて」と依頼してください。"
-)
+# Progress already shows each command's state, so an accepted stop needs no caveat; the
+# unknown case is abnormal and says so.
+BACKGROUND_STOP_ACCEPTED = "バックグラウンドコマンド{n}件の停止を依頼しました。"
 BACKGROUND_STOP_UNKNOWN = (
     "バックグラウンドコマンド{n}件の停止を確認できませんでした。まだ動いている可能性があります。"
-    "状態は「コマンドの状態を教えて」と依頼すると確認できます。"
 )
 INPUT_CHECK_FAILED = (
     "入力を確認できなかったため、処理しませんでした。しばらくしてからもう一度お試しください。"
