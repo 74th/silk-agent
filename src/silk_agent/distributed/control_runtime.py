@@ -56,6 +56,11 @@ class RecoveryLoop:
 
         async def recover(token: Any) -> int:
             try:
+                release = getattr(self._ownership, "release_unactivated", None)
+                if release is not None and await release(token, now=self._clock.now()):
+                    METRICS.inc("control_recovery_total", result="unactivated")
+                    return 1
+
                 result = await self._coordinator.recover(
                     token, request_quiesce=self._request_quiesce
                 )

@@ -18,6 +18,9 @@ from silk_agent.stores.firestore.watch import WatchFactory, WatchHandle
 
 log = logging.getLogger(__name__)
 SIGTERM_DRAIN_GRACE_SECONDS = 25.0
+# The turn gets 25 s to finish; after that it is interrupted and saved, which needs its own
+# time. Cutting the whole close at 25 s left the lease unreleased (recovery_blocked).
+SIGTERM_STOP_DEADLINE_SECONDS = 40.0
 
 
 class ConversationActor(Protocol):
@@ -366,6 +369,21 @@ class DistributedWorker:
                 await actor.update_ownership(renewed)
                 self._actors[key] = (renewed, actor)
 
+    async def _stop_receiving_assignments(self) -> None:
+        """Mark this incarnation draining first, so the allocator cannot hand it a conversation
+        that is released a moment later (it would sit assigned to a dying process)."""
+        if self._worker_directory is None:
+            return
+        try:
+            await self._worker_directory.set_draining(
+                worker_id=self._worker_id,
+                incarnation=self._incarnation,
+                draining=True,
+                now=self._clock.now(),
+            )
+        except Exception as exc:
+            log.warning("could not mark the worker draining on close (%s)", type(exc).__name__)
+
     async def _adopt_reset_successor(
         self, saved: OwnershipToken, token: OwnershipToken, actor: ConversationActor
     ) -> bool:
@@ -415,7 +433,10 @@ class DistributedWorker:
 
     async def aclose(self) -> None:
         self._closed = True
+        await self._stop_receiving_assignments()
         actors = tuple(self._actors.values())
+        if actors:
+            log.info("worker closing", extra={"assigned": len(actors)})
         self._actors.clear()
         self._control_only.clear()
         await asyncio.gather(
@@ -428,16 +449,23 @@ class DistributedWorker:
                 # The process has one grace window, shared concurrently by all actors.
                 stopped = await asyncio.wait_for(
                     self._drain_actor(actor, SIGTERM_DRAIN_GRACE_SECONDS),
-                    timeout=SIGTERM_DRAIN_GRACE_SECONDS,
+                    timeout=SIGTERM_STOP_DEADLINE_SECONDS,
                 )
             else:
-                await asyncio.wait_for(actor.aclose(), timeout=SIGTERM_DRAIN_GRACE_SECONDS)
+                await asyncio.wait_for(actor.aclose(), timeout=SIGTERM_STOP_DEADLINE_SECONDS)
                 stopped = True
         except Exception as exc:
             log.warning("could not confirm local actor stop (%s)", type(exc).__name__)
             return
         if stopped:
             try:
-                await self._ownership.release(token, now=self._clock.now())
+                released = await self._ownership.release(token, now=self._clock.now())
             except Exception as exc:
                 log.warning("could not release stopped actor ownership (%s)", type(exc).__name__)
+            else:
+                if released:
+                    log.info("released ownership of a stopped actor")
+                else:
+                    log.warning("ownership release was rejected for a stopped actor")
+        else:
+            log.warning("actor drain did not confirm a stop; ownership stays held")

@@ -68,7 +68,7 @@ silk-agent worker undrain-all --config CONFIG
 
 Worker を起動した後に `undrain-all` を実行する。drain 中に Slack から届いた入力は Inbox に残り、解除後に処理される。個別の Worker は `silk-agent worker drain WORKER_ID --incarnation INCARNATION`（解除は `undrain`、状態は `status`）で扱う。
 
-Worker のイメージ更新も同じ手順を使う（RollingUpdate は新 Pod を先に起動する）。Gateway / Control の更新は drain を必要としない。
+Worker のイメージ更新も同じ手順を使う（RollingUpdate は新 Pod を先に起動する）。drain せずに更新しても、終了する Worker は先に自分を draining にして新規割当を止め、実行中の turn を最大 25 秒待ってから中断・保存して所有権を解放する（`terminationGracePeriodSeconds: 60`）。実 GKE で、turn 実行中の Pod 削除から約 30 秒で別 Worker へ引き継がれることを確認した。長い turn は中断される（再実行はされず、その入力は `uncertain`）。Gateway / Control の更新は drain を必要としない。
 
 ## 5. recovery_blocked の調査と解除
 

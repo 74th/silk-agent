@@ -730,3 +730,65 @@ async def test_actor_survives_its_own_reset_successor_but_not_a_foreign_takeover
     ownership.tokens["conversation-a"] = foreign
     await worker.run_once()
     assert actor.closed == 1 and worker.actors == ()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_past_the_turn_grace_so_an_interrupted_actor_is_still_released(
+    monkeypatch,
+):
+    import asyncio
+
+    from silk_agent.distributed import worker as worker_module
+
+    monkeypatch.setattr(worker_module, "SIGTERM_DRAIN_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(worker_module, "SIGTERM_STOP_DEADLINE_SECONDS", 1.0)
+    clock = Clock()
+    ownership = Ownership([token("conversation-a")])
+
+    async def slow_interrupt_and_save(_actor, _grace):
+        await asyncio.sleep(0.2)  # longer than the turn grace: the interrupt + save phase
+        return True
+
+    worker = DistributedWorker(
+        ownership,
+        clock,
+        worker_id="worker-a",
+        worker_incarnation="pod-a:boot-1",
+        actor_factory=Actor,
+        subscribe=no_watch,
+        drain_actor=slow_interrupt_and_save,
+    )
+    await worker.run_once()
+    await worker.aclose()
+    assert ownership.released == ["conversation-a"]
+
+
+@pytest.mark.asyncio
+async def test_close_marks_the_worker_draining_before_releasing_any_actor():
+    events = []
+
+    class Directory:
+        async def set_draining(self, **kwargs):
+            events.append(("draining", kwargs["draining"]))
+
+        async def get_worker(self, _worker_id):
+            return None
+
+    class RecordingOwnership(Ownership):
+        async def release(self, tok, *, now):
+            events.append(("release", tok.conversation_key))
+            return await super().release(tok, now=now)
+
+    clock = Clock()
+    worker = DistributedWorker(
+        RecordingOwnership([token("conversation-a")]),
+        clock,
+        worker_id="worker-a",
+        worker_incarnation="pod-a:boot-1",
+        actor_factory=Actor,
+        subscribe=no_watch,
+    )
+    await worker.run_once()
+    worker._worker_directory = Directory()
+    await worker.aclose()
+    assert events == [("draining", True), ("release", "conversation-a")]

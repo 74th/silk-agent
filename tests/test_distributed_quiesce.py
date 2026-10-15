@@ -111,3 +111,20 @@ async def test_recovery_loop_scans_only_expired_ownership_and_isolates_failures(
     assert ownership.before == Clock().now() - timedelta(seconds=5)
     assert {key for key, _ in coordinator.seen} == {"room", "room-2"}
     assert all(sender is marker for _, sender in coordinator.seen)
+
+
+@pytest.mark.asyncio
+async def test_recovery_releases_an_expired_never_activated_assignment_without_evidence():
+    class Ownership:
+        async def list_expired(self, *, before, limit):
+            return (TOKEN,)
+
+        async def release_unactivated(self, token, *, now):
+            return True
+
+    class Coordinator:
+        async def recover(self, *_args, **_kwargs):
+            raise AssertionError("no stop evidence is needed for an assignment never activated")
+
+    loop = RecoveryLoop(Ownership(), Coordinator(), object(), Clock())
+    assert await loop.run_once() == 1

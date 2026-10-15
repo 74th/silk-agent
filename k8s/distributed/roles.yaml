@@ -144,7 +144,7 @@ spec:
     spec:
       serviceAccountName: silk-agent-worker
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 45
+      terminationGracePeriodSeconds: 60
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000

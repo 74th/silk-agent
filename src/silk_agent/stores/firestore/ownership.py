@@ -310,7 +310,17 @@ class FirestoreOwnershipStore:
         except Exception as exc:
             raise convert_firestore_error("renew_ownership", exc) from None
 
-    async def release(self, token: OwnershipToken, *, now: datetime) -> bool:
+    async def release_unactivated(self, token: OwnershipToken, *, now: datetime) -> bool:
+        """Release an expired assignment that its Worker never activated.
+
+        A Worker moves ``assigned`` to ``active`` before it starts an SDK, so an expired
+        ``assigned`` ownership has no process to prove stopped.
+        """
+        return await self.release(token, now=now, _expired_unactivated=True)
+
+    async def release(
+        self, token: OwnershipToken, *, now: datetime, _expired_unactivated: bool = False
+    ) -> bool:
         _validate_utc(now, "now")
         owner_ref, conversation_ref = self._refs(token.conversation_key)
         worker_ref, reservation_ref = self._worker_refs(
@@ -335,10 +345,12 @@ class FirestoreOwnershipStore:
             saved = decode_record(owner_data, OwnershipToken)
             phase = owner_data.get("phase")
             worker = WorkerRecord.from_dict(cast(dict, worker_snapshot.to_dict() or {}))
+            lease_ok = token.expires_at <= now if _expired_unactivated else token.expires_at > now
+            allowed_phases = {"assigned"} if _expired_unactivated else {"assigned", "active"}
             if (
                 saved != token
-                or phase not in {"assigned", "active"}
-                or token.expires_at <= now
+                or phase not in allowed_phases
+                or not lease_ok
                 or worker.incarnation != token.worker_incarnation
             ):
                 return False
