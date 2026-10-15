@@ -158,6 +158,27 @@ resource "google_firestore_field" "control_payload_unindexed" {
   depends_on = [google_firestore_database.silk_agent]
 }
 
+# list_sender_enrichment_due scans every conversation's inputs (collection group).
+resource "google_firestore_field" "input_sender_lookup_group" {
+  project    = var.project_id
+  database   = var.firestore_database_id
+  collection = "inputs"
+  field      = "next_sender_lookup_at"
+
+  index_config {
+    indexes {
+      order       = "ASCENDING"
+      query_scope = "COLLECTION"
+    }
+    indexes {
+      order       = "ASCENDING"
+      query_scope = "COLLECTION_GROUP"
+    }
+  }
+
+  depends_on = [google_firestore_database.silk_agent]
+}
+
 resource "google_firestore_field" "input_expire_at_ttl" {
   project    = var.project_id
   database   = var.firestore_database_id
