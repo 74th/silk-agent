@@ -215,7 +215,7 @@ async def test_stop_reports_unknown_remote_command_cancel_without_claiming_it_st
     orch, _ = make(clock, channel, [], cancel_background=cancel_background)
     await orch.handle(StopRequest("k"))
     message = channel.of(Notice)[0].text
-    assert "停止要求を確認できません" in message
+    assert "停止を確認できませんでした" in message
     assert "停止しました" not in message
 
 
