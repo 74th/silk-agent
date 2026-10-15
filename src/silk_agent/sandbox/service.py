@@ -266,19 +266,13 @@ async def _start_command(request: web.Request) -> web.Response:
     except ValueError as exc:
         raise ServiceError(400, "invalid_request", "command request is invalid") from exc
     await _authorize_conversation(request, command.conversation_key)
-    owner = await cast(OwnerProvider, request.app[OWNER_PROVIDER_KEY])(command.conversation_key)
-    if (
-        owner is None
-        or owner.epoch != command.owner_epoch
-        or owner.conversation_generation != command.conversation_generation
-        or owner.conversation_key != command.conversation_key
-        or owner.expires_at <= cast(Callable[[], datetime], request.app[CLOCK_KEY])()
-    ):
-        raise ServiceError(409, "stale_owner", "command owner token is stale")
+    await _current_owner(request, command)  # fail fast before starting anything
 
     handle = await _service_manager(request).ensure(_session_key(command.conversation_key))
     if handle.generation < 1:
         raise ServiceError(409, "sandbox_unavailable", "Sandbox generation is unavailable")
+    # A cold start can outlast a lease renewal; use the token that is current now.
+    owner = await _current_owner(request, command)
     operation_store = cast(ServiceOperationStore, request.app[OPERATION_STORE_KEY])
     request_hash = _command_request_hash(command)
     now = cast(Callable[[], datetime], request.app[CLOCK_KEY])()
@@ -579,8 +573,11 @@ async def _sync_skills(request: web.Request) -> web.Response:
 
 async def _owned_handle(request: web.Request, identity: Any) -> tuple[Any, OwnershipToken]:
     await _authorize_conversation(request, identity.conversation_key)
-    owner = await _current_owner(request, identity)
+    await _current_owner(request, identity)  # fail fast before starting anything
     handle = await _service_manager(request).ensure(_session_key(identity.conversation_key))
+    # ensure() can take a minute on a cold start, during which the Worker renews its lease;
+    # operate with the token that is current now, still for the same epoch and generation.
+    owner = await _current_owner(request, identity)
     return handle, owner
 
 

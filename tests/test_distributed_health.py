@@ -155,3 +155,26 @@ def test_role_logs_keep_ids_but_never_bodies_or_tokens():
     parsed = json.loads(output)
     assert parsed["request_id"] == "req-1"
     assert "secret" not in output and "Bearer" not in output
+
+
+@pytest.mark.asyncio
+async def test_stop_fences_agent_output_but_not_terminal_or_status_events():
+    from types import SimpleNamespace
+
+    from silk_agent.core.events import (
+        AssistantText,
+        Notice,
+        StatusChanged,
+        ToolStarted,
+        TurnInterrupted,
+    )
+    from silk_agent.distributed.worker_role import WorkerActorFactory
+
+    factory = object.__new__(WorkerActorFactory)
+    factory.actors = {"k": SimpleNamespace(identity=lambda: {"origin_seq": 7})}
+    now = datetime(2026, 10, 15, tzinfo=UTC)
+    assert await factory.origin_sequence(AssistantText("k", "t", "text")) == 7
+    assert await factory.origin_sequence(ToolStarted("k", "t", "u1", "bash", "summary", now)) == 7
+    assert await factory.origin_sequence(TurnInterrupted("k", "t", "user", now)) is None
+    assert await factory.origin_sequence(StatusChanged("k", "t", "interrupted")) is None
+    assert await factory.origin_sequence(Notice("k", "停止しました")) is None

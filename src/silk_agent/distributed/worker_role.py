@@ -15,7 +15,15 @@ from silk_agent.core.background import BackgroundCommands
 from silk_agent.core.clock import SystemClock
 from silk_agent.core.commands import CommandTracker
 from silk_agent.core.distributed_models import OwnershipToken
-from silk_agent.core.events import OutboundEvent
+from silk_agent.core.events import (
+    AssistantText,
+    Heartbeat,
+    MessageAppended,
+    OutboundEvent,
+    ToolFinished,
+    ToolStarted,
+    TurnStarted,
+)
 from silk_agent.core.filters import default_chain
 from silk_agent.core.orchestrator import ConversationOrchestrator
 from silk_agent.core.ports import Clock, SandboxRuntime, SessionStateStore, SkillSource
@@ -36,6 +44,8 @@ from silk_agent.wiring import build_engine_factory, build_input_guard, build_out
 
 log = logging.getLogger(__name__)
 EngineFactoryBuilder = Callable[..., Any]
+# Output that can carry agent-written content; a STOP invalidates these for older turns.
+FENCED_EVENTS = (AssistantText, ToolStarted, ToolFinished, MessageAppended, Heartbeat, TurnStarted)
 
 
 class _SinkChannel:
@@ -107,6 +117,14 @@ class WorkerActorFactory:
         return actor.identity()
 
     async def origin_sequence(self, event: OutboundEvent) -> int | None:
+        """Stop-barrier fence for agent-derived output only.
+
+        Terminal and status events of an interrupted turn, and the notices that report a
+        stop, carry no agent content and must still reach the user; fencing them would leave
+        the Slack progress view stuck on "running".
+        """
+        if not isinstance(event, FENCED_EVENTS):
+            return None
         actor = self.actors.get(getattr(event, "conversation_key", ""))
         return actor.identity()["origin_seq"] if actor is not None else None
 

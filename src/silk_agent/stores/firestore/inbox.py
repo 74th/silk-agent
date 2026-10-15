@@ -229,9 +229,20 @@ class FirestoreInboxStore:
                 return cast(dict[str, Any], prior_snapshot.to_dict()), False
 
             conversation_snapshot = await conversation_ref.get(transaction=transaction)
+            owner_snapshot = (
+                await self._collection("ownership")
+                .document(conversation_id)
+                .get(transaction=transaction)
+            )
             conversation_data = (
                 conversation_snapshot.to_dict() if conversation_snapshot.exists else {}
             ) or {}
+            # A conversation that already has a live owner is not waiting for allocation.
+            owned = owner_snapshot.exists and (owner_snapshot.to_dict() or {}).get("phase") in {
+                "assigned",
+                "active",
+                "recovering",
+            }
             stored_generation = conversation_data.get("conversation_generation")
             if stored_generation is not None and stored_generation != conversation_generation:
                 raise FirestoreStoreError("accept_generation")
@@ -274,7 +285,7 @@ class FirestoreInboxStore:
                     "conversation_key": conversation_key,
                     "conversation_generation": conversation_generation,
                     "next_input_seq": next_seq + 1,
-                    "allocation_state": "waiting",
+                    **({} if owned else {"allocation_state": "waiting"}),
                     **({"participating": True} if participating else {}),
                     **({"control_only": False} if sender_id is None else {}),
                     "version": current_version + 1,

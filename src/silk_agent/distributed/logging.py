@@ -32,6 +32,12 @@ class RoleLogFormatter(logging.Formatter):
             item = getattr(record, field, None)
             if isinstance(item, (str, int, float, bool)):
                 value[field] = item
+        if record.exc_info and record.exc_info[0] is not None:
+            # Only the class name: messages and tracebacks can carry request content.
+            value["exc_type"] = record.exc_info[0].__name__
+            cause = record.exc_info[1].__cause__ or record.exc_info[1].__context__
+            if cause is not None:
+                value["cause_type"] = type(cause).__name__
         # Exception reprs and arbitrary extras can contain request bodies/credentials.
         # Call sites log a safe exception class through error_type when needed.
         return json.dumps(value, ensure_ascii=False)

@@ -416,6 +416,13 @@ resource "google_storage_bucket_iam_member" "gke_worker_output_reader" {
   member = "${local.gke_principal_prefix}/silk-agent-worker"
 }
 
+# The Sandbox Service's command monitor archives terminal command output.
+resource "google_storage_bucket_iam_member" "gke_sandbox_service_output" {
+  bucket = google_storage_bucket.command_output.name
+  role   = "roles/storage.objectAdmin"
+  member = "${local.gke_principal_prefix}/silk-agent-sandbox-service"
+}
+
 resource "google_storage_bucket_iam_member" "gke_worker_skills_reader" {
   bucket = google_storage_bucket.skills.name
   role   = "roles/storage.objectViewer"

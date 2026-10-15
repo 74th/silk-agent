@@ -28,7 +28,8 @@ class RemoteSandboxSessions:
         base_url: str,
         *,
         token_file: str | Path = "/var/run/secrets/tokens/silk-sandbox",
-        timeout_seconds: float = 30,
+        # A cold Sandbox start can take over a minute inside ensure()/the first command.
+        timeout_seconds: float = 180,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._token_file = Path(token_file)

@@ -931,3 +931,76 @@ async def test_invalid_file_path_returns_400_without_ensuring_sandbox():
         assert response.status == 400
     finally:
         await client.close()
+
+
+async def test_command_uses_the_renewed_owner_token_after_a_slow_sandbox_start():
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    before = OwnershipToken("slack:T:C:9", "w", "i", 2, 4, now + timedelta(seconds=60))
+    renewed = OwnershipToken("slack:T:C:9", "w", "i", 2, 4, now + timedelta(seconds=80))
+    state = {"owner": before}
+    accepted_with = []
+
+    class Manager:
+        async def ensure(self, _key):
+            state["owner"] = renewed  # the Worker renews its lease while the Sandbox boots
+            return SimpleNamespace(generation=1, commands=SimpleNamespace(start=start, get=get))
+
+    class Operations:
+        record = None
+
+        async def accept_intent(self, **kwargs):
+            accepted_with.append(kwargs["owner"])
+            self.record = {"request_hash": kwargs["request_hash"]}
+            return True
+
+        async def get_operation(self, _operation_id):
+            return self.record
+
+        async def is_dispatch_allowed(self, *_args, **_kwargs):
+            return True
+
+    async def start(*_args, **_kwargs):
+        return {"state": "running"}
+
+    async def get(_command_id):
+        return {"state": "running"}
+
+    async def review(_token, audience):
+        return {
+            "authenticated": True,
+            "audiences": [audience],
+            "user": {"username": "system:serviceaccount:silk:worker"},
+        }
+
+    async def authorize(_ksa, _key):
+        return True
+
+    async def owner_provider(_key):
+        return state["owner"]
+
+    client = await _client(
+        review,
+        manager=Manager(),
+        authorizer=authorize,
+        owner_provider=owner_provider,
+        operation_store=Operations(),
+        clock=lambda: now,
+    )
+    try:
+        response = await client.post(
+            "/v1/commands",
+            json={
+                "request_id": "r1",
+                "conversation_key": "slack:T:C:9",
+                "owner_epoch": 2,
+                "conversation_generation": 4,
+                "turn_id": "t",
+                "origin_seq": 1,
+                "command": "echo hi",
+            },
+            headers={"Authorization": "Bearer token"},
+        )
+        assert response.status == 202
+        assert accepted_with == [renewed]
+    finally:
+        await client.close()

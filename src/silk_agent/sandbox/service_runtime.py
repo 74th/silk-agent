@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -93,7 +94,29 @@ async def run_sandbox_service(config: Config) -> None:
         clock=clock.now,
     )
 
+    from silk_agent.sandbox.monitor import CommandMonitor
+    from silk_agent.sandbox.output_archive import CommandOutputArchiver, GCSCommandOutputStore
+    from silk_agent.sandbox.service_monitor import ServiceCommandRuntime, run_monitor_loop
+    from silk_agent.stores.firestore.command_monitor import FirestoreCommandMonitorStore
+
+    monitor = CommandMonitor(
+        FirestoreCommandMonitorStore(firestore_client, collection_prefix=prefix),
+        ServiceCommandRuntime(manager),
+        clock,
+        monitor_id=f"{os.environ.get('HOSTNAME', 'sandbox-service')}:{uuid.uuid4().hex}",
+        output_archiver=CommandOutputArchiver(
+            GCSCommandOutputStore(config.distributed.command_output_bucket),
+            clock=clock,
+            retention_days=config.distributed.command_output_retention_days,
+        ),
+    )
+    monitor_stop = asyncio.Event()
+    monitor_task = asyncio.create_task(run_monitor_loop(monitor, monitor_stop), name="monitor")
+
     async def cleanup(_app: Any) -> None:
+        monitor_stop.set()
+        monitor_task.cancel()
+        await asyncio.gather(monitor_task, return_exceptions=True)
         try:
             await manager.close()
         finally:

@@ -53,9 +53,6 @@ class FirestoreSessionStateStore:
         return await _read_state(self._conversations, conversation_key)
 
     async def put(self, state: ConversationState) -> None:
-        owner = self._owner_for(state.conversation_key)
-        if owner is None:
-            raise OwnershipLostError("no active ownership for this conversation")
         patch: dict[str, Any] = {
             "sdk_session_id": state.agent_session_id,
             "turn_status": state.status,
@@ -64,6 +61,10 @@ class FirestoreSessionStateStore:
             "running_command_ids": list(state.running_command_ids),
         }
         for _ in range(_ATTEMPTS):
+            # Re-read each attempt: a lease renewal can replace the token between tries.
+            owner = self._owner_for(state.conversation_key)
+            if owner is None:
+                raise OwnershipLostError("no active ownership for this conversation")
             record = await self._conversations.get_conversation(state.conversation_key)
             if record is None:
                 raise OwnershipLostError("conversation does not exist")

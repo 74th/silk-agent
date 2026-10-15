@@ -149,9 +149,17 @@ class WorkerControlHandler:
         return summary.owner
 
     async def _close(self, owner: OwnershipToken, input_id: str) -> None:
-        await self._inbox.mark_control_handled(
-            conversation_key=owner.conversation_key,
-            input_id=input_id,
-            owner=owner,
-            now=self._clock.now(),
-        )
+        """Mark the control handled with the actor's *current* token.
+
+        A lease renewal during a slow stop replaces the token; closing with the one captured
+        at the start would be rejected and leave the control to be applied a second time.
+        """
+        for candidate in (self._owner(), owner):
+            if await self._inbox.mark_control_handled(
+                conversation_key=candidate.conversation_key,
+                input_id=input_id,
+                owner=candidate,
+                now=self._clock.now(),
+            ):
+                return
+        log.warning("control was not closed; ownership changed while it was applied")
