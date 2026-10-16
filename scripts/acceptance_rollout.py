@@ -4,6 +4,8 @@ import sys
 import time
 
 sys.path.insert(0, __import__("os").path.dirname(__file__))
+import uuid
+
 from acceptance_common import *
 
 

@@ -74,6 +74,10 @@ class InboxStore(Protocol):
         """Read durable work in sequence order after startup or watch reconnection."""
         ...
 
+    async def list_held(
+        self, conversation_key: str, *, limit: int = 50
+    ) -> Sequence[InputEnvelope]: ...
+
     async def advance_input(
         self,
         *,

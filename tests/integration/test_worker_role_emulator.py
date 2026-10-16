@@ -280,6 +280,8 @@ async def test_expired_ownership_is_recovered_only_with_worker_stop_evidence():
         QuiesceRequester(mailbox, clock, wait_seconds=0.6, poll_seconds=0.05),
         clock,
         skew_seconds=0,
+        backoff_base_seconds=0.01,
+        backoff_max_seconds=0.05,
     )
     allocator_loop = ControlAllocatorLoop(
         conversations,
@@ -321,6 +323,7 @@ async def test_expired_ownership_is_recovered_only_with_worker_stop_evidence():
             mailbox, worker, clock, worker_id="worker-a", incarnation="pod-a:boot-1"
         )
         await worker.run_once()  # sees the expired lease and closes its actor (records the epoch)
+        await asyncio.sleep(0.1)  # past the (tiny) retry backoff of the failed first attempt
         recovered, answered = await asyncio.gather(recovery.run_once(), _answer_soon(responder))
         assert answered >= 1 and recovered == 1
         conversation = await conversations.get_conversation(key) or {}

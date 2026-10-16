@@ -13,12 +13,16 @@ from silk_agent.core.distributed_ports import CommandMonitorStore, InboxStore
 from silk_agent.core.events import SenderInfo, UserMessage
 from silk_agent.core.orchestrator import ConversationOrchestrator
 from silk_agent.core.session import AgentSession
-from silk_agent.distributed.completion import CompletionInputDelivery
+from silk_agent.distributed.completion import (
+    CompletionInputDelivery,
+    release_held_completions,
+)
 from silk_agent.distributed.dispatcher import ConversationDispatcher
 from silk_agent.distributed.input_delivery import DurableInputDelivery
 from silk_agent.distributed.metrics import METRICS
 
 log = logging.getLogger(__name__)
+INPUT_PAGE = 100
 ControlReader = Callable[[], Awaitable[Sequence[Mapping[str, Any]]]]
 ControlHandler = Callable[[Mapping[str, Any]], Awaitable[None]]
 
@@ -87,6 +91,7 @@ class DistributedConversationActor:
             dispatch_completion=self._dispatch_completion,
             run_turns=self._wait_for_stop,
             poll_seconds=self._poll_seconds,
+            read_limit=INPUT_PAGE,
         )
         self._task = asyncio.create_task(self._dispatcher.run(), name="distributed-conversation")
         await asyncio.sleep(0)
@@ -179,7 +184,16 @@ class DistributedConversationActor:
         if self._control_only:
             # No SDK slot was reserved; user input waits for a normal assignment.
             return ()
-        return await self._inbox.list_unfinished(self._owner.conversation_key, limit=100)
+        records = await self._inbox.list_unfinished(self._owner.conversation_key, limit=INPUT_PAGE)
+        # Gateway persists and ACKs first, then resolves the sender (users.info). A message
+        # whose sender is not stored yet must not be judged: policy and the conversation
+        # owner depend on it, and a later input must not overtake it.
+        ready = []
+        for record in sorted(records, key=lambda item: item.seq):
+            if record.kind == "message" and "sender" not in record.payload:
+                break
+            ready.append(record)
+        return ready
 
     async def _prepare_input(self, envelope: InputEnvelope) -> tuple[UserMessage, bool]:
         message = _message_from_envelope(envelope)
@@ -214,7 +228,17 @@ class DistributedConversationActor:
             return
         if self._delivery is None:
             raise RuntimeError("conversation actor has not started")
-        await self._delivery.dispatch(envelope, message)
+        outcome = await self._delivery.dispatch(envelope, message)
+        if outcome != "rejected" and envelope.kind == "message":
+            # The user is back: hand over command results kept while the turn was interrupted.
+            released = await release_held_completions(
+                self._inbox,
+                self._owner,
+                command_monitor=self._command_monitor,
+                now=datetime.now(UTC),
+            )
+            if released and self._dispatcher is not None:
+                self._dispatcher.wake_inputs()
 
     async def _dispatch_completion(self, envelope: InputEnvelope) -> None:
         if self._completion is None:

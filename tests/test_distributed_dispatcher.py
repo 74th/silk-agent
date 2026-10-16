@@ -60,20 +60,19 @@ async def test_control_reader_and_turn_runner_progress_while_input_guard_waits()
 
 
 @pytest.mark.asyncio
-async def test_input_guard_completion_is_dispatched_in_sequence_order():
+async def test_inputs_are_prepared_and_dispatched_strictly_in_sequence_order():
     first_entered = asyncio.Event()
     first_release = asyncio.Event()
-    second_finished = asyncio.Event()
     both_dispatched = asyncio.Event()
+    prepared_order = []
     dispatched = []
     records = [input_envelope(2), input_envelope(1)]
 
     async def prepare(record):
+        prepared_order.append(record.seq)
         if record.seq == 1:
             first_entered.set()
             await first_release.wait()
-        else:
-            second_finished.set()
         return record.seq
 
     async def run_turns(stop):
@@ -94,13 +93,98 @@ async def test_input_guard_completion_is_dispatched_in_sequence_order():
         poll_seconds=0.01,
     )
     task = asyncio.create_task(dispatcher.run())
-    await asyncio.gather(first_entered.wait(), second_finished.wait())
-    assert dispatched == []
+    await first_entered.wait()
+    await asyncio.sleep(0.1)
+    # The later input is not judged (guard, owner, history) while the earlier one is pending.
+    assert prepared_order == [1] and dispatched == []
     first_release.set()
     await both_dispatched.wait()
-    assert dispatched == [1, 2]
+    assert prepared_order == [1, 2] and dispatched == [1, 2]
     dispatcher.stop()
     await task
+
+
+@pytest.mark.asyncio
+async def test_stop_that_cancels_a_guard_pending_input_releases_the_inputs_behind_it():
+    first_entered = asyncio.Event()
+    dispatched = []
+    records = [input_envelope(1)]
+    never = asyncio.Event()
+
+    async def prepare(record):
+        if record.seq == 1:
+            first_entered.set()
+            await never.wait()  # the guard never answers
+        return record.seq
+
+    async def run_turns(stop):
+        await stop.wait()
+
+    async def dispatch(envelope, _prepared):
+        dispatched.append(envelope.seq)
+
+    dispatcher = ConversationDispatcher(
+        read_inputs=lambda: _resolved(tuple(records)),
+        read_controls=lambda: _resolved(()),
+        prepare_input=prepare,
+        dispatch_input=dispatch,
+        handle_control=lambda _control: _resolved(None),
+        run_turns=run_turns,
+        poll_seconds=0.01,
+        read_limit=100,
+    )
+    task = asyncio.create_task(dispatcher.run())
+    await first_entered.wait()
+    # STOP cancels input 1 durably (it leaves the unfinished set); input 3 arrives after it.
+    records[:] = [input_envelope(3)]
+    await asyncio.wait_for(_until(lambda: dispatched == [3]), 2)
+    dispatcher.stop()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_a_full_page_does_not_cancel_waiting_inputs_that_may_be_on_the_next_page():
+    first_entered = asyncio.Event()
+    release = asyncio.Event()
+    dispatched = []
+    full_page = [input_envelope(seq) for seq in range(2, 5)]
+    records = list(full_page)
+
+    async def prepare(record):
+        if record.seq == 2:
+            first_entered.set()
+            await release.wait()
+        return record.seq
+
+    async def run_turns(stop):
+        await stop.wait()
+
+    async def dispatch(envelope, _prepared):
+        dispatched.append(envelope.seq)
+
+    dispatcher = ConversationDispatcher(
+        read_inputs=lambda: _resolved(tuple(records)),
+        read_controls=lambda: _resolved(()),
+        prepare_input=prepare,
+        dispatch_input=dispatch,
+        handle_control=lambda _control: _resolved(None),
+        run_turns=run_turns,
+        poll_seconds=0.01,
+        read_limit=3,
+    )
+    task = asyncio.create_task(dispatcher.run())
+    await first_entered.wait()
+    records[:] = full_page[1:] + [input_envelope(5)]  # input 2 fell off the (full) page
+    await asyncio.sleep(0.1)
+    release.set()
+    await asyncio.wait_for(_until(lambda: 2 in dispatched), 2)
+    dispatcher.stop()
+    await task
+
+
+async def _until(predicate):
+    while not predicate():  # noqa: ASYNC110
+        await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio

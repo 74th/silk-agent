@@ -28,24 +28,32 @@ class CompletionInputDelivery:
             return "ignored"
         if envelope.conversation_generation != self._owner.conversation_generation:
             return "stale"
-        attempt_id = uuid.uuid4().hex
-        if not await self._inbox.advance_input(
-            conversation_key=envelope.conversation_key,
-            input_id=envelope.input_id,
-            owner=self._owner,
-            expected=InputDeliveryState.PENDING,
-            new_state=InputDeliveryState.DISPATCHING,
-            dispatch_attempt_id=attempt_id,
-        ):
+        if envelope.delivery_state is InputDeliveryState.QUEUED:
+            # Saved as queued but never handed to a session (the previous Worker stopped, or a
+            # held result was released by the user's resume): nothing reached an SDK, so it is
+            # safe to hand it over now. accepted/uncertain are never re-sent.
+            pass
+        elif envelope.delivery_state is not InputDeliveryState.PENDING:
             return "claimed_elsewhere"
-        if not await self._inbox.advance_input(
-            conversation_key=envelope.conversation_key,
-            input_id=envelope.input_id,
-            owner=self._owner,
-            expected=InputDeliveryState.DISPATCHING,
-            new_state=InputDeliveryState.QUEUED,
-        ):
-            return "fenced"
+        else:
+            attempt_id = uuid.uuid4().hex
+            if not await self._inbox.advance_input(
+                conversation_key=envelope.conversation_key,
+                input_id=envelope.input_id,
+                owner=self._owner,
+                expected=InputDeliveryState.PENDING,
+                new_state=InputDeliveryState.DISPATCHING,
+                dispatch_attempt_id=attempt_id,
+            ):
+                return "claimed_elsewhere"
+            if not await self._inbox.advance_input(
+                conversation_key=envelope.conversation_key,
+                input_id=envelope.input_id,
+                owner=self._owner,
+                expected=InputDeliveryState.DISPATCHING,
+                new_state=InputDeliveryState.QUEUED,
+            ):
+                return "fenced"
         try:
             outcome = await self._session.notify(
                 _completion_text(envelope), input_id=envelope.input_id
@@ -106,3 +114,32 @@ def _completion_text(envelope: InputEnvelope) -> str:
         f"command_id: {command_id}\n状態: {state}\n{detail}</system-notice>\n"
         "結果をユーザに簡潔に報告してください。"
     )
+
+
+async def release_held_completions(
+    inbox: InboxStore,
+    owner: OwnershipToken,
+    *,
+    command_monitor: CommandMonitorStore | None,
+    now,
+) -> int:
+    """On the user's resume, move held command results back to the queue (HELD -> QUEUED)."""
+    released = 0
+    for envelope in await inbox.list_held(owner.conversation_key, limit=50):
+        if envelope.conversation_generation != owner.conversation_generation:
+            continue
+        if not await inbox.advance_input(
+            conversation_key=envelope.conversation_key,
+            input_id=envelope.input_id,
+            owner=owner,
+            expected=InputDeliveryState.HELD,
+            new_state=InputDeliveryState.QUEUED,
+        ):
+            continue
+        released += 1
+        command_id = envelope.payload.get("command_id")
+        if command_monitor is not None and isinstance(command_id, str):
+            await command_monitor.set_notification_state(
+                command_id, expected="held", new_state="pending", now=now
+            )
+    return released

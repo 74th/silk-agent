@@ -40,9 +40,12 @@ class ConversationDispatcher[Control, Prepared]:
         input_key: Callable[[InputEnvelope], str] = lambda item: item.input_id,
         control_key: Callable[[Control], str] = _default_control_key,
         poll_seconds: float = 1.0,
+        read_limit: int | None = None,
     ) -> None:
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
+        # A full page may hide later records; absence from it is then not a cancellation.
+        self._read_limit = read_limit
         self._read_inputs = read_inputs
         self._read_controls = read_controls
         self._prepare_input = prepare_input
@@ -61,6 +64,7 @@ class ConversationDispatcher[Control, Prepared]:
         self._pending_sequences: set[int] = set()
         self._seen_inputs: set[str] = set()
         self._seen_controls: set[str] = set()
+        self._input_tasks: dict[str, tuple[asyncio.Task[Any], int]] = {}
 
     def wake_inputs(self) -> None:
         self._input_wake.set()
@@ -97,7 +101,11 @@ class ConversationDispatcher[Control, Prepared]:
             try:
                 records = sorted(await self._read_inputs(), key=lambda item: item.seq)
                 active_keys = {self._input_key(record) for record in records}
-                self._seen_inputs.intersection_update(active_keys)
+                complete = self._read_limit is None or len(records) < self._read_limit
+                if complete:
+                    await self._drop_vanished(active_keys)
+                else:
+                    self._seen_inputs.intersection_update(active_keys | set(self._input_tasks))
                 for record in records:
                     if record.delivery_state not in {
                         InputDeliveryState.PENDING,
@@ -110,12 +118,26 @@ class ConversationDispatcher[Control, Prepared]:
                     self._seen_inputs.add(key)
                     self._pending_sequences.add(record.seq)
                     task = asyncio.create_task(self._prepare_and_dispatch(record, key))
+                    self._input_tasks[key] = (task, record.seq)
+                    task.add_done_callback(lambda _t, k=key: self._input_tasks.pop(k, None))
                     self._track(task)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log.warning("conversation input scan failed (%s)", type(exc).__name__)
             await self._wait(self._input_wake)
+
+    async def _drop_vanished(self, active_keys: set[str]) -> None:
+        """A waiting input that left the unfinished set was cancelled (stop barrier) or
+        finished elsewhere: stop its task and release the sequence it was holding."""
+        for key, (task, seq) in tuple(self._input_tasks.items()):
+            if key in active_keys or task.done():
+                continue
+            task.cancel()
+            async with self._sequence_changed:
+                self._pending_sequences.discard(seq)
+                self._sequence_changed.notify_all()
+        self._seen_inputs.intersection_update(active_keys | set(self._input_tasks))
 
     async def _prepare_and_dispatch(self, record: InputEnvelope, key: str) -> None:
         committed = False
@@ -133,7 +155,9 @@ class ConversationDispatcher[Control, Prepared]:
                 await self._dispatch_completion(record)
                 committed = True
                 return
-            prepared = await self._prepare_input(record)
+            # Preparation has durable side effects (guard history, conversation owner), and the
+            # guard's context depends on earlier inputs: run it in acceptance order, never
+            # speculatively. STOP and control handling stay on their own tasks.
             async with self._sequence_changed:
                 await self._sequence_changed.wait_for(
                     lambda: (
@@ -143,6 +167,7 @@ class ConversationDispatcher[Control, Prepared]:
                 )
             if self._stop.is_set():
                 return
+            prepared = await self._prepare_input(record)
             await self._dispatch_input(record, prepared)
             committed = True
         except asyncio.CancelledError:
@@ -156,6 +181,10 @@ class ConversationDispatcher[Control, Prepared]:
                     self._sequence_changed.notify_all()
                 else:
                     self._seen_inputs.discard(key)
+                    # A failed or cancelled attempt must not keep later inputs waiting; the
+                    # reader re-adds the sequence if the record is still unfinished.
+                    self._pending_sequences.discard(record.seq)
+                    self._sequence_changed.notify_all()
             if committed:
                 self.wake_inputs()
 

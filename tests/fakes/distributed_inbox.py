@@ -163,6 +163,18 @@ class FakeInboxStore:
         self.receipts[message_receipt] = receipt_value
         return record
 
+    async def list_held(self, conversation_key: str, *, limit: int = 50):
+        return tuple(
+            sorted(
+                (
+                    item
+                    for (key, _), item in self.inputs.items()
+                    if key == conversation_key and item.delivery_state is InputDeliveryState.HELD
+                ),
+                key=lambda item: item.seq,
+            )
+        )[:limit]
+
     async def list_unfinished(
         self, conversation_key: str, *, after_seq: int = 0, limit: int = 100
     ) -> Sequence[InputEnvelope]:
@@ -172,6 +184,7 @@ class FakeInboxStore:
             InputDeliveryState.CANCELLED,
             InputDeliveryState.SUPPRESSED,
             InputDeliveryState.UNCERTAIN,
+            InputDeliveryState.HELD,  # the real store never lists held inputs
         }
         return tuple(
             sorted(

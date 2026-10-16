@@ -229,19 +229,15 @@ class FirestoreInboxStore:
                 return cast(dict[str, Any], prior_snapshot.to_dict()), False
 
             conversation_snapshot = await conversation_ref.get(transaction=transaction)
-            owner_snapshot = (
-                await self._collection("ownership")
-                .document(conversation_id)
-                .get(transaction=transaction)
-            )
             conversation_data = (
                 conversation_snapshot.to_dict() if conversation_snapshot.exists else {}
             ) or {}
-            # A conversation that already has a live owner is not waiting for allocation.
-            owned = owner_snapshot.exists and (owner_snapshot.to_dict() or {}).get("phase") in {
+            # A conversation that already has a live owner is not waiting for allocation. Read
+            # it from the conversation document itself (no extra document in the transaction).
+            owned = conversation_data.get("allocation_state") in {
                 "assigned",
-                "active",
                 "recovering",
+                "recovery_blocked",
             }
             stored_generation = conversation_data.get("conversation_generation")
             if stored_generation is not None and stored_generation != conversation_generation:
@@ -375,6 +371,28 @@ class FirestoreInboxStore:
             return tuple(items)
         except Exception as exc:
             raise convert_firestore_error("list_unfinished", exc) from None
+
+    async def list_held(
+        self, conversation_key: str, *, limit: int = 50
+    ) -> tuple[InputEnvelope, ...]:
+        """Command results kept back while the turn was interrupted (until the user resumes)."""
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        query = (
+            self._collection("conversations")
+            .document(self._conversation_id(conversation_key))
+            .collection("inputs")
+            .where(filter=FieldFilter("delivery_state", "==", "held"))
+            .limit(limit)
+        )
+        try:
+            items = [
+                decode_record(snapshot.to_dict() or {}, InputEnvelope)
+                async for snapshot in query.stream()
+            ]
+        except Exception as exc:
+            raise convert_firestore_error("list_held", exc) from None
+        return tuple(sorted(items, key=lambda item: item.seq))
 
     async def has_waiting_input(self, conversation_key: str) -> bool:
         """True while a user input has not reached the SDK (pending/queued)."""
