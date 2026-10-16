@@ -7,7 +7,7 @@ import logging
 import os
 import signal
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 
@@ -37,7 +37,13 @@ class RecoveryLoop:
         poll_seconds: float = 5,
         batch_size: int = 100,
         on_tick: Callable[[], None] | None = None,
+        pod_gone: Callable[[Any], Awaitable[bool]] | None = None,
+        auto_recover_after_seconds: float = 120,
+        notify_blocked: Callable[[Any], Awaitable[None]] | None = None,
     ) -> None:
+        self._pod_gone = pod_gone
+        self._auto_after = timedelta(seconds=auto_recover_after_seconds)
+        self._notify_blocked = notify_blocked
         self._on_tick = on_tick
         if skew_seconds < 0 or poll_seconds <= 0 or batch_size <= 0:
             raise ValueError("recovery loop values are invalid")
@@ -71,6 +77,11 @@ class RecoveryLoop:
                 METRICS.inc("control_recovery_total", result="error")
                 return 0
             state = result.state if result is not None else "skipped"
+            if state == "blocked":
+                if await self._released_for_missing_pod(token):
+                    METRICS.inc("control_recovery_total", result="pod_absent")
+                    return 1
+                await self._tell_user(token)
             METRICS.inc("control_recovery_total", result=state)
             return 1 if state == "released" else 0
 
@@ -78,6 +89,36 @@ class RecoveryLoop:
         # Expired and not released: each is waiting for stop evidence (recovery_blocked).
         METRICS.set("control_recovery_pending", len(expired) - released)
         return released
+
+    async def _released_for_missing_pod(self, token: Any) -> bool:
+        """Release when Kubernetes shows the old Pod is gone and enough time has passed for a
+        partitioned live Worker to have stopped itself after losing its lease."""
+        if self._pod_gone is None:
+            return False
+        if self._clock.now() - token.expires_at < self._auto_after:
+            return False
+        try:
+            if not await self._pod_gone(token):
+                return False
+            return bool(
+                await self._ownership.confirm_stopped(
+                    token,
+                    evidence_id=f"auto:pod-absent:{token.worker_id}",
+                    worker_incarnation=token.worker_incarnation,
+                    now=self._clock.now(),
+                )
+            )
+        except Exception as exc:
+            log.warning("Pod-absence recovery failed (%s)", type(exc).__name__)
+            return False
+
+    async def _tell_user(self, token: Any) -> None:
+        if self._notify_blocked is None:
+            return
+        try:
+            await self._notify_blocked(token)
+        except Exception as exc:
+            log.warning("could not post the recovery notice (%s)", type(exc).__name__)
 
     async def run(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
@@ -297,6 +338,26 @@ async def run_control(config: Config) -> None:
         on_tick=health.loop("sender", 120),
     )
     ownership = FirestoreOwnershipStore(client, collection_prefix=prefix)
+    pod_probe = None
+    kube_client = None
+    if config.distributed.auto_recover_missing_pods:
+        from silk_agent.distributed.pod_probe import KubernetesPodProbe
+
+        pod_probe, kube_client = await KubernetesPodProbe.in_cluster()
+
+    async def notify_blocked(token: Any) -> None:
+        # Once per ownership epoch: the user otherwise just sees the thread go quiet.
+        if await conversations.mark_recovery_notified(token.conversation_key, token.epoch):
+            from silk_agent.core.events import Notice
+
+            await slack.send_durable(
+                Notice(
+                    token.conversation_key,
+                    "担当の処理が途中で止まりました。復旧には少し時間がかかる場合があります。"
+                    "しばらくしてもう一度送ってください。",
+                )
+            )
+
     recovery = RecoveryLoop(
         ownership,
         DistributedRecoveryCoordinator(ownership, clock),
@@ -304,6 +365,11 @@ async def run_control(config: Config) -> None:
         clock,
         skew_seconds=config.distributed.lease_clock_skew_seconds,
         on_tick=health.loop("recovery", 180),
+        pod_gone=pod_probe.is_gone if pod_probe is not None else None,
+        auto_recover_after_seconds=(
+            config.distributed.auto_recover_after_seconds or 2 * config.distributed.lease_seconds
+        ),
+        notify_blocked=notify_blocked,
     )
     authorizer_tick = health.loop("authorizer", 120)
     stop = asyncio.Event()
@@ -336,4 +402,6 @@ async def run_control(config: Config) -> None:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await http_session.close()
+        if kube_client is not None:
+            await kube_client.close()
         client.close()

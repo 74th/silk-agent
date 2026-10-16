@@ -1,5 +1,6 @@
-import asyncio, uuid
+import asyncio
 from datetime import UTC, datetime
+
 from silk_agent.config import DistributedExecutionConfig
 from silk_agent.core.clock import SystemClock
 from silk_agent.distributed.control_runtime import ControlAllocatorLoop

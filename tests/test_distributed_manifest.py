@@ -65,7 +65,9 @@ def test_three_roles_have_probes_limits_and_the_released_replica_counts():
             assert container[probe]["httpGet"]["port"] == "health"
         assert container["resources"]["requests"] and container["resources"]["limits"]["memory"]
         assert container["securityContext"]["allowPrivilegeEscalation"] is False
-        assert deployment["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
+        # Only Control talks to the Kubernetes API (to read Pods); the others use Workload Identity.
+        expected = deployment["metadata"]["name"] == "silk-agent-control"
+        assert deployment["spec"]["template"]["spec"]["automountServiceAccountToken"] is expected
 
 
 def test_slack_secrets_reach_only_the_roles_that_need_them_and_never_the_worker():
@@ -150,3 +152,13 @@ def test_roles_are_part_of_the_kustomization_and_use_one_image():
     kustomization = yaml.safe_load(Path("k8s/distributed/kustomization.yaml").read_text())
     assert "roles.yaml" in kustomization["resources"]
     assert [image["name"] for image in kustomization["images"]] == ["silk-agent"]
+
+
+def test_control_may_only_read_pods_in_its_own_namespace():
+    resources = _resources()
+    role = next(
+        i for i in resources if i["kind"] == "Role" and "pod-reader" in i["metadata"]["name"]
+    )
+    assert role["rules"] == [{"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}]
+    binding = next(i for i in resources if i["kind"] == "RoleBinding")
+    assert binding["subjects"][0]["name"] == "silk-agent-control"

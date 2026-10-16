@@ -119,6 +119,12 @@ class DistributedExecutionConfig(_Model):
     sandbox_service_port: int = Field(default=8080, ge=1, le=65535)
     # Liveness/readiness/metrics endpoint of the Gateway, Worker and Control roles.
     health_port: int = Field(default=9090, ge=1, le=65535)
+    # Recover an expired ownership without Worker evidence when Kubernetes says its Pod UID no
+    # longer exists, after `auto_recover_after_seconds` past lease expiry (default: twice the
+    # lease, long enough for a partitioned live Worker to stop itself). Off by default: a
+    # force-deleted Pod on a partitioned node can still be running.
+    auto_recover_missing_pods: bool = False
+    auto_recover_after_seconds: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def lease_renewal_precedes_expiration(self) -> DistributedExecutionConfig:

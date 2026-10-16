@@ -215,6 +215,28 @@ class FirestoreConversationStore:
         except Exception as exc:
             raise convert_firestore_error("update_progress", exc) from None
 
+    async def mark_recovery_notified(self, conversation_key: str, epoch: int) -> bool:
+        """True exactly once per ownership epoch (the user is told a recovery is pending)."""
+        conversation_ref = self._collection("conversations").document(
+            self._conversation_id(conversation_key)
+        )
+        transaction = self.client.transaction()
+
+        @async_transactional
+        async def mark(transaction: firestore.AsyncTransaction) -> bool:
+            snapshot = await conversation_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                return False
+            if (snapshot.to_dict() or {}).get("recovery_notice_epoch") == epoch:
+                return False
+            transaction.update(conversation_ref, {"recovery_notice_epoch": epoch})
+            return True
+
+        try:
+            return await mark(transaction)
+        except Exception as exc:
+            raise convert_firestore_error("mark_recovery_notified", exc) from None
+
     async def begin_reset(self, *, owner: OwnershipToken, reset_seq: int) -> bool:
         if reset_seq < 1:
             raise ValueError("reset_seq must be positive")

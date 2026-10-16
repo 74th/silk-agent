@@ -1,4 +1,7 @@
-import asyncio, sys, subprocess, time
+import asyncio
+import subprocess
+import sys
+import time
 
 sys.path.insert(0, __import__("os").path.dirname(__file__))
 from acceptance_common import *

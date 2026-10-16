@@ -27,8 +27,8 @@ kind: ServiceAccount
 metadata:
   name: silk-agent-control
   namespace: session-sandbox-system
-# Workload Identity only; no Kubernetes API token is needed by this role.
-automountServiceAccountToken: false
+# Control reads Pods (below) to confirm a lost Worker's Pod is gone.
+automountServiceAccountToken: true
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -254,7 +254,7 @@ spec:
         app.kubernetes.io/name: silk-agent-control
     spec:
       serviceAccountName: silk-agent-control
-      automountServiceAccountToken: false
+      automountServiceAccountToken: true
       terminationGracePeriodSeconds: 45
       securityContext:
         runAsNonRoot: true
@@ -424,3 +424,27 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: silk-agent-control-pod-reader
+  namespace: session-sandbox-system
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: silk-agent-control-pod-reader
+  namespace: session-sandbox-system
+subjects:
+  - kind: ServiceAccount
+    name: silk-agent-control
+    namespace: session-sandbox-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: silk-agent-control-pod-reader
