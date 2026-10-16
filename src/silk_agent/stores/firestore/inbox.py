@@ -376,6 +376,20 @@ class FirestoreInboxStore:
         except Exception as exc:
             raise convert_firestore_error("list_unfinished", exc) from None
 
+    async def has_waiting_input(self, conversation_key: str) -> bool:
+        """True while a user input has not reached the SDK (pending/queued)."""
+        query = (
+            self._collection("conversations")
+            .document(self._conversation_id(conversation_key))
+            .collection("inputs")
+            .where(filter=FieldFilter("delivery_state", "in", ["pending", "queued"]))
+            .limit(1)
+        )
+        try:
+            return any([True async for _ in query.stream()])
+        except Exception as exc:
+            raise convert_firestore_error("has_waiting_input", exc) from None
+
     async def advance_input(
         self,
         *,

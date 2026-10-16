@@ -8,7 +8,7 @@ import os
 import signal
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from silk_agent.config import Config, ConfigError
@@ -40,7 +40,18 @@ class RecoveryLoop:
         pod_gone: Callable[[Any], Awaitable[bool]] | None = None,
         auto_recover_after_seconds: float = 120,
         notify_blocked: Callable[[Any], Awaitable[None]] | None = None,
+        has_demand: Callable[[Any], Awaitable[bool]] | None = None,
+        idle_check_seconds: float = 30,
+        backoff_base_seconds: float = 5,
+        backoff_max_seconds: float = 300,
     ) -> None:
+        # Recovery is driven by demand: an expired ownership is only worked on while a user
+        # input is waiting for its conversation, and failed attempts back off exponentially.
+        self._has_demand = has_demand
+        self._idle_check = timedelta(seconds=idle_check_seconds)
+        self._backoff_base = backoff_base_seconds
+        self._backoff_max = backoff_max_seconds
+        self._schedule: dict[str, tuple[int, datetime]] = {}  # key -> (failures, next attempt)
         self._pod_gone = pod_gone
         self._auto_after = timedelta(seconds=auto_recover_after_seconds)
         self._notify_blocked = notify_blocked
@@ -60,8 +71,21 @@ class RecoveryLoop:
             before=self._clock.now() - self._skew, limit=self._batch_size
         )
 
+        now = self._clock.now()
+        live = {token.conversation_key for token in expired}
+        for key in tuple(self._schedule):
+            if key not in live:
+                del self._schedule[key]  # released or renewed: forget its backoff
+
         async def recover(token: Any) -> int:
+            key = token.conversation_key
+            failures, next_at = self._schedule.get(key, (0, now))
+            if next_at > now:
+                return 0
             try:
+                if self._has_demand is not None and not await self._has_demand(token):
+                    self._schedule[key] = (failures, now + self._idle_check)
+                    return 0
                 release = getattr(self._ownership, "release_unactivated", None)
                 if release is not None and await release(token, now=self._clock.now()):
                     METRICS.inc("control_recovery_total", result="unactivated")
@@ -75,6 +99,7 @@ class RecoveryLoop:
             except Exception as exc:
                 log.warning("Ownership recovery failed (%s)", type(exc).__name__)
                 METRICS.inc("control_recovery_total", result="error")
+                self._back_off(key, failures)
                 return 0
             state = result.state if result is not None else "skipped"
             if state == "blocked":
@@ -82,6 +107,7 @@ class RecoveryLoop:
                     METRICS.inc("control_recovery_total", result="pod_absent")
                     return 1
                 await self._tell_user(token)
+                self._back_off(key, failures)
             METRICS.inc("control_recovery_total", result=state)
             return 1 if state == "released" else 0
 
@@ -89,6 +115,10 @@ class RecoveryLoop:
         # Expired and not released: each is waiting for stop evidence (recovery_blocked).
         METRICS.set("control_recovery_pending", len(expired) - released)
         return released
+
+    def _back_off(self, key: str, failures: int) -> None:
+        delay = min(self._backoff_base * (2**failures), self._backoff_max)
+        self._schedule[key] = (failures + 1, self._clock.now() + timedelta(seconds=delay))
 
     async def _released_for_missing_pod(self, token: Any) -> bool:
         """Release when Kubernetes shows the old Pod is gone and enough time has passed for a
@@ -318,8 +348,9 @@ async def run_control(config: Config) -> None:
         worker_lease_seconds=config.distributed.lease_seconds,
         on_tick=health.loop("allocator", 120),
     )
+    inbox = FirestoreInboxStore(client, collection_prefix=prefix)
     authorizer = ControlAuthorizer(
-        FirestoreInboxStore(client, collection_prefix=prefix),
+        inbox,
         clock,
         build_control_authorizer(config, clock),
     )
@@ -370,6 +401,7 @@ async def run_control(config: Config) -> None:
             config.distributed.auto_recover_after_seconds or 2 * config.distributed.lease_seconds
         ),
         notify_blocked=notify_blocked,
+        has_demand=lambda token: inbox.has_waiting_input(token.conversation_key),
     )
     authorizer_tick = health.loop("authorizer", 120)
     stop = asyncio.Event()

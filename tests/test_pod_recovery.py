@@ -126,3 +126,77 @@ async def test_feature_is_off_without_a_probe():
     plain = RecoveryLoop(ownership, Coordinator(), object(), Clock())
     assert await plain.run_once() == 0
     assert ownership.confirmed == []
+
+
+class MovingClock:
+    def __init__(self):
+        self.value = NOW
+
+    def now(self):
+        return self.value
+
+
+class CountingCoordinator:
+    def __init__(self):
+        self.calls = 0
+
+    async def recover(self, token, *, request_quiesce):
+        self.calls += 1
+        return Blocked()
+
+
+@pytest.mark.asyncio
+async def test_recovery_only_runs_while_an_input_is_waiting():
+    waiting = {"value": False}
+    coordinator = CountingCoordinator()
+    clock = MovingClock()
+    queries = []
+
+    async def has_demand(tok):
+        queries.append(tok.conversation_key)
+        return waiting["value"]
+
+    recovery = RecoveryLoop(
+        Ownership(token()),
+        coordinator,
+        object(),
+        clock,
+        has_demand=has_demand,
+        idle_check_seconds=30,
+    )
+    for _ in range(5):  # polling with nobody waiting never touches the stopped Worker
+        await recovery.run_once()
+    assert coordinator.calls == 0 and len(queries) == 1  # and re-checks only every 30 s
+    clock.value += timedelta(seconds=31)
+    waiting["value"] = True  # a user message arrives
+    await recovery.run_once()
+    assert coordinator.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_recovery_backs_off_exponentially_up_to_a_cap():
+    coordinator = CountingCoordinator()
+    clock = MovingClock()
+
+    async def has_demand(_tok):
+        return True
+
+    recovery = RecoveryLoop(
+        Ownership(token()),
+        coordinator,
+        object(),
+        clock,
+        has_demand=has_demand,
+        backoff_base_seconds=5,
+        backoff_max_seconds=40,
+    )
+    attempts = []
+    for second in range(0, 200):
+        clock.value = NOW + timedelta(seconds=second)
+        before = coordinator.calls
+        await recovery.run_once()
+        if coordinator.calls > before:
+            attempts.append(second)
+    gaps = [b - a for a, b in zip(attempts, attempts[1:], strict=False)]
+    assert gaps[:4] == [5, 10, 20, 40] and set(gaps[3:]) == {40}
+    assert len(attempts) < 12  # not one attempt per poll

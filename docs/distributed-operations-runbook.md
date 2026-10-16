@@ -72,6 +72,8 @@ Worker のイメージ更新も同じ手順を使う（RollingUpdate は新 Pod 
 
 ## 5. recovery_blocked の調査と解除
 
+**回復は需要駆動。** Control は、失効した所有権について、その会話に未処理の入力（`pending` / `queued`）があるときだけ回復を試みる。誰も待っていない会話は 30 秒ごとに入力の有無を確認するだけで、旧 Worker への停止要求も Pod の確認も行わない。回復に失敗した（`recovery_blocked` のままの）場合は、5 秒から 5 分まで指数的に待ち間隔を延ばして再試行する（無限に高頻度で回り続けない）。実 GKE で、Pod を強制削除して 240 秒メッセージを送らない間は試行が 0 回で、メッセージを送ると 1 回の回復で引き継がれることを確認した。
+
 **自動回復（`distributed.auto_recover_missing_pods: true`、開発環境の設定で有効）。** Control は、`recovery_blocked` の担当について Kubernetes API で旧 Worker の Pod を引き、その UID の Pod が存在しない（404、または同名で UID が異なる）ことを確認できれば、lease 失効から `auto_recover_after_seconds`（既定は lease の 2 倍＝120 秒。通信断で生きている旧 Worker が lease を失って自分で SDK を閉じるのに十分な時間）が過ぎた後に、証拠 `auto:pod-absent:<Pod 名>` を記録して自動で解放する。API エラーなど判断できない場合は解放しない。実 GKE で、Pod の強制削除から約 174 秒で別 Worker へ引き継がれることを確認した。既定は無効で、無効の間と、Pod が存在する場合は以下の手動手順になる。残るリスクは、強制削除された Pod がノードの分断で実際には動き続けている場合で、状態・Outbox・Sandbox 操作は epoch で拒否されるが、外部 MCP の副作用と履歴への書込みは防げない。Control には `pods` の `get` 権限だけを与えている。自動回復を待つ間、会話には「担当の処理が途中で止まりました…」という通知を epoch ごとに 1 回だけ出す。
 
 Worker が lease を失った会話は、旧 Worker の SDK 停止が確認できるまで新しい Worker に渡さない。Control は期限切れの所有権を検出し、旧 incarnation に停止要求を出して証拠を待つ。応答がなければ `recovery_blocked` のままになり、`silk_agent_control_recovery_pending` が 0 でなくなる。
