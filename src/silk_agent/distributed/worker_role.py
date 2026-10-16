@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import signal
-import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -352,7 +352,11 @@ async def run_worker(config: Config) -> None:
     ownership = FirestoreOwnershipStore(client, collection_prefix=prefix)
     directory = FirestoreWorkerDirectory(client, collection_prefix=prefix)
     conversations = FirestoreConversationStore(client, collection_prefix=prefix)
-    work_dir = Path(tempfile.mkdtemp(prefix="silk-agent-worker-"))
+    # The SDK keys stored history by working directory, so every Worker must use the same
+    # path; a per-process temp directory made resume on another Worker fail
+    # ("No conversation found with session ID").
+    work_dir = Path(os.environ.get("SILK_AGENT_WORKDIR", "/tmp/silk-agent-worker"))
+    await asyncio.to_thread(work_dir.mkdir, parents=True, exist_ok=True)
     skills = build_skill_source(config, work_dir / "skills-cache")
     from silk_agent.hooks import load_hooks
 

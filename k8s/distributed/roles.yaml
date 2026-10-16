@@ -210,6 +210,8 @@ spec:
               mountPath: /tmp
             - name: home
               mountPath: /home/app
+            - name: work
+              mountPath: /work
             - name: sandbox-token
               mountPath: /var/run/secrets/tokens
               readOnly: true
@@ -220,6 +222,8 @@ spec:
         - name: tmp
           emptyDir: {}
         - name: home
+          emptyDir: {}
+        - name: work
           emptyDir: {}
         - name: sandbox-token
           projected:
