@@ -22,12 +22,19 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("SANDBOX_STARTUP_ON_ERROR", raising=False)
     monkeypatch.delenv("AGENT_USER_EMAIL", raising=False)
 
-    async def ready(_process, limit_seconds=45):
-        return None
-
-    monkeypatch.setattr(supervisor, "_wait_ready", ready)
     log = tmp_path / "log"
     log.touch()
+
+    async def ready(_process, limit_seconds=45):
+        # Stand-in for the readiness probe: production starts the tracker only once sandboxd
+        # answers. Without waiting for the fake sandboxd's first log line, the two shells race
+        # to write theirs and the start order the tests assert is not guaranteed.
+        deadline = time.monotonic() + 10
+        while "sandboxd" not in log.read_text():
+            assert time.monotonic() < deadline, "the fake sandboxd did not start"
+            await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(supervisor, "_wait_ready", ready)
     return type("Env", (), {"root": root, "script": tmp_path / "startup.sh", "log": log})
 
 
