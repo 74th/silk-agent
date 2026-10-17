@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from datetime import UTC, datetime
 
 from silk_agent.config import DistributedExecutionConfig
@@ -39,7 +40,7 @@ class Env:
         n = s.seq[k] = s.seq.get(k, 0) + 1
         await s.inbox.accept_input(
             conversation_key=k,
-            input_id=f"in-{n}",
+            input_id=f"in-{n}-{uuid.uuid4().hex[:6]}",
             conversation_generation=gen,
             kind="message",
             payload={"text": text, "user": "UACC", "team": "T", "channel": "C", "sender": SENDER},
@@ -50,7 +51,7 @@ class Env:
         n = s.seq[k] = s.seq.get(k, 0) + 1
         c = await s.inbox.accept_control(
             conversation_key=k,
-            input_id=f"ctl-{n}",
+            input_id=f"ctl-{n}-{uuid.uuid4().hex[:6]}",
             conversation_generation=gen,
             kind=kind,
             sender_id="UACC",

@@ -15,7 +15,7 @@ distributed:
   lease_clock_skew_seconds: 5
   max_active_sdks_per_worker: 4
   auto_recover_missing_pods: true
-  idle_close_seconds: 600
+  idle_close_seconds: 180
 input_guard:
   provider: gemini
   model: gemini-3.8-flash
@@ -51,4 +51,4 @@ skills:
 sandbox:
   runtime: gke_session_sandbox
   config_file: /config/sandbox-config.yaml
-  run_reconciler: false
+  run_reconciler: true  # idle suspend + retention delete of Sandboxes (run by the Service)

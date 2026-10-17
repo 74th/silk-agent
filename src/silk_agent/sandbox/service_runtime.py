@@ -113,7 +113,22 @@ async def run_sandbox_service(config: Config) -> None:
     monitor_stop = asyncio.Event()
     monitor_task = asyncio.create_task(run_monitor_loop(monitor, monitor_stop), name="monitor")
 
+    # Idle suspend (lifecycle.idle_timeout_seconds) and retention delete
+    # (lifecycle.retention_seconds -> Sandbox spec.shutdownTime) are done by the reconciler.
+    # Without it Sandboxes and their PVCs are never reclaimed. Several replicas are safe: the
+    # reconciler takes the per-session resource lease before it acts.
+    reconciler_task = None
+    if config.sandbox.run_reconciler:
+        from gke_session_sandbox import LifecycleReconciler
+
+        reconciler_task = asyncio.create_task(
+            LifecycleReconciler(manager).run_forever(), name="reconciler"
+        )
+
     async def cleanup(_app: Any) -> None:
+        if reconciler_task is not None:
+            reconciler_task.cancel()
+            await asyncio.gather(reconciler_task, return_exceptions=True)
         monitor_stop.set()
         monitor_task.cancel()
         await asyncio.gather(monitor_task, return_exceptions=True)

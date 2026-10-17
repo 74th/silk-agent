@@ -27,6 +27,25 @@
 - **WHEN** 担当会話が実行中でdrainを完了できず、期限が指定されていない
 - **THEN** Pod削除を待機し、運用者は残る会話数を確認できる
 
+### Requirement: Sandbox の一時停止と期限削除を Sandbox 管理サービスが実行する
+Sandbox 管理サービスは、使われていない Sandbox の一時停止と、保持期間を過ぎた Sandbox の削除を、API 要求の寿命から独立して継続的に実行しなければならない (SHALL)。一時停止は設定 `lifecycle.idle_timeout_seconds`（既定300秒）、削除は一時停止時刻から `lifecycle.retention_seconds`（既定7日）を基準とし、期限は管理 DB の `expires_at` と Sandbox リソースの `spec.shutdownTime`（`shutdownPolicy: Delete`）に記録しなければならない (SHALL)。判定の間隔は `lifecycle.reconcile_interval_seconds`（既定60秒）とする。実行中のコマンドを持つ Sandbox を、idle を理由に停止してはならない (SHALL NOT)。複数の Sandbox 管理サービスが動いても、同じ Sandbox を二重に停止・削除してはならない (SHALL NOT)。この処理が起動していない構成を、正常な配置として許してはならない (SHALL NOT)。
+
+#### Scenario: 使われなくなった Sandbox
+- **WHEN** Sandbox が `idle_timeout_seconds` を超えて使われず、実行中のコマンドもない
+- **THEN** 一時停止され（Pod は削除、PVC は保持）、`expires_at` と `spec.shutdownTime` が設定され、次の依頼で同じ PVC から再開できる
+
+#### Scenario: 実行中のコマンドがある
+- **WHEN** Sandbox が `idle_timeout_seconds` を超えて使われていないが、コマンドが実行中である
+- **THEN** 停止されず、コマンドは同じ command_id で継続する
+
+#### Scenario: 保持期間の経過
+- **WHEN** 一時停止から `retention_seconds` が経過する
+- **THEN** Sandbox と PVC が削除され、管理 DB の記録が期限切れとして整合する
+
+#### Scenario: 処理が起動していない
+- **WHEN** Sandbox 管理サービスが reconciler を起動していない設定（`run_reconciler: false`）で配置される
+- **THEN** 配置の検査（manifest の試験）がこれを検出し、Sandbox と PVC が回収されないまま増え続ける構成を受け入れない
+
 ## MODIFIED Requirements
 
 ### Requirement: Sandbox の稼働に必要なクラウド基盤を提供する

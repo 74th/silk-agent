@@ -162,3 +162,11 @@ def test_control_may_only_read_pods_in_its_own_namespace():
     assert role["rules"] == [{"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}]
     binding = next(i for i in resources if i["kind"] == "RoleBinding")
     assert binding["subjects"][0]["name"] == "silk-agent-control"
+
+
+def test_the_sandbox_service_runs_the_lifecycle_reconciler():
+    """Without it Sandboxes and PVCs are never suspended or deleted (found on a live cluster)."""
+    config = yaml.safe_load(
+        Path("k8s/distributed/sandbox-service/config/silk-agent-distributed.yaml").read_text()
+    )
+    assert config["sandbox"]["run_reconciler"] is True

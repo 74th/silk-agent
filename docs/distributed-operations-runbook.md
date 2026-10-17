@@ -132,3 +132,20 @@ Firestore の操作数は Cloud Monitoring の `firestore.googleapis.com/api/req
 - 旧 Worker が応答不能な間は復旧しない（可用性より単一実行を優先する）。
 - 出力の origin 判定は、その会話で最後に渡した入力の番号を使う。STOP 直後の旧 turn が、次の入力が既に渡された後に出した遅延イベントは配送され得る。
 - Worker の新しい Pod が既存会話を自動で引き取ることはない。常駐会話の再配置は idle 解放（`distributed.idle_close_seconds`）か drain を経由する。
+
+## 9. 負荷測定と初期上限（2026-10-17）
+
+`scripts/acceptance_load.py [会話数] [コマンド秒数]` で、実 Firestore・実 SDK・実 Sandbox を使って N 会話を同時に動かし、2回（1回目は Sandbox の初回起動を含む、2回目はウォーム）の完了時間と Worker の CPU/メモリを測る。試験会話の出力は配送済みにして Slack へ流さない。
+
+測定条件: Worker 2台、1台あたり SDK 上限 4（合計8スロット）、8会話同時、`sleep 15`。
+
+| | 完了までの時間 (最小/中央値/最大) | Worker のピーク (CPU / メモリ) |
+| --- | --- | --- |
+| 1回目（Sandbox 初回起動を含む） | 49 / 170 / 716 秒 | 232m・788Mi / 145m・637Mi |
+| 2回目（ウォーム） | 23 / 26 / 649 秒 | 176m・698Mi / 101m・647Mi |
+
+- メモリは SDK 4並列で650〜790Mi（1 SDK あたり150〜200Mi）。Worker の limit 2Gi に約2.5倍の余裕があるため、resource と SDK 上限は据え置いた。上限を4より上げる試験は行っていない。
+- 最大値の長い遅延は、Sandbox の起動ではなく担当の割当待ちだった（`silk_agent_input_dispatch_latency_seconds` が平均約160秒）。使われなくなった会話がスロットを `distributed.idle_close_seconds` の間占有するため、並列度の実質の上限が下がっていた。この値を 600 秒から **180 秒**に短縮した。代わりに、次のメッセージでその会話のコールド起動（SDK の開始と履歴の再開）が増える。
+- 一時停止中の Sandbox へ入力すると、再開に約70秒かかる（再開後の次の入力は約13秒）。Sandbox は `lifecycle.idle_timeout_seconds`（300秒）で一時停止し、一時停止の7日後に削除される（Sandbox の `spec.shutdownTime`、`shutdownPolicy: Delete`）。これは Sandbox Service が起動する `LifecycleReconciler`（`sandbox.run_reconciler: true`）の仕事で、無効だと Sandbox と PVC が回収されず増え続ける。
+- Firestore の操作数はアプリ内では数えず、Cloud Monitoring の `firestore.googleapis.com/api/request_count` を見る。
+- 自動縮退（HPA など）は、drain との整合を確認していないため有効にしていない。
