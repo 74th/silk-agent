@@ -119,7 +119,18 @@ Control の allocator は役割 lease を取得し、空きのある非 draining
 
 初期設定は lease 60秒、更新20秒、時計ずれ余裕5秒、SDK 上限4/Worker、idle close 600秒。lease は入力 document と分けて watch の更新費用を抑える。時刻取得失敗時は自分の推定で lease を延長しない。期限前に受付を停止するが、安全性は clock だけに依存させない。
 
-失効時は直ちに次 SDK を起動せず、ownership を recovering にする。旧 incarnation に quiesce を要求し、SDK 停止済みの応答が得られれば引き継ぐ。応答不能なら旧 Worker Pod UID の終了を確認する。ノード到達不能や Pod の force delete だけで実プロセス停止を証明できない場合は recovery_blocked とし、新 SDK は起動しない。手動の node fencing 等で停止を確認して解除する。可用性より単一実行を優先する。
+失効時は直ちに次 SDK を起動せず、ownership を recovering にする。旧 incarnation に quiesce を要求し、SDK 停止済みの応答が得られれば引き継ぐ。応答不能な場合は recovery_blocked とし、新 SDK は起動しない。手動の node fencing 等で停止を確認して解除する（`recovery confirm-stopped`）。可用性より単一実行を優先する。
+
+**採用した例外（2026-10-17 決定。当初案の改訂）: Pod 不在による自動回復。** Pod の force delete やノード分断では、Kubernetes API 上で Pod が消えても実プロセスの停止は証明できない。当初案はこれを証拠にしなかった。運用では Worker の異常終了のたびに人手の解除が必要になり、ユーザの会話が止まるため、次の条件をすべて満たす場合に限り、旧 Worker の応答なしで解放する。
+
+- 設定 `distributed.auto_recover_missing_pods` が有効（コードの既定は無効。開発環境のデプロイ設定で有効）。
+- Control が Kubernetes API で incarnation の Pod UID を引き、Pod が存在しない（404）、または同名で UID が異なる。API エラーなど判断できない場合は存在するものとして扱う。
+- lease 失効から `auto_recover_after_seconds`（既定は lease の2倍＝120秒）が経過している。この間に、生きている旧 Worker は lease を更新できず、自分で SDK を閉じる。
+- 証拠として `auto:pod-absent:<Pod名>` を記録する。
+
+この例外が許容する残余リスクは、強制削除された Pod が分断されたノード上で SDK を動かし続けている場合に限る。状態・Outbox・Sandbox 操作は epoch で拒否される。拒否できないのは、外部 MCP の副作用と Agent Platform 履歴への書込みである。これを許容する理由は、通常の運用障害（Pod の異常終了、ノード入替え）での停止時間を、人手を介さず約3分に収めるため。ノード分断の頻度は低く、被害は一会話に限られると判断した。より強い証拠（ノード隔離の確認など）を使えるようになった場合、この設定を無効にして本来の厳密な条件へ戻す。
+
+回復は需要駆動とする。失効した所有権を処理するのは、その会話に未処理の入力（pending/queued）があるときだけで、誰も待っていない会話は一定間隔（30秒）で入力の有無を確認するにとどめ、旧 Worker への要求や Pod の確認を行わない。失敗した回復は指数バックオフ（5秒から上限5分）で再試行し、高頻度で回り続けない。一度も active にならなかった assigned の失効は、停止すべき SDK が存在しないため、証拠なしで解放する。回復待ちになった会話には、世代ごとに一度だけユーザへ通知する。
 
 Sandbox API は要求の ownership epoch・会話世代・停止境界を読み、受理 intent を transaction で確定する。受理済み操作は command/op ID で監視し、lease 失効で勝手に再送しない。最終的な Sandbox mutation の並行受理は resource lease と generation の gate で制御する。事前チェック直後に世代が変わる競合を、単なるチェック1回で解決したと見なさない。
 
@@ -241,7 +252,7 @@ query/transaction の件数を計測し、全 Worker が全会話を秒ごとに
 
 ## Risks / Trade-offs
 
-- [lease 失効しても旧プロセスが生存] → recovering と停止確認を導入。証明不能なら recovery_blocked。
+- [lease 失効しても旧プロセスが生存] → recovering と停止確認を導入。証明不能なら recovery_blocked。ただし Pod 不在が確認でき、lease 失効から十分な時間が経った場合は自動回復を許容する（D5。残余リスクは、分断ノード上で動き続ける旧 SDK の外部 MCP 副作用と履歴書込み）。
 - [SDK/Slack と DB の間でクラッシュ] → dispatch attempt を残して uncertain。自動再送しない。
 - [共有 Worker の OOM が複数会話に影響] → 稼働 SDK 上限とメモリ指標。上限到達は割当待ちにする。
 - [Control 停止で新規割当・出力が遅れる] → 永続状態と役割 lease で再起動可能にする。既存会話の停止は Control に依存させない。

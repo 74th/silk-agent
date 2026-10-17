@@ -95,7 +95,7 @@
 ## 11. 復旧・drain・縮退（3、6、8～10完了後、D5/D10）
 
 - [x] 11.1 `core/lifecycle.py` の全他起動ID中断を分散経路から除去し、期限切れownershipだけをrecoveringにする。検証: Worker追加起動が正常な別Workerのturnを中断しない。
-- [x] 11.2 quiesce要求とSDK停止確認応答を実装し、旧incarnationの停止証拠を保存する。Pod消失だけで確認済みにしない。検証: 通信断で旧Workerが生存するケースでは新SDKを起動せずrecovery_blockedになる。
+- [x] 11.2 quiesce要求とSDK停止確認応答を実装し、旧incarnationの停止証拠を保存する。既定では Pod 消失だけで確認済みにしない（2026-10-17 の決定で、設定で有効にした場合に限り、Pod UID の不在 + lease 失効から待ち時間経過を証拠とする自動回復を許容。design D5 参照）。検証: 通信断で旧Workerが生存するケースでは新SDKを起動せずrecovery_blockedになる。
 - [x] 11.3 旧Worker停止確認後にepochを進め、未送信input/uncertain/held通知/既存commandを分類する。外部MCPの結果不明を自動再送しない。検証: 旧Worker復帰時の書込み拒否、ユーザresumeで既存command_idの状態が引き継がれる。
 - [x] 11.4 `AgentSession.shutdown` の終了理由をuser_stop/resetとdrain/shutdown/lease_lostに分ける。後者でcancel_commandsを呼ばず、foreground待機をorphanedにする。検証: graceful shutdown・期限切れ・lease失効でremote cancel回数0、ユーザstopではcancelされる。
 - [x] 11.5 admin CLIにWorker/全Workerのdrain開始・状態・解除を追加する。drain中は新規割当を止め、担当中の追記/停止を維持する。検証: active/reserved=0までの遷移と、backgroundのみなら解放可能なことを確認する。
