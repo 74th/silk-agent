@@ -340,3 +340,45 @@ async def _answer_soon(responder):
         await asyncio.sleep(0.05)
         total += await responder.run_once()
     return total
+
+
+@pytest.mark.asyncio
+async def test_redelivery_of_an_enriched_message_is_deduplicated_not_a_conflict():
+    emulator_host = os.environ.get("SILK_AGENT_FIRESTORE_EMULATOR_HOST")
+    if not emulator_host:
+        pytest.skip("set SILK_AGENT_FIRESTORE_EMULATOR_HOST to run the Firestore emulator test")
+    prefix = f"test-{uuid.uuid4().hex[:12]}"
+    dist = DistributedExecutionConfig(firestore_project=f"silk-agent-test-{uuid.uuid4().hex[:12]}")
+    client = create_firestore_client(dist, emulator_host=emulator_host)
+    inbox = FirestoreInboxStore(client, collection_prefix=prefix)
+    key = f"slack:T:C:{uuid.uuid4().hex}"
+    args = dict(
+        conversation_key=key,
+        input_id="C:100.2",
+        conversation_generation=1,
+        kind="message",
+        payload={"text": "hello", "user": "U1"},
+        created_at=datetime.now(UTC),
+        workspace="W",
+        team="T",
+        channel="C",
+        message_ts="100.2",
+        event_id="Ev1",
+    )
+    try:
+        first = await inbox.accept_received(**args)
+        # Sender enrichment adds "sender" to the stored payload after the ACK.
+        inputs = (
+            client.collection(f"{prefix}_conversations")
+            .document(inbox._conversation_id(key))
+            .collection("inputs")
+        )
+        async for snapshot in inputs.stream():
+            await snapshot.reference.update({"payload.sender": {"email": "u@example.com"}})
+        # Slack redelivers the identical event (same event id) and the sibling event type.
+        again = await inbox.accept_received(**args)
+        sibling = await inbox.accept_received(**{**args, "event_id": "Ev2"})
+        assert again.input_id == sibling.input_id == first.input_id
+        assert len(await inbox.list_unfinished(key)) == 1
+    finally:
+        client.close()

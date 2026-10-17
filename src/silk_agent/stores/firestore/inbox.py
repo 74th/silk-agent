@@ -162,15 +162,27 @@ class FirestoreInboxStore:
             }
             if record_snapshot.exists:
                 record_data = cast(dict[str, Any], record_snapshot.to_dict())
+
+                # The stored payload gains "sender" after acceptance (sender enrichment), so a
+                # redelivery of the same Slack message must be compared without it; otherwise
+                # every retry conflicts, is never ACKed, and Slack keeps resending it.
+                def without_sender(value: Any) -> Any:
+                    return (
+                        {k: v for k, v in value.items() if k != "sender"}
+                        if isinstance(value, Mapping)
+                        else value
+                    )
+
                 expected_data = {
                     "conversation_key": conversation_key,
                     "conversation_generation": conversation_generation,
                     "kind": kind,
-                    "payload": dict(payload),
+                    "payload": without_sender(dict(payload)),
                 }
                 if sender_id is not None:
                     expected_data["sender_id"] = sender_id
-                if any(record_data.get(key) != value for key, value in expected_data.items()):
+                stored_data = {**record_data, "payload": without_sender(record_data.get("payload"))}
+                if any(stored_data.get(key) != value for key, value in expected_data.items()):
                     raise FirestoreStoreError("input_conflict")
                 if prior_input_ids and prior_input_ids != {input_id}:
                     raise FirestoreStoreError("deduplicate")

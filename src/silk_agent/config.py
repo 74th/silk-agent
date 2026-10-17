@@ -28,6 +28,8 @@ class SlackConfig(_Model):
     app_token_secret: str = ""
     bot_token_secret: str = ""
     stop_words: list[str] = Field(default_factory=lambda: ["停止", "中止", "中断", "STOP"])
+    # A message that is exactly one of these resets the conversation (distributed Gateway only).
+    reset_words: list[str] = Field(default_factory=lambda: ["リセット", "RESET"])
     interrupt_mode: Literal["append", "interrupt", "queue"] = "append"
     progress: ProgressConfig = Field(default_factory=ProgressConfig)
 

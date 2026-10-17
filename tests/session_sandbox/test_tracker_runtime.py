@@ -131,7 +131,8 @@ async def test_journal_persists_output_chunks_and_replays_by_cursor(tmp_path):
     journal = CommandJournal(tmp_path / "commands.json", buffered_response_limit_bytes=4)
     await journal.reserve({"command_id": "paged", "command": ["printf", "large"]})
     await journal.append_output("paged", "stdout", b"abcdefghij")
-    await journal.update("paged", state="finished", finished_at="2026-10-10T00:00:00+00:00")
+    # Relative to now: a fixed date eventually passes the 7-day output retention and expires it.
+    await journal.update("paged", state="finished", finished_at=datetime.now(UTC).isoformat())
 
     record = await journal.get("paged")
     first = await journal.read_output("paged", "stdout", 0, 3)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 
 from silk_agent.core.distributed_models import InputDeliveryState, InputEnvelope, OwnershipToken
 from silk_agent.core.distributed_ports import CommandMonitorStore, InboxStore
@@ -13,15 +14,21 @@ class CompletionInputDelivery:
     def __init__(
         self,
         inbox: InboxStore,
-        owner: OwnershipToken,
+        owner: OwnershipToken | Callable[[], OwnershipToken],
         session: AgentSession,
         *,
         command_monitor: CommandMonitorStore | None = None,
     ) -> None:
         self._inbox = inbox
-        self._owner = owner
+        self._owner_source = owner
         self._session = session
         self._command_monitor = command_monitor
+
+    @property
+    def _owner(self) -> OwnershipToken:
+        """The current token: a lease renewal replaces it while an operation is in flight."""
+        source = self._owner_source
+        return source() if callable(source) else source
 
     async def dispatch(self, envelope: InputEnvelope) -> str:
         if envelope.kind != "command_finished":

@@ -302,3 +302,44 @@ async def _participates(inbox, key):
 
 async def _ignore_ack(_response):
     return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "event_type", "expected"),
+    [
+        ("リセット", "message", "reset_candidate"),
+        ("reset", "message", "reset_candidate"),  # case-insensitive
+        ("<@UBOT> リセット", "app_mention", "reset_candidate"),
+        ("リセットして", "message", "message"),  # only an exact word resets
+        ("停止", "message", "stop_candidate"),
+    ],
+)
+async def test_reset_word_is_a_control_candidate_only_when_it_is_the_whole_message(
+    text, event_type, expected
+):
+    from silk_agent.config import Config
+
+    config = Config()
+
+    async def participating(_key):
+        return True
+
+    normalizer = SlackEventNormalizer(
+        bot_user_id="UBOT",
+        is_participating=participating,
+        stop_words=config.slack.stop_words,
+        reset_words=config.slack.reset_words,
+    )
+    event = {
+        "user": "U2",
+        "text": text,
+        "channel": "C1",
+        "channel_type": "channel",
+        "thread_ts": "100.1",
+        "ts": "102.1",
+    }
+    received = await normalizer(slack_envelope(event_type, event, event_id="Ev9"))
+    assert received is not None and received.kind == expected
+    if expected == "reset_candidate":
+        assert received.sender_id == "U2"  # authorized later from the resolved sender

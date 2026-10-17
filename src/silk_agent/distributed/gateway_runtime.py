@@ -67,6 +67,7 @@ async def run_gateway(config: Config) -> None:
             is_participating=is_participating,
             conversation_generation=conversation_generation,
             stop_words=config.slack.stop_words,
+            reset_words=config.slack.reset_words,
         )
         users = UserDirectory(web_client, clock)
         enricher = SlackSenderEnricher(

@@ -237,3 +237,40 @@ async def _resolved(value):
 
 async def _set(event):
     event.set()
+
+
+@pytest.mark.asyncio
+async def test_a_refused_hand_off_is_retried_without_repeating_preparation():
+    from silk_agent.distributed.dispatcher import DispatchRetryable
+
+    prepared = []
+    attempts = []
+    done = asyncio.Event()
+
+    async def prepare(record):
+        prepared.append(record.seq)
+        return record.seq
+
+    async def run_turns(stop):
+        await stop.wait()
+
+    async def dispatch(envelope, _prepared):
+        attempts.append(envelope.seq)
+        if len(attempts) < 3:
+            raise DispatchRetryable()  # refused with no side effects
+        done.set()
+
+    dispatcher = ConversationDispatcher(
+        read_inputs=lambda: _resolved((input_envelope(1),)),
+        read_controls=lambda: _resolved(()),
+        prepare_input=prepare,
+        dispatch_input=dispatch,
+        handle_control=lambda _control: _resolved(None),
+        run_turns=run_turns,
+        poll_seconds=0.01,
+    )
+    task = asyncio.create_task(dispatcher.run())
+    await asyncio.wait_for(done.wait(), 2)
+    assert attempts == [1, 1, 1] and prepared == [1]  # guard/history ran once
+    dispatcher.stop()
+    await task

@@ -141,3 +141,36 @@ async def test_two_workers_sharing_inbox_cannot_dispatch_the_same_input():
     assert results.count("queued") == 1
     assert results.count("rejected") == 1
     assert sum(session.message is not None for session in (session_a, session_b)) == 1
+
+
+@pytest.mark.asyncio
+async def test_delivery_uses_the_current_token_after_a_lease_renewal_mid_operation():
+    from dataclasses import replace as dc_replace
+    from datetime import timedelta
+
+    inbox = FakeInboxStore()
+    now = datetime.now(UTC)
+    first = OwnershipToken("conversation", "w", "i", 1, 1, now + timedelta(seconds=60))
+    inbox.owners[first.conversation_key] = first
+    envelope = await inbox.accept_input(
+        conversation_key=first.conversation_key,
+        input_id="in-1",
+        conversation_generation=1,
+        kind="message",
+        payload={"text": "hi", "user": "U1"},
+        created_at=now,
+    )
+    holder = {"token": first}
+
+    class Session:
+        async def submit(self, message, *, before_queue=None):
+            # The Worker renews its lease between the first CAS and the hand-off.
+            renewed = dc_replace(first, expires_at=first.expires_at + timedelta(seconds=20))
+            inbox.owners[first.conversation_key] = renewed
+            holder["token"] = renewed
+            assert before_queue is not None and await before_queue(message.input_id)
+            return "queued"
+
+    delivery = DurableInputDelivery(inbox, lambda: holder["token"], Session())
+    message = UserMessage("conversation", "U1", "hi", input_id="in-1")
+    assert await delivery.dispatch(envelope, message) == "queued"

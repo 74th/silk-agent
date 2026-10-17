@@ -17,12 +17,14 @@ from silk_agent.distributed.completion import (
     CompletionInputDelivery,
     release_held_completions,
 )
-from silk_agent.distributed.dispatcher import ConversationDispatcher
+from silk_agent.distributed.dispatcher import ConversationDispatcher, DispatchRetryable
 from silk_agent.distributed.input_delivery import DurableInputDelivery
 from silk_agent.distributed.metrics import METRICS
 
 log = logging.getLogger(__name__)
 INPUT_PAGE = 100
+
+
 ControlReader = Callable[[], Awaitable[Sequence[Mapping[str, Any]]]]
 ControlHandler = Callable[[Mapping[str, Any]], Awaitable[None]]
 
@@ -75,10 +77,10 @@ class DistributedConversationActor:
             uncertain=self._mark_uncertain,
         )
         self._session = await registry.get_or_create(self._owner.conversation_key)
-        self._delivery = DurableInputDelivery(self._inbox, self._owner, self._session)
+        self._delivery = DurableInputDelivery(self._inbox, lambda: self._owner, self._session)
         self._completion = CompletionInputDelivery(
             self._inbox,
-            self._owner,
+            lambda: self._owner,
             self._session,
             command_monitor=self._command_monitor,
         )
@@ -140,10 +142,10 @@ class DistributedConversationActor:
 
     def _refresh_delivery(self) -> None:
         if self._delivery is not None and self._session is not None:
-            self._delivery = DurableInputDelivery(self._inbox, self._owner, self._session)
+            self._delivery = DurableInputDelivery(self._inbox, lambda: self._owner, self._session)
             self._completion = CompletionInputDelivery(
                 self._inbox,
-                self._owner,
+                lambda: self._owner,
                 self._session,
                 command_monitor=self._command_monitor,
             )
@@ -229,6 +231,11 @@ class DistributedConversationActor:
         if self._delivery is None:
             raise RuntimeError("conversation actor has not started")
         outcome = await self._delivery.dispatch(envelope, message)
+        if outcome == "rejected":
+            # Nothing was sent (state is back to pending): try again instead of leaving the
+            # input stranded behind a dispatcher that considers it handled.
+            log.warning("input dispatch was rejected; will retry")
+            raise DispatchRetryable()
         if outcome != "rejected" and envelope.kind == "message":
             # The user is back: hand over command results kept while the turn was interrupted.
             released = await release_held_completions(

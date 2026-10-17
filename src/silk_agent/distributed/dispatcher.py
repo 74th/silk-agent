@@ -13,6 +13,10 @@ log = logging.getLogger(__name__)
 Prepared = TypeVar("Prepared")
 
 
+class DispatchRetryable(Exception):
+    """Raised by ``dispatch_input`` when the hand-off was refused without side effects."""
+
+
 def _default_control_key(control: Any) -> str:
     if isinstance(control, Mapping):
         return str(control.get("input_id", id(control)))
@@ -168,7 +172,15 @@ class ConversationDispatcher[Control, Prepared]:
             if self._stop.is_set():
                 return
             prepared = await self._prepare_input(record)
-            await self._dispatch_input(record, prepared)
+            while True:
+                try:
+                    await self._dispatch_input(record, prepared)
+                    break
+                except DispatchRetryable:
+                    # Preparation (guard, history, owner) is not repeated; only the hand-off.
+                    await asyncio.sleep(self._poll_seconds)
+                    if self._stop.is_set():
+                        return
             committed = True
         except asyncio.CancelledError:
             raise
