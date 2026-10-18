@@ -377,7 +377,7 @@ class AgentSession:
                     for input_id in self._turn_input_ids:
                         try:
                             await self._input_interrupted(
-                                input_id, self._interrupt_reason or "user"
+                                input_id, self._interrupt_reason or "unknown"
                             )
                         except Exception:
                             log.exception("failed to settle an interrupted input for %s", self.key)

@@ -123,21 +123,22 @@ class DurableInputDelivery:
             new_state=InputDeliveryState.ACCEPTED,
         )
 
-    async def interrupted(self, input_id: str, reason: str) -> bool:
+    async def interrupted(self, input_id: str, reason: str, *, cancel: bool | None = None) -> bool:
         """Settle an accepted input whose turn ended in an interrupt.
 
-        A user stop/reset or a newer message that replaced the turn cancels it. A stop by the
-        system (shutdown, drain, lost lease) leaves it unknown: never resent automatically.
+        A user stop/reset that covers the input, or a newer message that replaced the turn,
+        cancels it. Anything else is unknown and never resent automatically: a stop by the
+        system (shutdown, drain, lost lease), a reason nobody recorded (the stream just ended),
+        or an input behind the stop boundary that was appended to the turn being stopped.
         """
-        user_initiated = reason in {"user", "reset", "new_message"}
+        if cancel is None:
+            cancel = reason in {"user", "reset", "new_message"}
         return await self._inbox.advance_input(
             conversation_key=self._owner.conversation_key,
             input_id=input_id,
             owner=self._owner,
             expected=InputDeliveryState.ACCEPTED,
-            new_state=(
-                InputDeliveryState.CANCELLED if user_initiated else InputDeliveryState.UNCERTAIN
-            ),
+            new_state=InputDeliveryState.CANCELLED if cancel else InputDeliveryState.UNCERTAIN,
         )
 
     async def mark_uncertain(self, input_id: str) -> bool:

@@ -107,6 +107,22 @@ silk-agent recovery confirm-stopped CONVERSATION_KEY --evidence "node gke-xxx de
 - 出力が `uncertain` の会話は、その後の出力の送信が止まる（順序を守るため）。投稿の有無を確認した上で、該当 document の `status` を `delivered`（投稿済み）または `pending`（未投稿）に手動で更新する。更新前に `output_id` と Slack のスレッドを突き合わせる。
 - 入力が `uncertain` の会話は、ユーザが次の入力を送ると通常どおり処理される。必要なら Slack で再依頼を案内する。
 
+**入力の終端状態（会話が詰まらないための取り決め）**
+
+| 状況 | 入力の状態 |
+| --- | --- |
+| ユーザの STOP / リセットで中断された turn の入力（停止境界以下） | `cancelled` |
+| 新しいメッセージで turn が置き換えられた入力（`interrupt` モード） | `cancelled` |
+| 停止境界より後なのに、停止される turn に渡ってしまった入力 | `uncertain`（実際に処理されたか不明。再送しない） |
+| shutdown / drain / lease 喪失で中断された turn の入力 | `uncertain` |
+| 結果も中断の理由も記録されずに SDK のストリームが終わった turn の入力 | `uncertain` |
+| SDK へ渡した後に「accepted」の記録が拒否された入力 | `uncertain`（再送・再試行しない） |
+| 準備（ガード、履歴、開始者の確定）が12回失敗し続けた入力 | `blocked`（後続の入力が進めるように） |
+| 送信者を確定的に解決できない入力（`user_not_found`、`user_not_visible`。3回） | `blocked`。Gateway がスレッドに「送信者を確認できなかったため…」と投稿する（Outbox を通さない直接の投稿で、失敗しても再試行しない） |
+| Slack の一時的な障害・レート制限、および `missing_scope` / `account_inactive` / `invalid_auth`（トークン・アプリ側の問題）による送信者の解決失敗 | 待ち続ける（打ち切らない。復旧・設定修正後に処理される）。全メッセージが解決待ちで止まったら Gateway のログ「Slack user lookup is misconfigured」とトークンの `users:read` / `users:read.email` スコープを確認する |
+
+停止が認可されてから Worker がそれを適用するまでの1〜2秒に届いた入力は、停止の適用が終わるまで SDK に渡さず（最大60秒。適用できない制御に対しては一度待ちきったら以降の入力は待たない。完了通知の入力も同じ）、停止後の新しい turn で処理する。制御の処理が失敗し続ける場合は、同じ制御を再試行する間隔を指数的に伸ばす（上限30秒）。新しい Worker は、起動時に前の所有者が残した `dispatching` / `accepted` の入力を `uncertain` にする。
+
 ## 7. 観測
 
 `/metrics`（`:9090`）の主な指標。会話 ID・ユーザ・本文は label に使わない。

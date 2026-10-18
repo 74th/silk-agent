@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import functools
+import inspect
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
@@ -284,6 +287,31 @@ class FakeInboxStore:
             )
         return records[:limit]
 
+    async def list_authorized_controls(self, conversation_key, *, limit=100):
+        records = []
+        for (key, input_id), envelope in self.controls.items():
+            if key == conversation_key and self.control_authorization.get((key, input_id)) == (
+                "authorized"
+            ):
+                records.append(
+                    {
+                        "conversation_key": key,
+                        "input_id": input_id,
+                        "kind": envelope.kind,
+                        "seq": envelope.seq,
+                        "conversation_generation": envelope.conversation_generation,
+                    }
+                )
+        return tuple(sorted(records, key=lambda item: item["seq"]))[:limit]
+
+    async def mark_control_handled(self, *, conversation_key, input_id, owner, now):
+        del owner, now
+        key = (conversation_key, input_id)
+        if self.control_authorization.get(key) != "authorized":
+            return False
+        self.control_authorization[key] = "handled"
+        return True
+
     async def resolve_control_authorization(self, *, conversation_key, input_id, authorized, now):
         del now
         key = (conversation_key, input_id)
@@ -442,3 +470,27 @@ class FakeInboxStore:
 def inbox_store_contract(fake: FakeInboxStore) -> InboxStore:
     """A typed assignment makes pyrefly verify this fake against the full port."""
     return fake
+
+
+def _yielding(function):
+    """Every store call yields to the event loop once, as a real RPC does.
+
+    Without this, an in-memory fake never lets another task run in the middle of an operation,
+    so races between a reader scan and an in-flight hand-off cannot show up in tests.
+    """
+
+    @functools.wraps(function)
+    async def wrapper(*args, **kwargs):
+        await asyncio.sleep(0)
+        return await function(*args, **kwargs)
+
+    return wrapper
+
+
+def make_yielding(cls) -> None:
+    for name, function in list(vars(cls).items()):
+        if inspect.iscoroutinefunction(function) and not name.startswith("_"):
+            setattr(cls, name, _yielding(function))
+
+
+make_yielding(FakeInboxStore)

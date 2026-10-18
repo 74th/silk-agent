@@ -20,7 +20,7 @@ from silk_agent.core.distributed_ports import (
     OwnershipStore,
     WorkerDirectory,
 )
-from tests.fakes.distributed_inbox import FakeInboxStore
+from tests.fakes.distributed_inbox import FakeInboxStore, make_yielding
 
 
 class FakeSharedStore(FakeInboxStore):
@@ -611,3 +611,6 @@ def as_outbox_store(store: FakeSharedStore) -> OutboxStore:
 
 def as_worker_directory(store: FakeSharedStore) -> WorkerDirectory:
     return store
+
+
+make_yielding(FakeSharedStore)

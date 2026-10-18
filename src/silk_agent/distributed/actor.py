@@ -23,6 +23,7 @@ from silk_agent.distributed.metrics import METRICS
 
 log = logging.getLogger(__name__)
 INPUT_PAGE = 100
+_GATE_RECHECK_SECONDS = 0.5
 _DELIVERABLE = (InputDeliveryState.PENDING, InputDeliveryState.QUEUED)
 
 
@@ -49,7 +50,14 @@ class DistributedConversationActor:
         command_monitor: CommandMonitorStore | None = None,
         poll_seconds: float = 1,
         control_only: bool = False,
+        read_stop_seq: Callable[[], Awaitable[int]] | None = None,
+        stop_gate_seconds: float = 60.0,
     ) -> None:
+        self._read_stop_seq = read_stop_seq
+        self._stop_gate_seconds = stop_gate_seconds
+        self._input_seqs: dict[str, int] = {}
+        self._stop_applied = asyncio.Event()
+        self._gate_gave_up: set[str] = set()
         self._control_only = control_only
         self._owner = owner
         self._inbox = inbox
@@ -94,7 +102,7 @@ class DistributedConversationActor:
             read_controls=self._read_controls,
             prepare_input=self._prepare_input,
             dispatch_input=self._dispatch_input,
-            handle_control=self._handle_control,
+            handle_control=self._handle_control_and_signal,
             dispatch_completion=self._dispatch_completion,
             run_turns=self._wait_for_stop,
             poll_seconds=self._poll_seconds,
@@ -225,12 +233,15 @@ class DistributedConversationActor:
         self, envelope: InputEnvelope, prepared: tuple[UserMessage, bool]
     ) -> None:
         message, allowed = prepared
+        await self._wait_for_pending_stop(envelope.seq)
+        self._input_seqs[envelope.input_id] = envelope.seq
         self._origin_seq = max(self._origin_seq, envelope.seq)
         METRICS.observe(
             "input_dispatch_latency_seconds",
             max(0.0, (datetime.now(UTC) - envelope.created_at).total_seconds()),
         )
         if not allowed:
+            self._input_seqs.pop(envelope.input_id, None)
             if envelope.delivery_state is not InputDeliveryState.PENDING:
                 return
             await self._inbox.advance_input(
@@ -252,6 +263,7 @@ class DistributedConversationActor:
         if outcome == "fenced":
             # The SDK already has it; the delivery marked it uncertain. Never retry.
             log.warning("input reached the SDK but its accepted record was fenced")
+            self._input_seqs.pop(envelope.input_id, None)
             return
         if envelope.kind == "message":
             # The user is back: hand over command results kept while the turn was interrupted.
@@ -292,8 +304,10 @@ class DistributedConversationActor:
         return latest[0] if latest and latest[0].seq == record.seq else None
 
     async def _still_unfinished(self, seq: int) -> bool:
+        """Unfinished in ANY state: an input being handed to the SDK (dispatching) or already
+        accepted is not cancelled, just no longer deliverable."""
         latest = await self._inbox.list_unfinished(
-            self._owner.conversation_key, after_seq=seq - 1, limit=1, states=_DELIVERABLE
+            self._owner.conversation_key, after_seq=seq - 1, limit=1
         )
         return bool(latest) and latest[0].seq == seq
 
@@ -311,6 +325,7 @@ class DistributedConversationActor:
             expected=record.delivery_state,
             new_state=terminal,
         )
+        self._input_seqs.pop(record.input_id, None)
         METRICS.inc("inputs_abandoned_total")
 
     async def _settle_leftovers(self) -> None:
@@ -333,17 +348,74 @@ class DistributedConversationActor:
         if leftovers:
             METRICS.inc("inputs_uncertain_total", len(leftovers))
 
+    async def _wait_for_pending_stop(self, seq: int) -> None:
+        """Do not hand an input to a turn that an authorized stop is about to interrupt.
+
+        Control commits ``stop_seq`` when it authorizes the stop, but this Worker applies it up
+        to a second or two later. An input that arrives in between has a later sequence than the
+        stop and must run after it: appending it to the turn being stopped would lose it.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._stop_gate_seconds
+        while True:
+            controls = await self._inbox.list_authorized_controls(self._owner.conversation_key)
+            pending = [
+                str(control.get("input_id"))
+                for control in controls
+                if control.get("kind") in {"stop_candidate", "reset_candidate"}
+                and isinstance(control.get("seq"), int)
+                and control["seq"] < seq
+                and str(control.get("input_id")) not in self._gate_gave_up
+            ]
+            if not pending:
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                # Remember it: every later input would otherwise wait the full time again for a
+                # control that cannot be applied.
+                self._gate_gave_up.update(pending)
+                log.warning("a stop is still being applied; handing the input over anyway")
+                return
+            self._stop_applied.clear()
+            try:
+                await asyncio.wait_for(
+                    self._stop_applied.wait(), timeout=min(_GATE_RECHECK_SECONDS, remaining)
+                )
+            except TimeoutError:
+                pass
+
+    async def _handle_control_and_signal(self, control: Any) -> None:
+        await self._handle_control(control)
+        self._stop_applied.set()  # wakes inputs waiting for a stop to be applied
+
     async def _mark_interrupted(self, input_id: str, reason: str) -> None:
-        if self._delivery is not None:
-            await self._delivery.interrupted(input_id, reason)
+        if self._delivery is None:
+            return
+        cancel: bool | None = None
+        if reason in {"user", "reset"} and self._read_stop_seq is not None:
+            # Only inputs the stop covers are cancelled. One behind the boundary reached this
+            # turn in the window before the stop was applied: its fate is unknown, not "cancelled".
+            seq = self._input_seqs.get(input_id)
+            try:
+                stop_seq = await self._read_stop_seq()
+            except Exception as exc:
+                log.warning("could not read the stop boundary (%s)", type(exc).__name__)
+                stop_seq = None
+            cancel = seq is not None and stop_seq is not None and seq <= stop_seq
+        await self._delivery.interrupted(input_id, reason, cancel=cancel)
+        self._input_seqs.pop(input_id, None)
 
     async def _on_inputs_dropped(self, input_ids: list[str]) -> None:
+        for input_id in input_ids:
+            self._input_seqs.pop(input_id, None)
         if self._dispatcher is not None:
             self._dispatcher.forget_inputs(input_ids)
 
     async def _dispatch_completion(self, envelope: InputEnvelope) -> None:
         if self._completion is None:
             raise RuntimeError("conversation actor has not started")
+        await self._wait_for_pending_stop(envelope.seq)
+        self._input_seqs[envelope.input_id] = envelope.seq
         self._origin_seq = max(self._origin_seq, envelope.seq)
         await self._completion.dispatch(envelope)
 
@@ -353,6 +425,7 @@ class DistributedConversationActor:
     async def _mark_completed(self, input_id: str) -> None:
         if self._delivery is not None:
             await self._delivery.complete(input_id)
+        self._input_seqs.pop(input_id, None)
 
     async def _mark_started(self, input_id: str) -> bool:
         if self._delivery is not None:
@@ -363,6 +436,7 @@ class DistributedConversationActor:
         METRICS.inc("inputs_uncertain_total")
         if self._delivery is not None:
             await self._delivery.mark_uncertain(input_id)
+        self._input_seqs.pop(input_id, None)
 
 
 def _message_from_envelope(envelope: InputEnvelope) -> UserMessage:

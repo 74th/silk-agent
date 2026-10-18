@@ -25,6 +25,18 @@ class Users:
         return self.values.pop(0)
 
 
+class CheckedUsers(Users):
+    """A directory that says whether a missing result is definitive (see lookup_checked)."""
+
+    def __init__(self, values, *, definitive):
+        super().__init__(values)
+        self.definitive = definitive
+
+    async def lookup_checked(self, user_id):
+        user = await self.lookup(user_id)
+        return user, user is None and self.definitive
+
+
 async def accept(inbox, now):
     return await inbox.accept_received(
         conversation_key="slack:T1:C1:100.1",
@@ -178,7 +190,7 @@ async def test_a_sender_that_never_resolves_is_given_up_blocking_the_input_and_t
     async def on_gave_up(key, input_id, collection):
         told.append((key, input_id, collection))
 
-    users = Users([None] * 10)
+    users = CheckedUsers([None] * 10, definitive=True)
     enricher = SlackSenderEnricher(
         inbox,
         users,
@@ -221,8 +233,65 @@ async def test_an_unresolvable_stop_candidate_is_filtered_not_authorized():
         sender_id="U1",
     )
     enricher = SlackSenderEnricher(
-        inbox, Users([None] * 5), clock, workspace_team="T1", max_attempts=1
+        inbox, CheckedUsers([None] * 5, definitive=True), clock, workspace_team="T1", max_attempts=1
     )
     await enricher.run_once()
     key = (control.conversation_key, control.input_id)
     assert inbox.control_authorization[key] == "filtered"
+
+
+@pytest.mark.asyncio
+async def test_a_slack_outage_never_discards_messages_and_they_resolve_after_recovery():
+    """S3: a long rate limit or outage is transient, so the lookup keeps retrying instead of
+    blocking every message that arrived meanwhile."""
+    inbox = FakeInboxStore()
+    clock = Clock()
+    envelope = await accept(inbox, clock.now())
+    told = []
+
+    async def on_gave_up(*args):
+        told.append(args)
+
+    outage = [None] * 40  # far beyond any attempt limit
+    users = CheckedUsers([*outage, SlackUser("u@example.com", False, "T1", "E1")], definitive=False)
+    enricher = SlackSenderEnricher(
+        inbox, users, clock, workspace_team="T1", max_attempts=3, on_gave_up=on_gave_up
+    )
+    key = (envelope.conversation_key, envelope.input_id)
+    for _ in range(40):
+        await enricher.run_once()
+        clock.value += timedelta(hours=1)
+    assert inbox.inputs[key].delivery_state.value == "pending"  # never blocked
+    assert inbox.sender_enrichment[key]["sender_lookup_state"] == "pending"
+    assert not told
+    await enricher.run_once()  # Slack is back
+    assert inbox.sender_enrichment[key]["sender_lookup_state"] == "resolved"
+    assert inbox.inputs[key].payload["sender"]["email"] == "u@example.com"
+
+
+@pytest.mark.asyncio
+async def test_user_directory_tells_definitive_failures_from_transient_ones():
+    from silk_agent.channels.slack_users import UserDirectory
+
+    class SlackApiError(Exception):
+        def __init__(self, error):
+            self.response = {"error": error}
+
+    class Client:
+        def __init__(self, error):
+            self.error = error
+
+        async def users_info(self, user):
+            raise SlackApiError(self.error) if self.error else ConnectionError("network")
+
+    for error, definitive in (
+        ("user_not_found", True),
+        ("user_not_visible", True),
+        ("missing_scope", False),  # a token problem: waiting messages must survive the fix
+        ("account_inactive", False),
+        ("ratelimited", False),
+        ("internal_error", False),
+        (None, False),  # not a Slack answer at all
+    ):
+        result = await UserDirectory(Client(error), Clock()).lookup_checked("U1")
+        assert result == (None, definitive), error

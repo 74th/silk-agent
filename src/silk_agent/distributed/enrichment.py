@@ -35,7 +35,7 @@ class SlackSenderEnricher:
         retry_base_seconds: int = 5,
         retry_max_seconds: int = 300,
         batch_size: int = 100,
-        max_attempts: int = 8,
+        max_attempts: int = 3,
         on_gave_up: Callable[[str, str, str], Awaitable[None]] | None = None,
     ) -> None:
         if retry_base_seconds <= 0 or retry_max_seconds < retry_base_seconds or batch_size <= 0:
@@ -113,8 +113,13 @@ class SlackSenderEnricher:
             return
         if not isinstance(user_id, str) or not user_id:
             return
+        definitive = False
         try:
-            user = await self._users.lookup(user_id)
+            checked = getattr(self._users, "lookup_checked", None)
+            if checked is not None:
+                user, definitive = await checked(user_id)
+            else:
+                user = await self._users.lookup(user_id)
         except Exception as exc:
             log.warning("Slack sender lookup failed (%s)", type(exc).__name__)
             user = None
@@ -123,9 +128,13 @@ class SlackSenderEnricher:
             attempt = record.get("sender_lookup_attempts", 0)
             attempt = attempt if isinstance(attempt, int) and not isinstance(attempt, bool) else 0
             delay = min(self._retry_base * (2 ** min(attempt, 16)), self._retry_max)
-            # A sender that can never be resolved (scope revoked, deleted or external user,
-            # long rate limiting) must not hold the conversation, or its STOP, forever.
-            give_up = attempt + 1 >= self._max_attempts
+            # A sender that can never be resolved (scope revoked, deleted or invisible user)
+            # must not hold the conversation, or its STOP, forever.
+            # Only a definitive answer ("no such user", "not visible") ends the lookup. A rate
+            # limit, an outage or a token problem (missing scope) keeps retrying with the capped
+            # backoff: giving up there would permanently discard every message that arrived
+            # during the outage.
+            give_up = definitive and attempt + 1 >= self._max_attempts
             recorded = await self._inbox.record_sender_enrichment(
                 conversation_key=conversation_key,
                 input_id=input_id,

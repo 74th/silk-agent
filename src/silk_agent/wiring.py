@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +84,7 @@ def build_engine_factory(
     skills: SkillSource | None = None,
     tracker: CommandTracker | None = None,
     on_session_id: Callable[[str, str], None] | None = None,
+    on_query_start: Callable[[str, str, str, str], Awaitable[None]] | None = None,
     model: str | None = None,
     extra_env: dict[str, str] | None = None,
     background: BackgroundCommands | None = None,
@@ -115,6 +116,7 @@ def build_engine_factory(
         skills=skills,
         on_skills_generation=on_skills if skills is not None else None,
         on_session_id=on_session_id,
+        on_query_start=on_query_start,
         on_hook_event=on_hook_event,
         extra_env=extra_env or {},
     )

@@ -13,6 +13,15 @@ from silk_agent.distributed.actor import DistributedConversationActor
 from silk_agent.testing.fakes import AllowAllGuard, FakeAgentEngine, NoopSanitizer, Text
 from tests.fakes.distributed_inbox import FakeInboxStore
 
+
+async def wait_for_state(inbox, key, input_id, expected, seconds=3.0):
+    """The completed record is written after the TurnFinished event (the stores yield)."""
+    deadline = asyncio.get_running_loop().time() + seconds
+    while inbox.inputs[(key, input_id)].delivery_state is not expected:
+        assert asyncio.get_running_loop().time() < deadline, "state was not reached"
+        await asyncio.sleep(0.01)
+
+
 SENDER = {"email": "u@example.com", "is_guest": False, "is_external": False, "team": "T"}
 
 
@@ -56,8 +65,8 @@ async def test_distributed_actor_dispatches_durable_input_and_completes_it(clock
     await actor.start()
     await channel.wait_for(TurnFinished)
 
-    assert inbox.inputs[(owner.conversation_key, envelope.input_id)].delivery_state is (
-        InputDeliveryState.COMPLETED
+    await wait_for_state(
+        inbox, owner.conversation_key, envelope.input_id, InputDeliveryState.COMPLETED
     )
     await actor.aclose()
 
@@ -113,8 +122,8 @@ async def test_distributed_actor_resumes_queued_input_without_rechecking_guard(c
     await channel.wait_for(TurnFinished)
 
     assert guard_calls == []
-    assert inbox.inputs[(owner.conversation_key, envelope.input_id)].delivery_state is (
-        InputDeliveryState.COMPLETED
+    await wait_for_state(
+        inbox, owner.conversation_key, envelope.input_id, InputDeliveryState.COMPLETED
     )
     await actor.aclose()
 
@@ -172,8 +181,8 @@ async def test_a_message_waits_for_its_sender_and_is_then_judged_with_it(clock, 
         envelope, payload={**envelope.payload, "sender": SENDER}
     )
     await channel.wait_for(TurnFinished)
-    assert inbox.inputs[(owner.conversation_key, envelope.input_id)].delivery_state is (
-        InputDeliveryState.COMPLETED
+    await wait_for_state(
+        inbox, owner.conversation_key, envelope.input_id, InputDeliveryState.COMPLETED
     )
     await actor.aclose()
 

@@ -29,7 +29,7 @@ silk-agent の検証用 GKE をこのリポジトリの管理下で再現し、�
 
 #### Scenario: Bot と Sandbox のイメージを利用する
 - **WHEN** 運用者が新しい保存先へイメージを push し、クラスタへ必要な Kubernetes リソースを適用する
-- **THEN** ノードはそのイメージを pull でき、Bot と gVisor Sandbox は永続ボリュームを持つ Pod として起動できる
+- **THEN** ノードはそのイメージを pull でき、分離されたサービスは管理用共有PVCなしで起動でき、gVisor Sandbox は作業用永続ボリュームを持つ Pod として起動できる
 
 #### Scenario: 許可された端末から接続する
 - **WHEN** 運用者が許可 CIDR 内からクラスタ認証情報を取得する
@@ -48,3 +48,47 @@ silk-agent の検証用 GKE をこのリポジトリの管理下で再現し、�
 #### Scenario: 破棄計画を確認する
 - **WHEN** 運用者が GKE 関連リソースの破棄を計画する
 - **THEN** 旧検証クラスタと既存のアプリ用リソースは対象にならず、残存ディスクの扱いを確認できる
+
+### Requirement: 共有 Worker の分離配置
+システムは、Slack受信、共有Worker、割当・復旧・送信、Sandbox管理を独立して起動できなければならない (SHALL)。分散配置はBotのSQLite用共有PVCを必要としてはならない (SHALL NOT)。SDKとSandboxの通信・権限境界を維持しなければならない (SHALL)。
+
+#### Scenario: Workerの増設
+- **WHEN** 運用者がWorker数を1から2へ増やす
+- **THEN** 同じ共有状態を参照して会話を分担し、SandboxへのEgress許可やSDK権限を広げない
+
+### Requirement: 共有管理ストアの構築と移行
+システムは、Firestoreの設定、必要な権限・索引、既存データの移行・検証手順を提供しなければならない (SHALL)。既存DBを無断で置換したり、旧系と新系を同じ会話の正本として同時稼働させたりしてはならない (SHALL NOT)。
+
+#### Scenario: 既存環境の切替
+- **WHEN** 旧Botと管理処理を停止して移行する
+- **THEN** 会話キー、履歴参照、Sandbox世代、Pod/PVC、開始者が維持され、照合結果を確認してから新系を起動できる
+
+### Requirement: コマンドを止めない計画的縮退
+システムは、Workerの新規割当を停止し、会話を解放してからPod数を減らす手順と、その進行状況を提供しなければならない (SHALL)。Workerの縮退を理由にSandboxのコマンドを取り消してはならない (SHALL NOT)。
+
+#### Scenario: バックグラウンド実行中の縮退
+- **WHEN** Workerをdrainし、SDK turnが完了した状態でPodを削除する
+- **THEN** 同じSandboxとcommand_idでコマンドが継続し、別Workerが後の入力・完了通知を処理する
+
+#### Scenario: 通常の縮退が完了しない
+- **WHEN** 担当会話が実行中でdrainを完了できず、期限が指定されていない
+- **THEN** Pod削除を待機し、運用者は残る会話数を確認できる
+
+### Requirement: Sandbox の一時停止と期限削除を Sandbox 管理サービスが実行する
+Sandbox 管理サービスは、使われていない Sandbox の一時停止と、保持期間を過ぎた Sandbox の削除を、API 要求の寿命から独立して継続的に実行しなければならない (SHALL)。一時停止は設定 `lifecycle.idle_timeout_seconds`（既定300秒）、削除は一時停止時刻から `lifecycle.retention_seconds`（既定7日）を基準とし、期限は管理 DB の `expires_at` と Sandbox リソースの `spec.shutdownTime`（`shutdownPolicy: Delete`）に記録しなければならない (SHALL)。判定の間隔は `lifecycle.reconcile_interval_seconds`（既定60秒）とする。実行中のコマンドを持つ Sandbox を、idle を理由に停止してはならない (SHALL NOT)。複数の Sandbox 管理サービスが動いても、同じ Sandbox を二重に停止・削除してはならない (SHALL NOT)。この処理が起動していない構成を、正常な配置として許してはならない (SHALL NOT)。
+
+#### Scenario: 使われなくなった Sandbox
+- **WHEN** Sandbox が `idle_timeout_seconds` を超えて使われず、実行中のコマンドもない
+- **THEN** 一時停止され（Pod は削除、PVC は保持）、`expires_at` と `spec.shutdownTime` が設定され、次の依頼で同じ PVC から再開できる
+
+#### Scenario: 実行中のコマンドがある
+- **WHEN** Sandbox が `idle_timeout_seconds` を超えて使われていないが、コマンドが実行中である
+- **THEN** 停止されず、コマンドは同じ command_id で継続する
+
+#### Scenario: 保持期間の経過
+- **WHEN** 一時停止から `retention_seconds` が経過する
+- **THEN** Sandbox と PVC が削除され、管理 DB の記録が期限切れとして整合する
+
+#### Scenario: 処理が起動していない
+- **WHEN** Sandbox 管理サービスが reconciler を起動していない設定（`run_reconciler: false`）で配置される
+- **THEN** 配置の検査（manifest の試験）がこれを検出し、Sandbox と PVC が回収されないまま増え続ける構成を受け入れない

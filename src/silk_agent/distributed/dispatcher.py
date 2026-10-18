@@ -81,7 +81,9 @@ class ConversationDispatcher[Control, Prepared]:
         self._pending_sequences: set[int] = set()
         self._seen_inputs: set[str] = set()
         self._seen_controls: set[str] = set()
+        self._control_failures: dict[str, int] = {}
         self._input_tasks: dict[str, tuple[asyncio.Task[Any], int]] = {}
+        self._delivering: set[str] = set()
 
     def wake_inputs(self) -> None:
         self._input_wake.set()
@@ -119,15 +121,7 @@ class ConversationDispatcher[Control, Prepared]:
                 records = sorted(await self._read_inputs(), key=lambda item: item.seq)
                 active_keys = {self._input_key(record) for record in records}
                 complete = self._read_limit is None or len(records) < self._read_limit
-                if complete:
-                    await self._drop_vanished(active_keys)
-                else:
-                    # A full page can hide valid inputs: absence alone proves nothing. Ask the
-                    # store about each waiting input that is missing before cancelling it.
-                    await self._drop_vanished(
-                        active_keys, verify=self._still_unfinished, verified_only=True
-                    )
-                    self._seen_inputs.intersection_update(active_keys | set(self._input_tasks))
+                await self._drop_vanished(active_keys, complete=complete)
                 for record in records:
                     if record.delivery_state not in {
                         InputDeliveryState.PENDING,
@@ -149,27 +143,26 @@ class ConversationDispatcher[Control, Prepared]:
                 log.warning("conversation input scan failed (%s)", type(exc).__name__)
             await self._wait(self._input_wake)
 
-    async def _drop_vanished(
-        self,
-        active_keys: set[str],
-        *,
-        verify: Callable[[int], Awaitable[bool]] | None = None,
-        verified_only: bool = False,
-    ) -> None:
-        """A waiting input that left the unfinished set was cancelled (stop barrier) or
-        finished elsewhere: stop its task and release the sequence it was holding."""
+    async def _drop_vanished(self, active_keys: set[str], *, complete: bool) -> None:
+        """Stop the task of a waiting input that was cancelled (stop barrier) or finished
+        elsewhere, and release the sequence it was holding.
+
+        Absence from the reader's page is not proof: the reader lists only deliverable inputs
+        (pending/queued), so an input that moved on to dispatching is absent too, and a full page
+        can hide later ones. A task that is already handing its input over is never cancelled; for
+        the rest the store is asked whether the input is still unfinished in any state."""
         for key, (task, seq) in tuple(self._input_tasks.items()):
-            if key in active_keys or task.done():
+            if key in active_keys or task.done() or key in self._delivering:
                 continue
-            if verified_only or verify is not None:
-                if verify is None:
-                    continue  # a full page and no way to check: keep waiting
+            if self._still_unfinished is not None:
                 try:
-                    if await verify(seq):
-                        continue  # still unfinished, merely beyond this page
+                    if await self._still_unfinished(seq):
+                        continue
                 except Exception as exc:
                     log.warning("could not verify a waiting input (%s)", type(exc).__name__)
                     continue
+            elif not complete:
+                continue  # a full page and no way to check: keep waiting
             task.cancel()
             async with self._sequence_changed:
                 self._pending_sequences.discard(seq)
@@ -232,7 +225,21 @@ class ConversationDispatcher[Control, Prepared]:
                     )
                     if attempt >= self._max_prepare_attempts:
                         if self._abandon_input is not None:
-                            await self._abandon_input(record)
+                            # Only a recorded abandonment frees the turn; if the write fails,
+                            # keep the turn (later inputs must not overtake) and retry it.
+                            while True:
+                                try:
+                                    await self._abandon_input(record)
+                                    break
+                                except asyncio.CancelledError:
+                                    raise
+                                except Exception as abandon_exc:
+                                    log.warning(
+                                        "could not abandon an input (%s)",
+                                        type(abandon_exc).__name__,
+                                    )
+                                    if not await self._retry_pause(attempt):
+                                        return
                         committed = True  # settled: release the turn to later inputs
                         return
                     if not await self._retry_pause(attempt):
@@ -242,6 +249,7 @@ class ConversationDispatcher[Control, Prepared]:
                         return  # cancelled (stop barrier) while waiting to retry
                     record = latest
             attempt = 0
+            self._delivering.add(key)  # from here the reader must not cancel this task
             while True:
                 try:
                     await self._dispatch_input(record, prepared)
@@ -265,6 +273,7 @@ class ConversationDispatcher[Control, Prepared]:
         except Exception as exc:
             log.warning("conversation input processing failed (%s)", type(exc).__name__)
         finally:
+            self._delivering.discard(key)
             async with self._sequence_changed:
                 if committed:
                     self._pending_sequences.discard(record.seq)
@@ -302,15 +311,27 @@ class ConversationDispatcher[Control, Prepared]:
             await self._wait(self._control_wake)
 
     async def _handle_control_once(self, control: Control, key: str) -> None:
+        failed = False
         try:
             await self._handle_control(control)
+            self._control_failures.pop(key, None)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            failed = True
             log.warning("conversation control processing failed (%s)", type(exc).__name__)
+        try:
+            if failed:
+                # Do not wake the reader: it would re-read the same control at once and spin.
+                # Keep the key marked as seen for a capped, growing pause, then let the next
+                # poll offer it again.
+                attempt = self._control_failures.get(key, 0)
+                self._control_failures[key] = attempt + 1
+                await self._retry_pause(attempt)
         finally:
             self._seen_controls.discard(key)
-            self.wake_controls()
+            if not failed:
+                self.wake_controls()
 
     async def _turn_runner(self) -> None:
         try:

@@ -156,6 +156,11 @@ class WorkerActorFactory:
             output_reader=self._output_reader,
         )
         background = BackgroundCommands(self._runtime, tracker, command_monitor=monitor)
+
+        record_query_start = query_start_recorder(
+            self._inbox, self._clock, lambda: self.owner_for_sync(key) or token
+        )
+
         engine_factory = self._build_engine_factory(
             config,
             self._runtime,
@@ -165,6 +170,7 @@ class WorkerActorFactory:
             skills=self._skills,
             tracker=tracker,
             background=background,
+            on_query_start=record_query_start,
             on_hook_event=self._hooks.publish if self._hooks is not None else None,
         )
         rate_limit = config.filter.rate_limit_per_minute
@@ -241,6 +247,11 @@ class WorkerActorFactory:
 
         holder: dict[str, DistributedConversationActor] = {}
 
+        async def read_stop_seq() -> int:
+            conversation = await self._conversations.get_conversation(key)
+            value = conversation.get("stop_seq", 0) if conversation else 0
+            return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
         async def update_actor(new_owner: OwnershipToken) -> None:
             if self.on_rebound is not None:
                 await self.on_rebound(new_owner)
@@ -267,6 +278,7 @@ class WorkerActorFactory:
             command_monitor=monitor,
             poll_seconds=self._poll_seconds,
             control_only=control_only,
+            read_stop_seq=read_stop_seq,
         )
         holder["actor"] = actor
         return actor
@@ -475,3 +487,33 @@ async def run_worker(config: Config) -> None:
         await asyncio.gather(*background, return_exceptions=True)
         watch_client.close()
         client.close()
+
+
+def query_start_recorder(
+    inbox: Any, clock: Clock, owner: Callable[[], OwnershipToken]
+) -> Callable[[str, str, str, str], Awaitable[None]]:
+    """The Engine's ``on_query_start``: persist the session/input/attempt association before the
+    SDK gets the prompt.
+
+    Inputs without an attempt (internal prompts) have nothing to associate. A refusal means this
+    Worker no longer owns the input (stop, reset, new owner): the prompt must not be sent, and
+    the turn ends as unknown rather than running under a stale lease.
+    """
+
+    async def record(
+        conversation_key: str, session_id: str, input_id: str, attempt_id: str
+    ) -> None:
+        if not input_id or not attempt_id:
+            return
+        recorded = await inbox.record_query_start(
+            conversation_key=conversation_key,
+            input_id=input_id,
+            owner=owner(),
+            dispatch_attempt_id=attempt_id,
+            sdk_session_id=session_id,
+            now=clock.now(),
+        )
+        if not recorded:
+            raise RuntimeError("the query start was refused: the input is no longer ours")
+
+    return record
