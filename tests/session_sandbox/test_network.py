@@ -33,9 +33,21 @@ def test_network_policies_deny_by_default_allow_management_and_cluster_dns() -> 
         "kubernetes.io/metadata.name": "session-sandbox-system"
     }
     dns = next(policy for policy in policies if "dns-egress" in policy["metadata"]["name"])
+    assert len(dns["spec"]["egress"]) == 1
     assert dns["spec"]["egress"][0]["ports"] == [
         {"protocol": "UDP", "port": 53},
         {"protocol": "TCP", "port": 53},
+    ]
+    kube_system = {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}
+    assert dns["spec"]["egress"][0]["to"] == [
+        {
+            "namespaceSelector": kube_system,
+            "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}},
+        },
+        {
+            "namespaceSelector": kube_system,
+            "podSelector": {"matchLabels": {"k8s-app": "node-local-dns"}},
+        },
     ]
     assert deny["spec"]["podSelector"] == {"matchLabels": sandbox_pod_labels(key, 3)}
 

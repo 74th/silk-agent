@@ -125,6 +125,13 @@ resource "google_container_cluster" "gke" {
     gce_persistent_disk_csi_driver_config {
       enabled = true
     }
+
+    # NodeLocal DNSCache. Sandbox DNS egress must allow its node-local-dns Pods
+    # (network.dns_pod_selectors) because Dataplane V2 evaluates policies on the Pod
+    # behind the kube-dns ClusterIP.
+    dns_cache_config {
+      enabled = var.enable_node_local_dns_cache
+    }
   }
 
   release_channel {

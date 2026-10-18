@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestServer
 from gke_session_sandbox import (
     CommandRecord,
     CommandState,
+    ConfigurationError,
     ManagerConfig,
     ResourceOwnershipError,
     ResourceRef,
@@ -70,6 +71,9 @@ class MemoryRepository:
 
     async def get(self, key: SessionKey):
         return self.records.get(key.stable_hash())
+
+    async def get_by_hash(self, key_hash: str):
+        return self.records.get(key_hash)
 
     async def create(self, token, record: SessionRecord) -> StoredSession:
         if record.key_hash in self.records:
@@ -181,6 +185,21 @@ class FakeBackend:
         self.api_client = None
         self.endpoint = ""
         self.endpoint_refs: list[ResourceRef] = []
+        self.diagnostics: list[tuple[str, list[str], str]] = []
+        self.applied: list[tuple[str, tuple[dict, ...], ResourceRef]] = []
+        self.deleted_policies: list[tuple[tuple[str, str, str], ...]] = []
+
+    async def exec_diagnostic(self, ref, command, *, container, timeout_seconds=60):
+        self.diagnostics.append((ref.name, list(command), container))
+        return 0, "ok\n"
+
+    async def apply_policies(self, namespace, policies, *, owner):
+        self.applied.append((namespace, tuple(deepcopy(dict(x)) for x in policies), owner))
+        return ()
+
+    async def delete_policies(self, namespace, names, *, owner, labels):
+        self.deleted_policies.append(tuple(names))
+        return ()
 
     async def create_with_policies(self, manifest, policies, *, namespace: str, name: str):
         if getattr(self, "fail_create", False):
@@ -353,6 +372,43 @@ async def test_session_command_client_ensures_session_and_resolves_current_endpo
         assert stored.record.active_commands == ()
         assert stored.record.last_command_finished_at.isoformat().startswith("2030-01-01")
         await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_applies_current_policies_and_removes_unneeded_optional_ones() -> None:
+    async def gate(request):
+        body = await request.json()
+        return web.json_response({"accepting": body["accepting"], "active_commands": 0})
+
+    app = web.Application()
+    app.router.add_put("/v1/commands/gate", gate)
+    server = TestServer(app)
+    await server.start_server()
+    repository, backend = MemoryRepository(), FakeBackend()
+    backend.endpoint = str(server.make_url("/")).rstrip("/")
+    manager = SandboxManager(config(), repository, backend, template=template())
+    key = SessionKey(tenant_id="tenant", session_id="thread")
+    handle = await manager.ensure(key)
+    suspended = await manager.suspend(handle)
+
+    await manager.resume(suspended)
+    await manager.close()
+    await server.close()
+
+    namespace, policies, owner = backend.applied[-1]
+    assert namespace == "session-sandboxes"
+    assert owner == handle.sandbox_ref
+    dns = next(p for p in policies if "dns-egress" in p["metadata"]["name"])
+    assert [t["podSelector"]["matchLabels"] for t in dns["spec"]["egress"][0]["to"]] == [
+        {"k8s-app": "kube-dns"},
+        {"k8s-app": "node-local-dns"},
+    ]
+    # No FQDN / metadata allowance is configured, so any left over from older settings go.
+    assert [name[1] for name in backend.deleted_policies[-1]] == [
+        "FQDNNetworkPolicy",
+        "NetworkPolicy",
+    ]
+    assert all("fqdn" not in p["metadata"]["name"] for p in policies)
 
 
 @pytest.mark.asyncio
@@ -543,3 +599,150 @@ async def test_create_and_resume_wait_for_the_configured_ready_timeout(runtime, 
     await server.close()
 
     assert backend.ready_timeouts == [expected, expected]
+
+
+async def _ready_manager(backend: FakeBackend | None = None):
+    repository, backend = MemoryRepository(), backend or FakeBackend()
+    manager = SandboxManager(config(), repository, backend, template=template())
+    return manager, repository, backend
+
+
+@pytest.mark.asyncio
+async def test_reapply_network_policies_applies_under_lease_without_touching_the_sandbox() -> None:
+    manager, repository, backend = await _ready_manager()
+    key = SessionKey(tenant_id="tenant", session_id="thread")
+    handle = await manager.ensure(key)
+
+    results = await manager.reapply_network_policies(key)
+
+    assert [(r.key_hash, r.status) for r in results] == [(key.stable_hash(), "applied")]
+    assert backend.applied[-1][2] == handle.sandbox_ref
+    assert backend.started == [] and backend.suspended == [] and backend.deleted == []
+    assert repository.holders == {}
+
+
+@pytest.mark.asyncio
+async def test_reapply_network_policies_skips_sessions_whose_lease_is_held() -> None:
+    manager, repository, backend = await _ready_manager()
+    held = SessionKey(tenant_id="tenant", session_id="held")
+    free = SessionKey(tenant_id="tenant", session_id="free")
+    await manager.ensure(held)
+    await manager.ensure(free)
+    repository.holders[held.stable_hash()] = "lifecycle-operation"
+    backend.applied.clear()
+
+    async def get_owned(ref):
+        key = held if ref.name.startswith(f"session-{held.stable_hash()[:10]}") else free
+        return {
+            "metadata": {
+                "uid": ref.uid,
+                "annotations": {
+                    "session-sandbox.example.com/tenant-id": key.tenant_id,
+                    "session-sandbox.example.com/session-id": key.session_id,
+                },
+            }
+        }
+
+    backend.get_owned = get_owned
+    results = {r.key_hash: r for r in await manager.reapply_network_policies()}
+
+    assert results[held.stable_hash()].status == "skipped"
+    assert "lease" in results[held.stable_hash()].detail
+    assert results[free.stable_hash()].status == "applied"
+    assert len(backend.applied) == 1
+    assert repository.holders == {held.stable_hash(): "lifecycle-operation"}
+
+
+@pytest.mark.asyncio
+async def test_reapply_network_policies_reports_a_foreign_policy_as_failed() -> None:
+    manager, _repository, backend = await _ready_manager()
+    key = SessionKey(tenant_id="tenant", session_id="thread")
+    await manager.ensure(key)
+
+    async def refuse(namespace, policies, *, owner):
+        raise ResourceOwnershipError("NetworkPolicy name already belongs to another owner")
+
+    backend.apply_policies = refuse
+    (result,) = await manager.reapply_network_policies(key)
+
+    assert result.status == "failed"
+    assert "another owner" in result.detail
+
+
+async def _set_state(repository, key, **changes):
+    token = await repository.acquire_lease(key, "test-setup")
+    stored = await repository.get(key)
+    await repository.compare_and_swap(
+        token,
+        stored.record.model_copy(update=changes),
+        expected_resource_version=stored.resource_version,
+    )
+    await repository.release_lease(token)
+
+
+@pytest.mark.asyncio
+async def test_ensure_from_resuming_applies_policies_first_and_stays_resuming_on_failure() -> None:
+    async def gate(request):
+        body = await request.json()
+        return web.json_response({"accepting": body["accepting"], "active_commands": 0})
+
+    app = web.Application()
+    app.router.add_put("/v1/commands/gate", gate)
+    async with TestServer(app) as server:
+        manager, repository, backend = await _ready_manager()
+        backend.endpoint = str(server.make_url("/")).rstrip("/")
+        key = SessionKey(tenant_id="tenant", session_id="thread")
+        handle = await manager.ensure(key)
+        await _set_state(repository, key, state=SessionState.RESUMING)
+
+        healthy_apply = backend.apply_policies
+
+        async def refuse(namespace, policies, *, owner):
+            raise ResourceOwnershipError("NetworkPolicy name already belongs to another owner")
+
+        backend.apply_policies = refuse
+        backend.started.clear()
+        with pytest.raises(ResourceOwnershipError, match="another owner"):
+            await manager.ensure(key)
+        assert repository.records[key.stable_hash()].record.state is SessionState.RESUMING
+        assert backend.started == []
+
+        backend.apply_policies = healthy_apply
+        recovered = await manager.ensure(key)
+        assert recovered.state is SessionState.READY
+        assert backend.started == [handle.sandbox_ref.name]
+        assert backend.applied[-1][2] == handle.sandbox_ref
+        await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_command_refuses_a_suspended_session_and_changes_nothing() -> None:
+    manager, repository, backend = await _ready_manager()
+    key = SessionKey(tenant_id="tenant", session_id="thread")
+    handle = await manager.ensure(key)
+    await _set_state(repository, key, state=SessionState.SUSPENDED)
+    before = repository.records[key.stable_hash()]
+    backend.started.clear()
+
+    with pytest.raises(ConfigurationError, match="suspended.*do not resume"):
+        await manager.run_diagnostic_command(key, ["true"])
+
+    assert repository.records[key.stable_hash()] == before
+    assert backend.started == [] and backend.endpoint_refs == []
+    assert handle.state is SessionState.READY
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_command_bypasses_the_tracker_and_leaves_stored_state_unchanged() -> None:
+    manager, repository, backend = await _ready_manager()
+    # No tracker endpoint exists in this test: any request to it would fail.
+    key = SessionKey(tenant_id="tenant", session_id="thread")
+    handle = await manager.ensure(key)
+    before = repository.records[key.stable_hash()]
+
+    result = await manager.run_diagnostic_command(key, ["true"])
+
+    assert (result.exit_code, result.output) == (0, "ok\n")
+    assert backend.diagnostics == [(handle.sandbox_ref.name, ["true"], "sandboxd")]
+    assert backend.endpoint_refs == []
+    assert repository.records[key.stable_hash()] == before

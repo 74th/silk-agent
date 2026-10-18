@@ -41,6 +41,32 @@ roleRef:
   kind: Role
   name: sandbox-management
 ---
+# Network diagnostics (`silk-agent sandbox-network verify`) run through the Kubernetes exec API
+# so they bypass the in-Pod command tracker. Only this ServiceAccount gets pods/exec.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-diagnostics
+  namespace: session-sandboxes
+rules:
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: silk-agent-sandbox-service-diagnostics
+  namespace: session-sandboxes
+subjects:
+  - kind: ServiceAccount
+    name: silk-agent-sandbox-service
+    namespace: session-sandbox-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-diagnostics
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
