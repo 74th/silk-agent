@@ -152,3 +152,7 @@ terraform -chdir=usecases/bigquery-analysis/terraform destroy -var-file=terrafor
 ```
 
 この Terraform root は `disable_on_destroy = false` で BigQuery API を無効化しない。API の有効状態は他の利用者にも影響しうるため、別途利用状況を確認する。
+
+## コマンド出力の保存先
+
+このユースケースのコマンド出力は、専用のバケット `nnyn-dev-bigquery-analysis-command-output`（リポジトリ直下の Terraform の `usecases.bigquery-analysis.command_output_bucket`）に保存する。設定ファイル `k8s/distributed/steady/config/silk-agent-distributed.yaml` の `distributed.command_output_bucket` と同じ値にする。他のユースケースのバケットには権限がない。2026-10-19 より前のコマンド出力は `silk-agent` のバケットにあり、このユースケースの Worker からは読めない（移行していない）。

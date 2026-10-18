@@ -234,4 +234,4 @@ DISTRIBUTED_DIR=usecases/<名前>/k8s/distributed/steady    SYSTEM_NAMESPACE=<�
 
 ### 4.4 分離の限界
 
-複数のユースケースは同じFirestore databaseと同じクラスタを使う。FirestoreのIAMはコレクション単位に絞れないため、Workerの`roles/datastore.user`は、技術的には他のユースケースの接頭辞のコレクションも読み書きできる。接頭辞と起動時の照合は**取り違え**を防ぐもので、侵害された役割に対する強い分離ではない。強い分離が必要なユースケースは、Firestoreのdatabase（`distributed.firestore_database`）またはGoogle Cloudのプロジェクトを分ける。Slackの認証情報は、Secret Managerの権限がユースケースごとの役割に分かれているので、別のユースケースの役割からは読めない。
+複数のユースケースは同じFirestore databaseと同じクラスタを使う。FirestoreのIAMはコレクション単位に絞れないため、Workerの`roles/datastore.user`は、技術的には他のユースケースの接頭辞のコレクションも読み書きできる。接頭辞と起動時の照合は**取り違え**を防ぐもので、侵害された役割に対する強い分離ではない。強い分離が必要なユースケースは、Firestoreのdatabase（`distributed.firestore_database`）またはGoogle Cloudのプロジェクトを分ける。Slackの認証情報は、Secret Managerの権限がユースケースごとの役割に分かれているので、別のユースケースの役割からは読めない。コマンド出力のバケットも、ユースケースごとに別のバケット（Terraformの`usecases.<名前>.command_output_bucket`、設定ファイルの`distributed.command_output_bucket`と同じ値）で、そのユースケースの役割だけが読み書きできる。Agent PlatformのRuntime（会話履歴）は、現在は共有で、分離していない。Firestoreのバックアップは、どのユースケースの役割にも権限がない専用のバケット（Terraformの出力`firestore_backup_bucket`）に置く。

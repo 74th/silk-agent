@@ -7,6 +7,7 @@ distributed:
   firestore_database: silk-agent
   firestore_prefix: your-usecase  # = terraform `usecases[...].firestore_prefix`; no default
   sandbox_service_url: http://silk-agent-sandbox-service.your-usecase-system.svc:8080
+  # Terraform の usecases.<名前>.command_output_bucket と同じ値（ユースケースごとに別のバケット）
   command_output_bucket: your-command-output-bucket
   sandbox_service_audience: silk-agent-sandbox-service
   sandbox_service_allowed_ksas:

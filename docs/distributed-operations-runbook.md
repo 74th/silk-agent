@@ -236,7 +236,7 @@ gcloud firestore fields ttls list --database=silk-agent --project=nnyn-dev \
 
 保持期限の仕組みを入れる前に終端になった記録には `expire_at` がない。次の手順で付ける。
 
-1. バックアップを取る（TTL の削除は戻せない）: `gcloud firestore export gs://<bucket>/retention-$(date +%Y%m%d) --database=silk-agent --project=nnyn-dev`。`gcloud firestore operations describe` で `operationState: SUCCESSFUL` を確認する。
+1. バックアップを取る（TTL の削除は戻せない）: `gcloud firestore export gs://$(terraform -chdir=terraform output -raw firestore_backup_bucket)/retention-$(date +%Y%m%d) --database=silk-agent --project=nnyn-dev`。バックアップの保存先は、どのワークロードにも権限がない専用のバケット（保持は既定90日）。コマンド出力のバケットには置かない（全 Worker から読める上、30 日で消える）。`gcloud firestore operations describe` で `operationState: SUCCESSFUL` を確認する。
 2. 新しいコードを配置する（新しい記録から期限が付く）。その後 `terraform apply` で TTL を有効にする（§11.2）。
 3. 件数だけを確認する（書き込まない）:
    ```sh
@@ -252,7 +252,7 @@ gcloud firestore fields ttls list --database=silk-agent --project=nnyn-dev \
 
 `notice pending` のコマンド（この change の前に終了して通知が pending のまま残ったもの）、`state requested` のまま応答のない quiesce 要求、`pending` のまま配送されない outbox は、期限が付かない（除外の表で件数を確認できる）。件数が少なければそのまま残し、増えるようなら原因を調べる。
 
-2026-10-18 の実績（dev、`silk-agent` DB）: バックアップは `gs://nnyn-dev-silk-agent-command-output/firestore-backups/`（このバケットは 30 日で削除される）、TTL は 9 件すべて ACTIVE。バックフィルの件数表示は、inputs 108 / controls 16 / control_queue 16 / outbox 818 / commands 99 / sandbox_operations 99 / slack_receipts 71 / workers 92 が対象で、uncertain の入力 30、通知 pending のコマンド 13、pending の outbox 29・uncertain の outbox 3、応答のない quiesce 要求 23 が除外。
+2026-10-18 の実績（dev、`silk-agent` DB）: バックアップは `gs://nnyn-dev-silk-agent-firestore-backup/`（2026-10-19 に、コマンド出力のバケットの `firestore-backups/` から、専用のバケットへ移した。15 オブジェクトの一覧とサイズが一致することを確認してから、元を削除した）、TTL は 9 件すべて ACTIVE。バックフィルの件数表示は、inputs 108 / controls 16 / control_queue 16 / outbox 818 / commands 99 / sandbox_operations 99 / slack_receipts 71 / workers 92 が対象で、uncertain の入力 30、通知 pending のコマンド 13、pending の outbox 29・uncertain の outbox 3、応答のない quiesce 要求 23 が除外。
 
 戻す場合: Terraform で該当の `google_firestore_field` を削除して TTL を外す。既に消えた記録はバックアップからしか戻せない。
 
