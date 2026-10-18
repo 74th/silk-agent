@@ -1,0 +1,55 @@
+# Between `base` and a use case: the two Namespaces, the Sandbox-namespace resources, and the
+# replacements that put the use case's namespaces into the namespace-less base.
+#
+# The overlay supplies one local-only ConfigMap `silk-agent-namespaces` (data keys `system` and
+# `sandbox`; see overlays/dev-namespaces). That is the only place the namespaces are chosen.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - namespaces.yaml
+  - sandbox-namespace.yaml
+replacements:
+  - source:
+      kind: ConfigMap
+      name: silk-agent-namespaces
+      fieldPath: data.system
+    targets:
+      - select:
+          kind: Namespace
+          name: SYSTEM_NAMESPACE
+        fieldPaths: [metadata.name]
+      - select:
+          labelSelector: app.kubernetes.io/part-of=silk-agent-distributed
+        reject:
+          - kind: ClusterRole
+          - kind: ClusterRoleBinding
+        fieldPaths: [metadata.namespace]
+        options:
+          create: true
+      - select:
+          kind: ClusterRoleBinding
+        fieldPaths: [subjects.0.namespace]
+        options:
+          create: true
+      - select:
+          kind: RoleBinding
+        fieldPaths: [subjects.0.namespace]
+        options:
+          create: true
+  - source:
+      kind: ConfigMap
+      name: silk-agent-namespaces
+      fieldPath: data.sandbox
+    targets:
+      - select:
+          kind: Namespace
+          name: SANDBOX_NAMESPACE
+        fieldPaths: [metadata.name]
+      - select:
+          labelSelector: silk-agent.dev/in-sandbox-namespace=true
+        fieldPaths: [metadata.namespace]
+      - select:
+          kind: NetworkPolicy
+          name: silk-agent-sandbox-service
+        fieldPaths:
+          - spec.egress.0.to.0.namespaceSelector.matchLabels.[kubernetes.io/metadata.name]

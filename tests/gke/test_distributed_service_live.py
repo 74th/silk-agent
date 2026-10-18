@@ -257,7 +257,7 @@ async def test_real_commands_files_dedup_cancel_and_owner_fencing_without_slack(
                 manager_config = yaml.safe_load(
                     await asyncio.to_thread(
                         Path(
-                            "k8s/distributed/sandbox-service/config/sandbox-service-config.yaml"
+                            "k8s/distributed/overlays/dev/config/sandbox-service-config.yaml"
                         ).read_text
                     )
                 )

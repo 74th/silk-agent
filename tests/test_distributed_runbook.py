@@ -45,7 +45,7 @@ def test_kubernetes_resources_named_in_the_runbook_exist_in_the_manifests():
     resources = {
         (item["kind"].lower(), item["metadata"]["name"])
         for name in ("roles.yaml", "sandbox-service.yaml")
-        for item in yaml.safe_load_all(Path("k8s/distributed", name).read_text())
+        for item in yaml.safe_load_all(Path("k8s/distributed/base", name).read_text())
         if item
     }
     text = Path("docs/distributed-operations-runbook.md").read_text(encoding="utf-8")

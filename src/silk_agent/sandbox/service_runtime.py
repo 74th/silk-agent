@@ -110,6 +110,7 @@ async def run_sandbox_service(config: Config) -> None:
         raise ConfigError("sandbox-service requires execution_mode: distributed")
     config.validate_required()
     config.validate_distributed_sandbox_config()
+    config.validate_namespace("sandbox-service")
     if not config.distributed.sandbox_service_allowed_ksas:
         raise ConfigError("distributed.sandbox_service_allowed_ksas must list Worker KSAs")
     if not config.sandbox.config_file:

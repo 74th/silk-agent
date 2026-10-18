@@ -1,0 +1,14 @@
+# First build: the same resources with the three role Deployments at zero replicas, so nothing
+# connects to Slack or starts an SDK. Start the roles in the order of
+# docs/distributed-operations-runbook.md (§2), then apply `../steady` (the steady state).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../steady
+replicas:
+  - name: silk-agent-gateway
+    count: 0
+  - name: silk-agent-worker
+    count: 0
+  - name: silk-agent-control
+    count: 0

@@ -45,12 +45,6 @@ variable "command_output_retention_days" {
   }
 }
 
-variable "slack_secret_ids" {
-  description = "Slack トークンを入れる Secret Manager のシークレット ID（値は terraform に含めない）"
-  type        = list(string)
-  default     = ["silk-agent-slack-bot-token", "silk-agent-slack-app-token"]
-}
-
 variable "bot_service_account_id" {
   description = "Bot が使うサービスアカウントのID。Workload Identity などで利用する。"
   type        = string
@@ -63,17 +57,6 @@ variable "firestore_database_id" {
   default     = "silk-agent"
 }
 
-variable "firestore_prefix" {
-  description = "分散実行の Firestore コレクション名の接頭辞。設定ファイルの distributed.firestore_prefix と一致させる。"
-  type        = string
-  default     = "silk-agent"
-
-  validation {
-    condition     = length(var.firestore_prefix) > 0 && !strcontains(var.firestore_prefix, "/")
-    error_message = "firestore_prefix は空でなく、'/' を含まない値を指定してください。"
-  }
-}
-
 variable "firestore_database_mode" {
   description = "Firestore database の扱い: create、use-existing、import-existing。"
   type        = string
@@ -82,5 +65,63 @@ variable "firestore_database_mode" {
   validation {
     condition     = contains(["create", "use-existing", "import-existing"], var.firestore_database_mode)
     error_message = "firestore_database_mode は create、use-existing、import-existing のいずれかです。"
+  }
+}
+
+variable "usecases" {
+  description = <<-EOT
+    ユースケースの一覧（キーはユースケース名）。ユースケースごとに、役割の Workload Identity の権限、
+    Slack の Secret（値は terraform に含めない）、Firestore の索引と保持期限（TTL）を作る。
+    system_namespace / sandbox_namespace / firestore_prefix は、そのユースケースの
+    k8s の overlay と設定ファイルの distributed.firestore_prefix に一致させる。
+    legacy_bot_access は単一プロセスの Bot 用サービスアカウントに Slack の Secret の読み取りを許す
+    （開発環境だけ true）。
+  EOT
+  type = map(object({
+    system_namespace  = string
+    sandbox_namespace = string
+    firestore_prefix  = string
+    slack_secret_ids = object({
+      bot_token = string
+      app_token = string
+    })
+    legacy_bot_access = optional(bool, false)
+  }))
+  default = {
+    "silk-agent" = {
+      system_namespace  = "session-sandbox-system"
+      sandbox_namespace = "session-sandboxes"
+      firestore_prefix  = "silk-agent"
+      slack_secret_ids = {
+        bot_token = "silk-agent-slack-bot-token"
+        app_token = "silk-agent-slack-app-token"
+      }
+      legacy_bot_access = true
+    }
+  }
+
+  validation {
+    condition = alltrue([
+      for u in values(var.usecases) :
+      length(u.firestore_prefix) > 0 && !strcontains(u.firestore_prefix, "/")
+    ])
+    error_message = "firestore_prefix は空でなく、'/' を含まない値を指定してください。"
+  }
+
+  validation {
+    condition     = length(distinct([for u in values(var.usecases) : u.firestore_prefix])) == length(var.usecases)
+    error_message = "firestore_prefix はユースケースごとに異なる値にしてください。"
+  }
+
+  validation {
+    condition     = length(distinct([for u in values(var.usecases) : u.system_namespace])) == length(var.usecases)
+    error_message = "system_namespace はユースケースごとに異なる値にしてください。"
+  }
+
+  validation {
+    condition = alltrue([
+      for u in values(var.usecases) : u.system_namespace != u.sandbox_namespace
+    ])
+    error_message = "system_namespace と sandbox_namespace は別の値にしてください。"
   }
 }

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from silk_agent.app import build_state_store
 from silk_agent.config import Config, ConfigError, load_config
@@ -123,8 +124,8 @@ def test_distributed_mode_rejects_sqlite_sandbox_repository(tmp_path):
     path = write(
         tmp_path,
         "execution_mode: distributed\ndistributed:\n"
-        "  firestore_project: test-project\n  sandbox_service_url: http://sandbox\n"
-        "  command_output_bucket: output-bucket\n" + text,
+        "  firestore_project: test-project\n  firestore_prefix: test\n"
+        "  sandbox_service_url: http://sandbox\n  command_output_bucket: output-bucket\n" + text,
     )
     (tmp_path / "sandbox.yaml").write_text(
         "repository_database_path: /var/lib/sessions.sqlite3\n", encoding="utf-8"
@@ -142,8 +143,8 @@ def test_distributed_mode_accepts_shared_sandbox_repository_config(tmp_path):
     path = write(
         tmp_path,
         "execution_mode: distributed\ndistributed:\n"
-        "  firestore_project: test-project\n  sandbox_service_url: http://sandbox\n"
-        "  command_output_bucket: output-bucket\n" + text,
+        "  firestore_project: test-project\n  firestore_prefix: test\n"
+        "  sandbox_service_url: http://sandbox\n  command_output_bucket: output-bucket\n" + text,
     )
     (tmp_path / "sandbox.yaml").write_text("{}", encoding="utf-8")
 
@@ -159,11 +160,85 @@ def test_distributed_mode_requires_command_output_bucket(tmp_path):
     path = write(
         tmp_path,
         "execution_mode: distributed\ndistributed:\n"
-        "  firestore_project: test-project\n  sandbox_service_url: http://sandbox\n" + text,
+        "  firestore_project: test-project\n  firestore_prefix: test\n"
+        "  sandbox_service_url: http://sandbox\n" + text,
     )
     (tmp_path / "sandbox.yaml").write_text("{}", encoding="utf-8")
     with pytest.raises(ConfigError, match="distributed.command_output_bucket"):
         load_config(path)
+
+
+def test_distributed_mode_requires_firestore_prefix(tmp_path):
+    text = MINIMAL.replace(
+        "sandbox:\n  runtime: local_process\n",
+        "sandbox:\n  runtime: gke_session_sandbox\n  config_file: sandbox.yaml\n",
+    )
+    path = write(
+        tmp_path,
+        "execution_mode: distributed\ndistributed:\n"
+        "  firestore_project: test-project\n  sandbox_service_url: http://sandbox\n"
+        "  command_output_bucket: output-bucket\n" + text,
+    )
+    (tmp_path / "sandbox.yaml").write_text("{}", encoding="utf-8")
+    with pytest.raises(ConfigError, match="distributed.firestore_prefix"):
+        load_config(path)
+
+
+def _namespace_config(
+    tmp_path,
+    *,
+    url="http://silk-agent-sandbox-service.uc-system.svc:8080",
+    control_namespace="uc-system",
+    ksa="system:serviceaccount:uc-system:silk-agent-worker",
+    check="",
+):
+    (tmp_path / "sandbox.yaml").write_text(
+        f"control_namespace: {control_namespace}\n", encoding="utf-8"
+    )
+    text = MINIMAL.replace(
+        "sandbox:\n  runtime: local_process\n",
+        "sandbox:\n  runtime: gke_session_sandbox\n  config_file: sandbox.yaml\n",
+    )
+    return load_config(
+        write(
+            tmp_path,
+            "execution_mode: distributed\ndistributed:\n"
+            "  firestore_project: p\n  firestore_prefix: uc\n"
+            f"  sandbox_service_url: {url}\n  command_output_bucket: b\n"
+            f"  sandbox_service_allowed_ksas: ['{ksa}']\n{check}" + text,
+        )
+    )
+
+
+def test_namespace_check_accepts_matching_configuration(tmp_path):
+    cfg = _namespace_config(tmp_path)
+    for role in ("gateway", "worker", "control", "sandbox-service"):
+        cfg.validate_namespace(role, {"POD_NAMESPACE": "uc-system"})
+
+
+def test_namespace_check_rejects_another_use_cases_service_url(tmp_path):
+    cfg = _namespace_config(tmp_path, url="http://silk-agent-sandbox-service.other-system.svc:8080")
+    with pytest.raises(ConfigError, match="sandbox_service_url.*'uc-system'.*'other-system'"):
+        cfg.validate_namespace("worker", {"POD_NAMESPACE": "uc-system"})
+
+
+def test_namespace_check_rejects_another_use_cases_ksa_and_control_namespace(tmp_path):
+    cfg = _namespace_config(tmp_path, ksa="system:serviceaccount:other-system:silk-agent-worker")
+    with pytest.raises(ConfigError, match="sandbox_service_allowed_ksas.*'other-system'"):
+        cfg.validate_namespace("sandbox-service", {"POD_NAMESPACE": "uc-system"})
+    cfg = _namespace_config(tmp_path, control_namespace="other-system")
+    with pytest.raises(ConfigError, match="sandbox.control_namespace.*'other-system'"):
+        cfg.validate_namespace("sandbox-service", {"POD_NAMESPACE": "uc-system"})
+
+
+def test_namespace_check_requires_pod_namespace_unless_disabled(tmp_path, caplog):
+    cfg = _namespace_config(tmp_path)
+    with pytest.raises(ConfigError, match="POD_NAMESPACE"):
+        cfg.validate_namespace("worker", {})
+    cfg = _namespace_config(tmp_path, check="  namespace_check: false\n")
+    with caplog.at_level("WARNING"):
+        cfg.validate_namespace("worker", {})
+    assert "namespace_check is false" in caplog.text
 
 
 def test_relative_paths_are_relative_to_the_config_file(tmp_path):
@@ -265,3 +340,42 @@ def test_input_guard_uses_the_bundled_policy_by_default():
     cfg.input_guard.project = "p"
     guard = build_input_guard(cfg)
     assert guard._policy == read_resource("input-guard.md")  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("role", ["gateway", "worker", "control", "sandbox-service"])
+def test_every_role_refuses_to_start_with_a_mismatched_namespace(tmp_path, monkeypatch, role):
+    import asyncio
+
+    from silk_agent.distributed.control_runtime import run_control
+    from silk_agent.distributed.gateway_runtime import run_gateway
+    from silk_agent.distributed.worker_role import run_worker
+    from silk_agent.sandbox.service_runtime import run_sandbox_service
+
+    runners = {
+        "gateway": run_gateway,
+        "worker": run_worker,
+        "control": run_control,
+        "sandbox-service": run_sandbox_service,
+    }
+    cfg = _namespace_config(tmp_path, url="http://svc.other-system.svc:8080")
+    cfg.session_store.provider = "agent_platform"
+    cfg.session_store.project = "p"
+    cfg.session_store.agent_runtime = "r"
+    cfg.sandbox.config_file = str(tmp_path / "sandbox.yaml")
+    monkeypatch.setenv("POD_NAMESPACE", "uc-system")
+    if role == "sandbox-service":
+        cfg = _namespace_config(tmp_path, control_namespace="other-system")
+        monkeypatch.setenv("POD_NAMESPACE", "uc-system")
+    with pytest.raises(ConfigError, match="does not match the deployment"):
+        asyncio.run(runners[role](cfg))
+
+
+def test_distributed_config_files_state_firestore_prefix_explicitly():
+    files = [
+        *ROOT.glob("k8s/**/silk-agent-distributed.yaml"),
+        *ROOT.glob("usecases/**/silk-agent-distributed.yaml"),
+    ]
+    assert files
+    for path in files:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert data["distributed"].get("firestore_prefix"), path

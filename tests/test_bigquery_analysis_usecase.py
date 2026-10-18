@@ -19,10 +19,13 @@ from gke_session_sandbox import (
     build_session_network_policies,
 )
 from silk_agent.agent.mcp_config import load_mcp_servers
-from silk_agent.config import load_config
+from silk_agent.config import Config
 
 ROOT = Path(__file__).resolve().parents[1]
 USECASE = ROOT / "usecases" / "bigquery-analysis"
+STEADY = USECASE / "k8s/distributed/steady"
+SYSTEM = "bigquery-analysis-system"
+SANDBOXES = "bigquery-analysis-sandboxes"
 SCRIPT_PATH = USECASE / "skills/google-trends/scripts/query.py"
 SPEC = importlib.util.spec_from_file_location("bigquery_query", SCRIPT_PATH)
 assert SPEC and SPEC.loader
@@ -32,7 +35,10 @@ SPEC.loader.exec_module(query_script)
 
 
 def test_usecase_config_and_image_references_exist() -> None:
-    config = load_config(USECASE / "config/silk-agent.yaml")
+    config = Config.model_validate(
+        yaml.safe_load((STEADY / "config/silk-agent-distributed.yaml").read_text(encoding="utf-8"))
+    )
+    assert config.distributed.firestore_prefix == "bigquery-analysis"
     assert config.agent.system_prompt_file == "/app/usecase/prompts/agent-system.md"
     assert config.skills.source == "/app/usecase/skills"
     assert config.mcp.config_file == "/config/mcp.json"
@@ -154,7 +160,9 @@ def test_sandbox_image_includes_the_fixed_query_at_the_skill_path() -> None:
 
 
 def test_sandbox_config_wires_ksa_and_only_required_egress() -> None:
-    raw = yaml.safe_load((USECASE / "config/sandbox-config.yaml").read_text(encoding="utf-8"))
+    raw = yaml.safe_load(
+        (STEADY / "config/sandbox-service-config.yaml").read_text(encoding="utf-8")
+    )
     config = ManagerConfig.model_validate(raw)
     assert (
         config.template_overrides["spec"]["podTemplate"]["spec"]["serviceAccountName"]
@@ -187,21 +195,19 @@ def test_sandbox_config_wires_ksa_and_only_required_egress() -> None:
 
 
 def test_ksa_manifest_and_terraform_identity_names_match() -> None:
-    ksa = yaml.safe_load((USECASE / "k8s/bigquery-ksa.yaml").read_text(encoding="utf-8"))
+    ksa = yaml.safe_load((STEADY / "bigquery-ksa.yaml").read_text(encoding="utf-8"))
     variables = (USECASE / "terraform/variables.tf").read_text(encoding="utf-8")
     assert ksa["metadata"]["name"] == "bigquery-analysis"
-    assert ksa["metadata"]["namespace"] == "session-sandboxes"
+    assert ksa["metadata"]["namespace"] == SANDBOXES
     assert ksa["metadata"]["annotations"]["iam.gke.io/gcp-service-account"] == "${GSA_EMAIL}"
-    assert 'default     = "session-sandboxes"' in variables
+    assert f'default     = "{SANDBOXES}"' in variables
     assert 'default     = "bigquery-analysis"' in variables
 
 
 def test_mcp_http_url_and_api_key_resolve_through_existing_loader() -> None:
-    servers = load_mcp_servers(USECASE / "config/mcp.json", {"ECHO_MCP_API_KEY": "unit-test-key"})
+    servers = load_mcp_servers(STEADY / "config/mcp.json", {"ECHO_MCP_API_KEY": "unit-test-key"})
     assert servers["echo"]["type"] == "http"
-    assert servers["echo"]["url"] == (
-        "http://echo-mcp.session-sandbox-system.svc.cluster.local:8000/mcp"
-    )
+    assert servers["echo"]["url"] == (f"http://echo-mcp.{SYSTEM}.svc.cluster.local:8000/mcp")
     assert servers["echo"]["headers"] == {"X_API_KEY": "unit-test-key"}
 
 
@@ -212,7 +218,7 @@ def test_kustomize_echo_service_and_secret_wiring_render() -> None:
     if shutil.which("kubectl") is None:
         pytest.skip("kubectl is not installed")
     result = subprocess.run(
-        ["kubectl", "kustomize", str(USECASE / "k8s")],
+        ["kubectl", "kustomize", str(STEADY)],
         capture_output=True,
         text=True,
         check=False,
@@ -228,12 +234,12 @@ def test_kustomize_echo_service_and_secret_wiring_render() -> None:
     bot = next(
         doc
         for doc in docs
-        if doc.get("kind") == "Deployment" and doc["metadata"]["name"] == "silk-agent"
+        if doc.get("kind") == "Deployment" and doc["metadata"]["name"] == "silk-agent-worker"
     )
     bot_env = next(
         container
         for container in bot["spec"]["template"]["spec"]["containers"]
-        if container["name"] == "bot"
+        if container["name"] == "worker"
     )["env"]
     for env in (echo_env, bot_env):
         echo_key = next(entry for entry in env if entry["name"] == "ECHO_MCP_API_KEY")
@@ -254,8 +260,30 @@ def test_kustomize_echo_service_and_secret_wiring_render() -> None:
         if doc.get("kind") == "NetworkPolicy" and doc["metadata"]["name"] == "echo-mcp-ingress"
     )
     assert policy["spec"]["ingress"][0]["from"][0]["podSelector"]["matchLabels"] == {
-        "app.kubernetes.io/name": "silk-agent"
+        "app.kubernetes.io/name": "silk-agent-worker"
     }
+    # The Worker's NetworkPolicy has no rule for echo-mcp, so this use case adds one.
+    egress = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "NetworkPolicy"
+        and doc["metadata"]["name"] == "echo-mcp-egress-from-worker"
+    )
+    assert egress["spec"]["egress"][0]["ports"] == [{"protocol": "TCP", "port": 8000}]
+    # Every namespaced resource is in one of the use case's two namespaces.
+    spaces = {
+        doc["metadata"].get("namespace")
+        for doc in docs
+        if doc["kind"] not in ("Namespace", "ClusterRole", "ClusterRoleBinding")
+    }
+    assert spaces == {SYSTEM, SANDBOXES}
+    assert {d["metadata"]["name"] for d in docs if d["kind"] == "Namespace"} == spaces
+    assert all(
+        container["image"] != "silk-agent"
+        for d in docs
+        if d["kind"] == "Deployment"
+        for container in d["spec"]["template"]["spec"]["containers"]
+    )
 
 
 def test_operations_guide_has_required_provisioning_and_rollback_paths() -> None:
@@ -264,17 +292,19 @@ def test_operations_guide_has_required_provisioning_and_rollback_paths() -> None
         "terraform apply",
         "output -raw gsa_email",
         "bigquery-ksa.yaml",
+        "bigquery-analysis-system",
         "./build.sh",
         "bigquery-analysis-secrets",
-        "kubectl apply -k",
+        "DISTRIBUTED_DIR=usecases/bigquery-analysis/k8s/distributed/steady",
         "terraform destroy",
         "project とクエリ料金",
     ):
         assert required in guide
     for path in (
         "terraform/terraform.tfvars.example",
-        "k8s/bigquery-ksa.yaml",
-        "config/sandbox-config.yaml",
-        "config/kustomization.yaml",
+        "k8s/distributed/steady/bigquery-ksa.yaml",
+        "k8s/distributed/steady/config/sandbox-service-config.yaml",
+        "k8s/distributed/steady/kustomization.yaml",
+        "k8s/distributed/bootstrap/kustomization.yaml",
     ):
         assert (USECASE / path).exists(), path

@@ -1,0 +1,28 @@
+# gke-session-sandbox settings of the Sandbox Service (mounted at /config/sandbox-config.yaml).
+# SQLite fields are intentionally omitted. The Sandbox Service injects its Firestore repository.
+control_namespace: your-usecase-system
+namespace: your-usecase-sandboxes
+template_file: /app/sandbox-templates/sandbox.yaml
+workspace_storage_class: session-workspace-rwo
+workspace_storage: 10Gi
+runtime:
+  container_name: sandboxd
+  # This use case's Sandbox image (sandbox/Dockerfile), pinned by digest.
+  image: us-central1-docker.pkg.dev/your-gcp-project/your-repository/usecase-sandbox@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  rest_port: 8080
+  tracker_port: 8081
+  grpc_port: 9090
+  cpu_request: 100m
+  cpu_limit: "1"
+  memory_request: 128Mi
+  memory_limit: 1Gi
+  # How long to wait for a Sandbox to be Ready; startup.sh runs before that.
+  ready_timeout_seconds: 180
+lifecycle:
+  reconcile_interval_seconds: 60
+  idle_timeout_seconds: 300
+  retention_seconds: 604800
+network:
+  # Sandboxes have no external egress except these FQDNs (DNS is always allowed).
+  # Add the hosts that startup.sh and the agent's tools need.
+  allowed_fqdns: []

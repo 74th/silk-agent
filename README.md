@@ -239,7 +239,8 @@ Botはこのリポジトリの`terraform/gke/`で管理する単一ゾーンGKE�
 ```bash
 terraform -chdir=terraform/gke output  # 表示された get_credentials_command を確認して実行
 kubectl kustomize k8s/platform | kubectl apply -f -
-./k8s/grant-iam.sh   # Workload Identityで aiplatform.user / modelarmor.user を付与（初回のみ）
+kubectl kustomize k8s/distributed/overlays/dev-platform | kubectl apply -f -   # dev namespaces and the sandbox-management Role
+terraform -chdir=terraform apply   # Workload Identityの権限（aiplatform.user / modelarmor.user / datastore.user）はTerraformの`usecases`が付与する
 export SANDBOX_RUNTIME_IMAGE="$(scripts/build-session-runtime-image.sh | sed -n 's/^SESSION_RUNTIME_IMAGE=//p')"
 ./k8s/deploy.sh      # Botイメージのビルド・push、Secret作成、apply、rollout待ち
 #   ユースケースをデプロイするには: KUSTOMIZE_DIR=usecases/<名前>/k8s ./k8s/deploy.sh

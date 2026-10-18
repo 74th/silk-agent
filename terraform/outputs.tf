@@ -22,3 +22,16 @@ output "bot_service_account" {
   description = "Bot が使うサービスアカウント"
   value       = google_service_account.bot.email
 }
+
+output "usecases" {
+  description = "ユースケースごとの namespace・Firestore の接頭辞・Slack の Secret・各役割の Workload Identity の主体"
+  value = {
+    for name, u in var.usecases : name => {
+      system_namespace  = u.system_namespace
+      sandbox_namespace = u.sandbox_namespace
+      firestore_prefix  = u.firestore_prefix
+      slack_secret_ids  = u.slack_secret_ids
+      principals        = local.gke_principals[name]
+    }
+  }
+}

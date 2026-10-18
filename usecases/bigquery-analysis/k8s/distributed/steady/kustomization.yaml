@@ -1,0 +1,55 @@
+# Distributed deployment of bigquery-analysis: Gateway / Worker / Control / Sandbox Service and
+# echo-mcp in `bigquery-analysis-system`, the Sandbox KSA in `bigquery-analysis-sandboxes`.
+# Deploy from the silk-agent checkout (docs/usecase-guide.md, "分散構成"):
+#   DISTRIBUTED_DIR=usecases/bigquery-analysis/k8s/distributed/steady \
+#     SYSTEM_NAMESPACE=bigquery-analysis-system k8s/deploy.sh
+# The first build uses ../bootstrap (zero replicas).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../../k8s/distributed/base
+  - echo-mcp.yaml
+  - bigquery-ksa.yaml
+components:
+  - ../../../../../k8s/distributed/platform
+configMapGenerator:
+  # The two namespaces: the only place they are chosen here (read by the platform component, not
+  # rendered). Keep them equal to terraform `usecases[...]` and to the config files below.
+  - name: silk-agent-namespaces
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        config.kubernetes.io/local-config: "true"
+    literals:
+      - system=bigquery-analysis-system
+      - sandbox=bigquery-analysis-sandboxes
+  - name: silk-agent-sandbox-service-config
+    options:
+      # Selects the ConfigMap for the platform component's namespace replacement.
+      labels:
+        app.kubernetes.io/part-of: silk-agent-distributed
+    files:
+      - silk-agent-distributed.yaml=config/silk-agent-distributed.yaml
+      - sandbox-config.yaml=config/sandbox-service-config.yaml
+      - mcp.json=config/mcp.json
+patches:
+  - path: worker-echo-secret-patch.yaml
+    target:
+      kind: Deployment
+      name: silk-agent-worker
+  # The ClusterRoleBinding is cluster-scoped: give it this use case's name.
+  - target:
+      kind: ClusterRoleBinding
+      name: silk-agent-sandbox-service-token-review
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: silk-agent-sandbox-service-token-review-bigquery-analysis
+images:
+  # The role Deployments' image is the placeholder `silk-agent`: use this use case's Bot image.
+  - name: silk-agent
+    newName: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/bigquery-analysis-bot
+    digest: sha256:64ecc03a5876a9ac5ad94796091b55daaab0f8a9251e089c55c48e3558c35807
+  - name: echo-mcp
+    newName: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/bigquery-analysis-echo-mcp
+    digest: sha256:60a8776a4b54caade9a99065518a88d99942c2a62e5041e678dcfda8c65becfc

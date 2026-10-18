@@ -31,16 +31,15 @@ The pinned Agent Sandbox v1.0.6 controller and its CRD are in `k8s/platform/vend
 
 ```sh
 kubectl kustomize k8s/platform | kubectl apply -f -
+kubectl kustomize k8s/distributed/overlays/dev-platform | kubectl apply -f -   # dev namespaces and the sandbox-management Role
 kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=300s
 kubectl get crd sandboxes.agents.x-k8s.io
 kubectl get runtimeclass gvisor
 ```
 
-Grant the Bot Kubernetes ServiceAccount its existing Google API roles through Workload Identity:
-
-```sh
-./k8s/grant-iam.sh
-```
+The Bot Kubernetes ServiceAccount gets its Google API roles through Workload Identity from the
+root Terraform (`terraform -chdir=terraform apply`, the `usecases` variable). This replaces the former
+`k8s/grant-iam.sh`.
 
 ## Build images and deploy the Bot
 

@@ -1,11 +1,10 @@
-# gke-session-sandbox settings (mounted at /config/sandbox-config.yaml).
-namespace: session-sandboxes
-control_namespace: session-sandbox-system
+# gke-session-sandbox settings of the Sandbox Service (mounted at /config/sandbox-config.yaml).
+# SQLite fields are intentionally omitted. The Sandbox Service injects its Firestore repository.
+namespace: bigquery-analysis-sandboxes
+control_namespace: bigquery-analysis-system
 template_file: /app/sandbox-templates/sandbox.yaml
 workspace_storage_class: session-workspace-rwo
 workspace_storage: 10Gi
-repository_database_path: /var/lib/session-sandbox/sessions.sqlite3
-repository_require_mount: true
 runtime:
   container_name: sandboxd
   # This use case's Sandbox image (sandbox/Dockerfile), pinned by digest.

@@ -306,6 +306,7 @@ async def run_control(config: Config) -> None:
     """
     if config.execution_mode != "distributed":
         raise ConfigError("control requires execution_mode: distributed")
+    config.validate_namespace("control")
     if not config.distributed.firestore_project:
         raise ConfigError("distributed.firestore_project is required")
     import aiohttp

@@ -33,6 +33,7 @@ async def run_gateway(config: Config) -> None:
     """Run raw Socket Mode reception with persist-before-ACK semantics."""
     if config.execution_mode != "distributed":
         raise ConfigError("gateway requires execution_mode: distributed")
+    config.validate_namespace("gateway")
     if not config.distributed.firestore_project:
         raise ConfigError("distributed.firestore_project is required")
     bot_token, app_token = load_tokens(config)

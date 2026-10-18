@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import logging
+import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+
+log = logging.getLogger(__name__)
 
 
 class ConfigError(ValueError):
@@ -115,7 +121,11 @@ class RetentionConfig(_Model):
 class DistributedExecutionConfig(_Model):
     firestore_project: str = ""
     firestore_database: str = "(default)"
-    firestore_prefix: str = "silk-agent"
+    # No default: a deployment that forgets it must not join another use case's collections.
+    firestore_prefix: str = ""
+    # Compare POD_NAMESPACE with the namespaces named in this config at startup. Turn it off
+    # only outside Kubernetes (local development).
+    namespace_check: bool = True
     sandbox_service_url: str = ""
     command_output_bucket: str = ""
     command_output_retention_days: int = Field(default=30, gt=0)
@@ -209,6 +219,8 @@ class Config(_Model):
         if self.execution_mode == "distributed":
             if not self.distributed.firestore_project:
                 raise ConfigError("missing required settings: distributed.firestore_project")
+            if not self.distributed.firestore_prefix.strip():
+                raise ConfigError("missing required settings: distributed.firestore_prefix")
             if not self.distributed.sandbox_service_url:
                 raise ConfigError("missing required settings: distributed.sandbox_service_url")
             if not self.distributed.command_output_bucket.strip():
@@ -231,6 +243,67 @@ class Config(_Model):
                 "distributed mode cannot use SQLite sandbox state; remove "
                 "repository_database_path from the sandbox config"
             )
+
+    def validate_namespace(
+        self,
+        role: Literal["gateway", "worker", "control", "sandbox-service"],
+        env: Mapping[str, str] | None = None,
+    ) -> None:
+        """Refuse to start when this Pod's namespace differs from the namespaces in the config.
+
+        Every mismatch is reported with the setting name, the expected and the actual value, so a
+        role started with another use case's config never connects to that use case.
+        """
+        if self.execution_mode != "distributed":
+            return
+        if not self.distributed.namespace_check:
+            log.warning("distributed.namespace_check is false: namespace validation is disabled")
+            return
+        pod_namespace = (os.environ if env is None else env).get("POD_NAMESPACE", "").strip()
+        if not pod_namespace:
+            raise ConfigError(
+                "POD_NAMESPACE is not set; set it with the Downward API, or set "
+                "distributed.namespace_check: false outside Kubernetes"
+            )
+        problems: list[str] = []
+
+        def expect(name: str, actual: str) -> None:
+            if actual != pod_namespace:
+                problems.append(f"{name}: expected namespace {pod_namespace!r}, got {actual!r}")
+
+        if role == "sandbox-service":
+            expect("sandbox.control_namespace", self._sandbox_control_namespace())
+            for ksa in self.distributed.sandbox_service_allowed_ksas:
+                parts = ksa.split(":")
+                namespace = (
+                    parts[2]
+                    if len(parts) == 4 and parts[:2] == ["system", "serviceaccount"]
+                    else ""
+                )
+                expect(f"distributed.sandbox_service_allowed_ksas[{ksa}]", namespace)
+        else:
+            host = urlparse(self.distributed.sandbox_service_url).hostname or ""
+            labels = host.split(".")
+            expect(
+                "distributed.sandbox_service_url",
+                labels[1] if len(labels) >= 3 and labels[2] == "svc" else "",
+            )
+        if problems:
+            raise ConfigError("configuration does not match the deployment: " + "; ".join(problems))
+
+    def _sandbox_control_namespace(self) -> str:
+        from gke_session_sandbox.config import ManagerConfig
+
+        default = str(ManagerConfig.model_fields["control_namespace"].default)
+        if not self.sandbox.config_file:
+            return default
+        try:
+            with self.resolve(self.sandbox.config_file).open(encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except OSError as exc:
+            raise ConfigError("cannot read the sandbox config to check its namespace") from exc
+        value = data.get("control_namespace") if isinstance(data, dict) else None
+        return str(value) if value else default
 
 
 def load_config(path: str | Path) -> Config:

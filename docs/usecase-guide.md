@@ -1,6 +1,6 @@
 # ユースケースへの適用手順
 
-silk-agent本体を変更・フォークせずに、ユースケース（用途）ごとの**システムプロンプト、入力ガードの基準、Skills、MCP、フック、Sandboxのイメージ、設定**を別のパッケージとして用意し、組み合わせてデプロイする手順。1ユースケース = 1デプロイ（1つのBotと、そのBotのSandbox）。
+silk-agent本体を変更・フォークせずに、ユースケース（用途）ごとの**システムプロンプト、入力ガードの基準、Skills、MCP、フック、Sandboxのイメージ、設定**を別のパッケージとして用意し、組み合わせてデプロイする手順。1ユースケース = 1デプロイ（1つのBotと、そのBotのSandbox）。本番の配置は分散構成（[4章](#4-分散構成での適用推奨)）を使う。
 
 ## 1. 構成
 
@@ -183,3 +183,55 @@ Sandboxのイメージを変えても、すでにある会話のSandboxは、次
 - **環境変数`USER_EMAIL`→`AGENT_USER_EMAIL`**: Sandboxに渡すメールアドレスの変数名を変えた。値は、**その会話を始めたユーザ**のメールアドレスに固定される（以前は最後に書き込んだユーザ。スレッドに別のユーザが書き込んでも変わらない）。変更前に始まった会話は、管理情報に開始者がないため、環境変数を渡さずに既存のSandboxをそのまま使う（削除の7日後までは`USER_EMAIL`のまま）。新しい会話から`AGENT_USER_EMAIL`になる。イメージ内のスクリプトで`USER_EMAIL`を読んでいる場合は`AGENT_USER_EMAIL`に直す。
 - **k8s**: `k8s/`は`k8s/base/`と`k8s/overlays/dev/`に分かれた（設定は`k8s/overlays/dev/config/`）。`k8s/deploy.sh`は既定で`k8s/overlays/dev`を使う。
 - **Sandboxのイメージ**: タグが`<agent-sandboxの版>-session-runtime-<silk-agentの版>`になり、中のPythonパッケージは`uv.lock`の版に固定される。`startup.sh`のないイメージは従来どおり動く。
+
+## 4. 分散構成での適用（推奨）
+
+ここまでの手順（`k8s/base`、`k8s/deploy.sh`の既定）は単一プロセスのBot向けで、開発・小規模な確認用に残す。本番のユースケースは、分散構成（Gateway / Worker / Control / Sandbox Service）に置く。1ユースケース = 4つの役割とSandboxのひとまとまりで、同じクラスタに複数のユースケースを分離して置ける。
+
+### 4.1 構成と分離の単位
+
+| 役割 | 働き | 持つ認証情報 |
+|---|---|---|
+| Gateway | Slack（Socket Mode）から受信し、Firestoreに保存してからACKする | Slackのbot / appトークン |
+| Worker | 保存された入力を処理する（Agent SDK、Sandbox呼び出し）。複数台 | なし（Slackのトークンを持たない） |
+| Control | 割り当て、STOP・リセットの認可、Slackへの送信 | Slackのbotトークンだけ |
+| Sandbox Service | Sandboxの作成・管理、コマンドの出力の保管 | なし（Kubernetes APIとFirestoreの権限） |
+
+分離の単位はユースケースごとの次の4つ。
+
+- **namespace**: 管理用の`<ユースケース>-system`（4役割）とSandbox用の`<ユースケース>-sandboxes`。
+- **Firestoreの接頭辞**: 同じdatabaseの中で`<ユースケース>_commands`のようにコレクションが分かれる。`distributed.firestore_prefix`に既定値はなく、書かなければ起動しない。
+- **Slackアプリ**: ユースケースごとに別のアプリ（トークン）を用意する。Secret Managerの`<ユースケース>-slack-bot-token`、`<ユースケース>-slack-app-token`に入れる。
+- **Workload Identityの権限**: 各役割のServiceAccount（`<ユースケース>-system`の`silk-agent-<役割>`）に、その役割に必要な権限だけを付ける。
+
+各役割は起動時に`POD_NAMESPACE`（Downward APIで渡される）と設定の値を照合し、食い違えば起動しない（`sandbox_service_url`のnamespace、Sandboxの`control_namespace`、`sandbox_service_allowed_ksas`のnamespace）。別のユースケースの設定をコピーしたまま配置しても、そのユースケースのService・ストアには接続しない。ローカル実行など、Kubernetesの外では`distributed.namespace_check: false`で無効にできる（起動ログに出る）。
+
+### 4.2 手順
+
+1. **クラウド資源（Terraform）**: リポジトリ直下の`terraform/`の`usecases`にユースケースを1件追加する（namespace、`firestore_prefix`、Slackのシークレット名。例は`usecases/bigquery-analysis/OPERATIONS.md`）。`terraform plan`で、追加したユースケースの資源の作成だけが出て既存の資源に変更・削除がないことを確認してからapplyする。役割の権限、Slackの Secret、Firestoreの索引とTTLが作られる。`terraform output usecases`で各役割の権限の主体を確認できる。ユースケース固有の資源（BigQueryのサービスアカウントなど）は`usecases/<名前>/terraform/`に置く。Slackのトークンの値は`gcloud secrets versions add`で登録する。
+2. **テンプレートをコピーする**: `usecases/template/`を`usecases/<名前>/`にコピーし、2.1〜2.5（名前、Sandboxイメージ、Skills・プロンプト、フック、Slackの応答範囲）を行う。
+3. **イメージ**: 2.6の1と2のとおりBot（4役割で共通）とSandboxのイメージをビルドしてpushする。
+4. **設定と配置の定義**: `k8s/distributed/steady/`の次を書き換える（`your-...`を実際の値に）。
+   - `config/silk-agent-distributed.yaml`: 4役割で共通の設定。`firestore_project`、`firestore_prefix`（Terraformの値と同じ）、`sandbox_service_url`（`silk-agent-sandbox-service.<名前>-system.svc`）、`sandbox_service_allowed_ksas`（`system:serviceaccount:<名前>-system:silk-agent-worker`）、Slackのシークレット、`command_output_bucket`。
+   - `config/sandbox-service-config.yaml`: Sandbox Serviceの設定。`namespace`（`<名前>-sandboxes`）、`control_namespace`（`<名前>-system`）、Sandboxのイメージのdigest。SQLiteのパス（`repository_database_path`）は書かない（書くと起動しない）。
+   - `kustomization.yaml`: 2つのnamespace（`silk-agent-namespaces`のリテラル）、Botのイメージ、ClusterRoleBindingの名前の接尾辞。
+   共通の定義（`k8s/distributed/base/`、`k8s/distributed/platform/`）にはプロジェクト、イメージ、接頭辞、バケットの値を書かない。変更が必要なら本体のリポジトリで直す。
+5. **配置（bootstrap → 起動）**: 本体のチェックアウトから`deploy.sh`を分散構成のモードで実行する。初回はbootstrap（3つの役割のレプリカが0）を適用し、運用runbook（`docs/distributed-operations-runbook.md` §2）の順序で役割を起動し、確認後にsteadyを適用する。
+
+```bash
+export SILK_AGENT_ENV_FILE=/path/to/<名前>.env   # このユースケースのSlackトークン
+DISTRIBUTED_DIR=usecases/<名前>/k8s/distributed/bootstrap SYSTEM_NAMESPACE=<名前>-system k8s/deploy.sh
+DISTRIBUTED_DIR=usecases/<名前>/k8s/distributed/steady    SYSTEM_NAMESPACE=<名前>-system k8s/deploy.sh
+```
+
+`kubectl kustomize usecases/<名前>/k8s/distributed/steady`で、適用前にマニフェストを確認できる。`deploy.sh`は対象のnamespaceにSlackの Secretと`silk-agent-sandbox`の Secretを作り、4役割のrolloutを待つ。
+
+### 4.3 運用
+
+- **Workerの確認**: `silk-agent worker status-all`（稼働中のWorkerの一覧）、`drain-all` / `undrain-all`（受付の停止・再開）。コマンドの詳細は[運用runbook](distributed-operations-runbook.md)。ユースケースごとに設定ファイル（`--config`）が違うので、対象のユースケースの設定で実行する。
+- **リリースと切り戻し**: ユースケースのイメージ（Bot、Sandbox）のdigestを`steady/kustomization.yaml`と`sandbox-service-config.yaml`に書いて適用する。戻すときは前のdigestに戻して再適用する。Workerは`maxUnavailable: 0`のローリング更新で、処理中の会話は引き継がれる。
+- **削除**: namespaceを削除すれば4役割とSandboxが消える。その後`usecases`から外してTerraformをapplyする（Firestoreの記録はTTLで消える）。
+
+### 4.4 分離の限界
+
+複数のユースケースは同じFirestore databaseと同じクラスタを使う。FirestoreのIAMはコレクション単位に絞れないため、Workerの`roles/datastore.user`は、技術的には他のユースケースの接頭辞のコレクションも読み書きできる。接頭辞と起動時の照合は**取り違え**を防ぐもので、侵害された役割に対する強い分離ではない。強い分離が必要なユースケースは、Firestoreのdatabase（`distributed.firestore_database`）またはGoogle Cloudのプロジェクトを分ける。Slackの認証情報は、Secret Managerの権限がユースケースごとの役割に分かれているので、別のユースケースの役割からは読めない。
