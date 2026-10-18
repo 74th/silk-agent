@@ -11,6 +11,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from gke_session_sandbox.errors import SandboxLostError, StaleGenerationError
 from silk_agent.core.ports import CommandResult
 from silk_agent.sandbox.output_archive import OutputPage
 from silk_agent.sandbox.service import _call_and_close, _session_key
@@ -19,7 +20,14 @@ log = logging.getLogger(__name__)
 
 
 class ServiceCommandRuntime:
-    """CommandStatusReader + OutputPageReader over the Sandbox manager (no ensure/start)."""
+    """CommandStatusReader + OutputPageReader over the Sandbox manager (no ensure/start).
+
+    It reads through `observe_commands`, which never resumes a suspended Sandbox or creates a
+    new one."""
+
+    # `CommandMonitor` passes the generation the command ran in, so a Sandbox that was
+    # replaced (or lost) ends the command instead of being read as "unknown" forever.
+    reads_by_generation = True
 
     def __init__(self, manager: Any) -> None:
         self._manager = manager
@@ -27,13 +35,21 @@ class ServiceCommandRuntime:
     async def _handle(self, conversation_key: str) -> Any | None:
         return await self._manager.get(_session_key(conversation_key))
 
-    async def command_status(self, conversation_key: str, command_id: str) -> CommandResult:
+    async def command_status(
+        self, conversation_key: str, command_id: str, *, sandbox_generation: int | None = None
+    ) -> CommandResult:
         handle = await self._handle(conversation_key)
         if handle is None:
-            return CommandResult(command_id, "unknown")
+            return CommandResult(command_id, "lost")
+        if sandbox_generation is not None and handle.generation != sandbox_generation:
+            # The command ran in an earlier generation of the Sandbox, which is gone.
+            return CommandResult(command_id, "lost")
         try:
-            record = await _call_and_close(handle.commands, "get", command_id)
+            record = await _call_and_close(handle.observe_commands, "get", command_id)
+        except (SandboxLostError, StaleGenerationError):
+            return CommandResult(command_id, "lost")
         except Exception:
+            # Not ready (suspended) or unreachable: nothing is known, and nothing is started.
             return CommandResult(command_id, "unknown")
         state = record.get("state") if hasattr(record, "get") else None
         if state == "running":
@@ -56,7 +72,7 @@ class ServiceCommandRuntime:
         if handle is None:
             raise RuntimeError("Sandbox is not available for output read")
         page = await _call_and_close(
-            handle.commands,
+            handle.observe_commands,
             "read_output",
             command_id,
             stream=stream,

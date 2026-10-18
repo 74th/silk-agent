@@ -29,6 +29,8 @@ from .errors import (
     ConfigurationError,
     ResourceOwnershipError,
     SandboxBusyError,
+    SandboxLostError,
+    SandboxNotReadyError,
     SessionExpiredError,
     SessionLeaseHeldError,
     SessionLeaseLostError,
@@ -114,6 +116,39 @@ class SessionHandle:
             before_submit=lambda command_id: self._manager._before_command_submit(
                 self.key, self.generation, command_id
             ),
+            command_observer=lambda command_id, state: self._manager._observe_command(
+                self.key, self.generation, command_id, state
+            ),
+        )
+
+    @property
+    def observe_commands(self) -> CommandTrackerClient:
+        """A command client for observers (status, output): it never starts a Sandbox.
+
+        `commands` resolves its endpoint with `ensure`, which resumes a suspended Sandbox and
+        creates the next generation of a lost one. An observer polling for the result of a
+        command must not do either: it raises `SandboxNotReadyError` while the Sandbox is not
+        ready, and `SandboxLostError` / `StaleGenerationError` once the commands are gone.
+        """
+
+        async def resolve_endpoint() -> str:
+            stored = await self._manager.repository.get(self.key)
+            if stored is None:
+                raise SandboxLostError("session no longer exists")
+            record = stored.record
+            if record.generation != self.generation:
+                raise StaleGenerationError("session handle refers to an older generation")
+            if record.state in {SessionState.LOST, SessionState.TERMINATED}:
+                raise SandboxLostError(f"Sandbox is {record.state.value}")
+            if record.state is not SessionState.READY:
+                raise SandboxNotReadyError(f"Sandbox is {record.state.value}")
+            if record.sandbox_ref is None:
+                raise ResourceOwnershipError("session has no owned Sandbox reference")
+            return await self._manager.backend.runtime_endpoint(record.sandbox_ref)
+
+        return CommandTrackerClient(
+            resolve_endpoint,
+            buffered_response_limit_bytes=self._manager.config.lifecycle.buffered_response_limit_bytes,
             command_observer=lambda command_id, state: self._manager._observe_command(
                 self.key, self.generation, command_id, state
             ),

@@ -24,14 +24,25 @@ class Commands:
         self.closed += 1
 
 
+class ExplodingCommands:
+    def __getattr__(self, name):
+        raise AssertionError("the monitor must not use the ensure()-backed `commands` client")
+
+
 class Manager:
-    def __init__(self, commands):
+    def __init__(self, commands, generation=1):
         self.commands = commands
+        self.generation = generation
         self.requested = []
 
     async def get(self, key):
         self.requested.append(key)
-        return SimpleNamespace(commands=self.commands) if self.commands else None
+        if not self.commands:
+            return None
+        # `commands` would ensure() the Sandbox; the monitor must only use `observe_commands`.
+        return SimpleNamespace(
+            commands=ExplodingCommands(), observe_commands=self.commands, generation=self.generation
+        )
 
 
 @pytest.mark.asyncio
@@ -54,9 +65,31 @@ async def test_status_maps_tracker_states_and_never_starts_a_sandbox():
     assert (await runtime.command_status(key, "odd")).outcome == "unknown"
     assert (await runtime.command_status(key, "boom")).outcome == "unknown"
     assert commands.closed == 5  # every per-call HTTP client is closed
-    assert (await ServiceCommandRuntime(Manager(None)).command_status(key, "x")).outcome == (
-        "unknown"
-    )
+    # No session record at all: its commands are gone.
+    assert (await ServiceCommandRuntime(Manager(None)).command_status(key, "x")).outcome == "lost"
+
+
+@pytest.mark.asyncio
+async def test_a_suspended_sandbox_is_not_resumed_and_the_command_stays_unknown():
+    from gke_session_sandbox.errors import SandboxNotReadyError
+
+    commands = Commands({"c": SandboxNotReadyError("Sandbox is suspended")})
+    result = await ServiceCommandRuntime(Manager(commands)).command_status("slack:T:C:1", "c")
+    assert result.outcome == "unknown"  # polled again later, never started
+
+
+@pytest.mark.asyncio
+async def test_a_lost_or_replaced_sandbox_ends_the_command():
+    from gke_session_sandbox.errors import SandboxLostError, StaleGenerationError
+
+    key = "slack:T:C:1"
+    for failure in (SandboxLostError("lost"), StaleGenerationError("older generation")):
+        runtime = ServiceCommandRuntime(Manager(Commands({"c": failure})))
+        assert (await runtime.command_status(key, "c")).outcome == "lost"
+    # The command ran in generation 1; the Sandbox is now generation 2.
+    runtime = ServiceCommandRuntime(Manager(Commands({"c": {"state": "running"}}), generation=2))
+    assert (await runtime.command_status(key, "c", sandbox_generation=1)).outcome == "lost"
+    assert (await runtime.command_status(key, "c", sandbox_generation=2)).outcome == "running"
 
 
 @pytest.mark.asyncio

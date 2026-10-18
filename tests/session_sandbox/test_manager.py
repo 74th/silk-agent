@@ -716,6 +716,43 @@ async def test_ensure_from_resuming_applies_policies_first_and_stays_resuming_on
 
 
 @pytest.mark.asyncio
+async def test_observe_commands_never_resumes_or_creates_a_sandbox() -> None:
+    from gke_session_sandbox.errors import SandboxLostError, SandboxNotReadyError
+
+    manager, repository, backend = await _ready_manager()
+    key = SessionKey(tenant_id="tenant", session_id="observed")
+    handle = await manager.ensure(key)
+    started_before = list(backend.started)
+    generation_before = handle.generation
+
+    await _set_state(repository, key, state=SessionState.SUSPENDED)
+    with pytest.raises(SandboxNotReadyError):
+        await handle.observe_commands.get("any-command")
+
+    await _set_state(repository, key, state=SessionState.LOST)
+    with pytest.raises(SandboxLostError):
+        await handle.observe_commands.get("any-command")
+
+    await _set_state(repository, key, state=SessionState.TERMINATED)
+    with pytest.raises(SandboxLostError):
+        await handle.observe_commands.get("any-command")
+
+    # Nothing was resumed, created or started, and the stored generation did not move.
+    assert backend.started == started_before and backend.endpoint_refs == []
+    assert repository.records[key.stable_hash()].record.generation == generation_before
+
+
+@pytest.mark.asyncio
+async def test_observe_commands_of_an_older_generation_is_stale() -> None:
+    manager, repository, _backend = await _ready_manager()
+    key = SessionKey(tenant_id="tenant", session_id="replaced")
+    handle = await manager.ensure(key)
+    await _set_state(repository, key, generation=handle.generation + 1)
+    with pytest.raises(StaleGenerationError):
+        await handle.observe_commands.get("any-command")
+
+
+@pytest.mark.asyncio
 async def test_diagnostic_command_refuses_a_suspended_session_and_changes_nothing() -> None:
     manager, repository, backend = await _ready_manager()
     key = SessionKey(tenant_id="tenant", session_id="thread")

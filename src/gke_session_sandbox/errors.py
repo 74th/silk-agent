@@ -57,6 +57,14 @@ class StaleGenerationError(GkeSessionSandboxError):
     """A handle refers to a session generation that is no longer current."""
 
 
+class SandboxNotReadyError(GkeSessionSandboxError):
+    """The Sandbox is suspended or changing state; an observer must not start it."""
+
+
+class SandboxLostError(GkeSessionSandboxError):
+    """The Sandbox is lost or terminated: its processes (and their commands) are gone."""
+
+
 class WorkspaceLostError(GkeSessionSandboxError):
     """The session's dedicated workspace disappeared unexpectedly."""
 
