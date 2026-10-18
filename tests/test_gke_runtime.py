@@ -268,6 +268,16 @@ async def test_cancel_command_is_unknown_when_the_tracker_cannot_be_reached():
     assert await rt.cancel_command(key, "cmd-x") == "unknown"
 
 
+async def test_cancel_command_after_a_restart_goes_through_the_session():
+    # No local handle (the Bot restarted): the cancel still reaches the tracker by id.
+    rt, mgr = make()
+    key = "slack:T1:C1:1.0"
+    await rt.run_command(key, "warm")
+    cmds = mgr.handles[("T1", "C1:1.0")].commands
+    assert await rt.cancel_command(key, "cmd-from-before") == "confirmed"
+    assert cmds.cancelled == ["cmd-from-before"]
+
+
 async def test_status_and_output():
     rt, _ = make()
     st = await rt.command_status("slack:T1:C1:1.0", "cmd-1")

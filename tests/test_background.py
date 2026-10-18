@@ -389,6 +389,19 @@ async def test_stop_with_only_a_background_command_cancels_it_on_the_runtime(clo
     ]
 
 
+async def test_cancel_all_reaches_the_runtime_with_a_command_monitor_too():
+    class Monitor:
+        async def orphan(self, _command_id):
+            pass
+
+    rt = RemoteRuntime()
+    bg = BackgroundCommands(rt, command_monitor=Monitor())
+    bg.detach(await bg.start("K", "sleep 300"))
+    report = await bg.cancel_all("K")
+    assert (report.requested, report.confirmed) == (1, 1)
+    assert rt.cancel_requests == ["cmd-1"]
+
+
 async def test_unconfirmed_cancel_is_not_reported_as_stopped_and_keeps_the_id(clock):
     rt = RemoteRuntime(outcome="unknown")
     tracker = RecordingTracker()
