@@ -135,6 +135,26 @@ async def test_worker_creates_one_actor_per_active_conversation_and_closes_remov
 
 
 @pytest.mark.asyncio
+async def test_worker_releases_the_slot_when_the_actor_cannot_be_built():
+    ownership = Ownership([token("conversation-a")])
+
+    def actor_factory(owner):
+        raise FileNotFoundError("prompt.md")
+
+    worker = DistributedWorker(
+        ownership,
+        Clock(),
+        worker_id="worker-a",
+        worker_incarnation="pod-a:boot-1",
+        actor_factory=actor_factory,
+        subscribe=no_watch,
+    )
+    with pytest.raises(FileNotFoundError):
+        await worker.run_once()
+    assert ownership.released == ["conversation-a"]
+
+
+@pytest.mark.asyncio
 async def test_worker_ignores_expired_or_other_incarnation_assignments():
     clock = Clock()
     ownership = Ownership(

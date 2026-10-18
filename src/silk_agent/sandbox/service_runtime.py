@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
 import tempfile
 import uuid
 from pathlib import Path
@@ -26,6 +27,8 @@ async def _create_manager(config: Config, firestore_client: Any):
     from silk_agent.app import FINGERPRINT_KEY_ENV, with_fingerprint_key
 
     prefix = config.distributed.firestore_prefix
+    if config.sandbox.config_file is None:
+        raise ValueError("sandbox.config_file is required for the sandbox service")
     manager_config = config.resolve(config.sandbox.config_file)
     temp_config_dir = tempfile.TemporaryDirectory(prefix="silk-agent-sandbox-service-")
     fingerprint_key = os.environ.get(FINGERPRINT_KEY_ENV, "")
@@ -216,7 +219,16 @@ async def run_sandbox_service(config: Config) -> None:
             "sandbox service listening",
             extra={"port": config.distributed.sandbox_service_port},
         )
-        await asyncio.Event().wait()
+        # PID 1 ignores SIGTERM unless it has a handler; without one every rollout waits for
+        # the grace period and ends in SIGKILL with no cleanup.
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, stop.set)
+            except NotImplementedError:  # pragma: no cover - non-unix
+                pass
+        await stop.wait()
     finally:
         await runner.cleanup()
         temp_config_dir.cleanup()

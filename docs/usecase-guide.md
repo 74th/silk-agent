@@ -30,7 +30,7 @@ silk-agent（このリポジトリ）               ユースケース（usecase
 ```bash
 cp -r usecases/template usecases/my-usecase
 cd usecases/my-usecase
-git mv src/silk_usecase_template src/my_usecase      # パッケージ名
+mv src/silk_usecase_template src/my_usecase      # パッケージ名（コピー直後で未追跡なので git mv ではなく mv）
 ```
 
 書き換える場所:

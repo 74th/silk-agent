@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from gke_session_sandbox.errors import FileOperationError
 from silk_agent.core.events import TurnFinished, UserMessage
 from silk_agent.core.orchestrator import ConversationOrchestrator
 from silk_agent.core.stopwords import StopWords
@@ -80,7 +81,7 @@ class FakeFiles:
 
     async def read(self, path):
         if path not in self.data:
-            raise FileNotFoundError(path)
+            raise FileOperationError("missing", path=path, status=404)
         return self.data[path]
 
     async def write(self, path, data):

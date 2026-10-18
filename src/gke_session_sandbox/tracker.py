@@ -605,7 +605,7 @@ class Tracker:
             await self._mark_unknown(command_id, "tracker stopped while command was running")
             raise
         except Exception as exc:
-            await self._mark_unknown(command_id, str(exc))
+            await self._mark_failed_or_unknown(command_id, str(exc))
         finally:
             self.tasks.pop(command_id, None)
 
@@ -842,6 +842,21 @@ class Tracker:
         if record.get("state") != "running" or not record.get("process_id"):
             raise web.HTTPConflict(text="command is not running")
         return record
+
+    async def _mark_failed_or_unknown(self, command_id: str, error: str) -> None:
+        """A failure before sandboxd reported the process (a bad cwd, a failed fork) means
+        nothing ran: finish the record. `unknown` would keep the Sandbox's gate open forever."""
+        record = await self.journal.get(command_id)
+        if record and record.get("state") == "reserved" and not record.get("process_id"):
+            await self.journal.update(
+                command_id,
+                state="finished",
+                exit_code=-1,
+                finished_at=_now(),
+                error=f"command failed to start: {error}",
+            )
+            return
+        await self._mark_unknown(command_id, error)
 
     async def _mark_unknown(self, command_id: str, error: str) -> None:
         record = await self.journal.get(command_id)

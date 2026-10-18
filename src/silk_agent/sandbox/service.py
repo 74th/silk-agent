@@ -17,6 +17,7 @@ from typing import Any, cast
 from aiohttp import web
 from kubernetes_asyncio import client
 
+from gke_session_sandbox.errors import FileOperationError
 from silk_agent.core.distributed_models import OwnershipToken
 from silk_agent.core.distributed_ports import ServiceOperationStore
 from silk_agent.sandbox.protocol import (
@@ -400,7 +401,8 @@ async def _command_output(request: web.Request) -> web.Response:
         sandbox_generation=int(operation["sandbox_generation"]),
         data_base64=base64.b64encode(page.data).decode("ascii"),
         next_cursor=page.cursor,
-        complete=page.complete and page.output_complete,
+        complete=page.complete,
+        truncated=page.complete and not page.output_complete,
     )
     return web.json_response(response.model_dump(mode="json"))
 
@@ -467,6 +469,11 @@ async def _read_file(request: web.Request) -> web.Response:
     try:
         data = await _call_and_close(handle.files, "read", file_request.path)
     except FileNotFoundError as exc:
+        raise ServiceError(404, "not_found", "file does not exist") from exc
+    except FileOperationError as exc:
+        # sandboxd answers 404 for a missing file (the real client never raises FileNotFoundError).
+        if exc.status != 404:
+            raise
         raise ServiceError(404, "not_found", "file does not exist") from exc
     if len(data) > MAX_FILE_BYTES:
         raise ServiceError(413, "file_too_large", "file exceeds the service read limit")

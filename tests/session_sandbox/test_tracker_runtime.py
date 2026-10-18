@@ -483,3 +483,25 @@ async def test_supervisor_stops_tracker_before_sandboxd(monkeypatch):
     event.set()
     assert await task == 0
     assert events == ["ready", "stop:tracker", "stop:sandboxd"]
+
+
+@pytest.mark.asyncio
+async def test_a_start_failure_before_init_finishes_the_command(tmp_path):
+    journal = CommandJournal(tmp_path / "commands.json")
+    record, _ = await journal.reserve({"command_id": "bad-cwd", "command": ["ls"], "cwd": "/nope"})
+
+    class Stream:
+        async def __aiter__(self):
+            raise RuntimeError("cwd does not exist")
+            yield  # pragma: no cover
+
+    class Stub:
+        def Start(self, _):
+            return Stream()
+
+    tracker = Tracker(journal, Stub(), generation=1)
+    await tracker.execute(record["command_id"])
+    saved = await journal.get(record["command_id"])
+    assert saved["state"] == "finished"
+    assert "failed to start" in saved["error"]
+    assert await tracker.journal.set_gate(True) == 0  # nothing keeps the Sandbox busy

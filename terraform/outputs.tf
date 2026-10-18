@@ -1,5 +1,5 @@
 output "agent_engine_name" {
-  description = "設定ファイルの sessions.agent_engine に設定する完全リソース名"
+  description = "設定ファイルの session_store.agent_runtime に設定する完全リソース名"
   value       = "projects/${var.project_id}/locations/${var.region}/reasoningEngines/${google_vertex_ai_reasoning_engine.sessions.name}"
 }
 
@@ -9,7 +9,7 @@ output "model_armor_template" {
 }
 
 output "skills_bucket" {
-  description = "設定ファイルの skills.bucket に設定するバケット名"
+  description = "設定ファイルの skills.source に設定するバケット（gs://<名前>）"
   value       = google_storage_bucket.skills.name
 }
 

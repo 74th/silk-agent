@@ -142,9 +142,9 @@ class ClaudeAgentEngine:
         link_skills(cwd, generation)
         self._client_generation = generation.generation_id if generation else None
 
-        resume = None
-        if not self._fresh:
-            resume = self._session_id or resume_session_id
+        # After a reset the stored session is never resumed, but the session the reset
+        # started is: dropping the client (skills update, failed turn) must keep its history.
+        resume = self._session_id or (None if self._fresh else resume_session_id)
         hooks = {
             "PreToolUse": [HookMatcher(hooks=[self._on_pre_tool])],
             "PostToolUse": [HookMatcher(hooks=[self._on_post_tool])],

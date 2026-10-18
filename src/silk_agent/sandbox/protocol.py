@@ -64,6 +64,8 @@ class CommandOutputResponse(StrictModel):
     data_base64: StrictStr
     next_cursor: StrictInt = Field(ge=0)
     complete: bool
+    # The stream ended, but part of its output was never stored (size limit, write failure).
+    truncated: bool = False
 
 
 class CommandControlResponse(StrictModel):

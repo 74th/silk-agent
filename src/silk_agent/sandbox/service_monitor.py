@@ -63,7 +63,8 @@ class ServiceCommandRuntime:
             cursor=cursor,
             limit=limit_bytes,
         )
-        return OutputPage(page.data, page.cursor, bool(page.complete and page.output_complete))
+        complete = bool(page.complete)
+        return OutputPage(page.data, page.cursor, complete, complete and not page.output_complete)
 
 
 async def run_monitor_loop(

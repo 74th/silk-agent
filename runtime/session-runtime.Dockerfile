@@ -37,7 +37,9 @@ COPY runtime/python/gke_session_sandbox /opt/runtime/gke_session_sandbox
 COPY runtime/constraints.txt /tmp/constraints.txt
 RUN pip install --no-cache-dir -c /tmp/constraints.txt aiohttp grpcio protobuf \
     && rm /tmp/constraints.txt
-ENV PYTHONPATH=/opt/runtime PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+# The runtime user has no home directory; startup.sh writes git settings to /workspace/.gitconfig.
+ENV PYTHONPATH=/opt/runtime PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
+    GIT_CONFIG_GLOBAL=/workspace/.gitconfig
 WORKDIR /workspace
 USER 1000:1000
 EXPOSE 8080 8081 9090

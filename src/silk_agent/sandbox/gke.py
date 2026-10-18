@@ -194,7 +194,9 @@ class GkeSessionSandboxRuntime:
         try:
             return await self._with_session(conversation_key, op)
         except Exception as e:
-            if type(e).__name__ in ("FileNotFoundError", "NotFound"):
+            if type(e).__name__ in ("FileNotFoundError", "NotFound") or (
+                type(e).__name__ == "FileOperationError" and getattr(e, "status", None) == 404
+            ):
                 raise FileNotFoundError(path) from e
             raise
 

@@ -464,7 +464,7 @@ class RemoteSandboxRuntime:
             ) from exc
         if not isinstance(complete, bool):
             raise SandboxServiceError(502, "invalid_response", "service returned invalid output")
-        return OutputPage(data, next_cursor, complete)
+        return OutputPage(data, next_cursor, complete, page.get("truncated") is True)
 
     async def cancel_commands(self, conversation_key: str) -> None:
         for command_id, identity in list(self._running.get(conversation_key, {}).items()):

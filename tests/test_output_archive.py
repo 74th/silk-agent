@@ -180,3 +180,19 @@ async def test_firestore_terminal_metadata_rejects_full_output_payloads():
             result={"stdout": "x" * (65 * 1024)},
             now=datetime(2026, 10, 14, tzinfo=UTC),
         )
+
+
+async def test_archiver_keeps_what_was_stored_when_the_sandbox_truncated_the_stream():
+    class TruncatedReader:
+        async def read_output_page(self, *_args, stream, cursor, **_kwargs):
+            if cursor == 0:
+                return OutputPage(b"abc", 3, False)
+            return OutputPage(b"", 3, True, truncated=True)
+
+    objects = MemoryObjects()
+    archive = CommandOutputArchiver(objects, clock=Clock(datetime.now(UTC)))
+    result = await archive.archive(
+        TruncatedReader(), conversation_key="c", command_id="command-1", sandbox_generation=1
+    )
+    assert result["stdout"]["size_bytes"] == 3
+    assert result["stdout"]["truncated"] is True

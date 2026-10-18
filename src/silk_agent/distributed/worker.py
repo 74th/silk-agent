@@ -147,7 +147,13 @@ class DistributedWorker:
                 continue
             actor_factory = self._control_actor_factory if control_only else self._actor_factory
             assert actor_factory is not None
-            actor = actor_factory(token)
+            try:
+                actor = actor_factory(token)
+            except BaseException:
+                # Nothing was started, so the reservation can go back: a conversation whose
+                # actor cannot be built must not keep its slot and stay silent.
+                await self._ownership.release(token, now=self._clock.now())
+                raise
             METRICS.inc("worker_actor_starts_total", kind="control" if control_only else "sdk")
             try:
                 await actor.start()
