@@ -137,6 +137,33 @@ async def test_a_conversation_that_always_has_output_does_not_hold_back_the_next
 
 
 @pytest.mark.asyncio
+async def test_a_failing_listing_after_a_busy_pass_waits_for_the_poll_interval():
+    from silk_agent.distributed.control_runtime import OutboxSenderLoop
+
+    listings = []
+
+    class Outbox:
+        async def list_pending_page(self, *, limit, after):
+            listings.append(1)
+            if len(listings) == 1:
+                return ("busy",), None
+            raise ConnectionError("store down")
+
+    class Sender:
+        async def run_once(self, key):
+            return True  # always has output: the first pass ends with a backlog
+
+    stop = asyncio.Event()
+    loop = OutboxSenderLoop(Outbox(), Sender(), poll_seconds=0.05, max_per_conversation=3)
+    task = asyncio.create_task(loop.run(stop))
+    await asyncio.sleep(0.2)
+    stop.set()
+    await asyncio.wait_for(task, 1)
+    # Without the wait, the failing listing is retried thousands of times in 0.2 s.
+    assert len(listings) <= 10
+
+
+@pytest.mark.asyncio
 async def test_sender_loop_resumes_after_the_last_page_and_starts_over_at_the_end():
     from silk_agent.distributed.control_runtime import OutboxSenderLoop
 

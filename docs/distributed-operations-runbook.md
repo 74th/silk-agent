@@ -146,6 +146,8 @@ Firestore の操作数は Cloud Monitoring の `firestore.googleapis.com/api/req
 
 ## 8. 既知の制限
 
+- **`AGENT_USER_EMAIL` は新しく作る Sandbox から適用される。** Sandbox Service は、会話の所有者のメールアドレスを、Sandbox を作る `ensure` に渡す（`new_generation_env`）。このメールアドレスを渡す前に作られた世代（作成時の環境がない）は、そのまま動き続けるが、メールアドレスは入らない（稼働中のコンテナの環境変数は後から変えられない）。保持期限などで次の世代が作られるときに、初めて入る。すぐに入れたい会話は、その Sandbox を終了（terminate）して、次の入力で作り直す（作業領域は失われる）。
+
 - 旧 Worker が応答不能な間の扱いは設定で変わる。`distributed.auto_recover_missing_pods` が無効なら、旧 Worker の停止証拠が得られるまで復旧しない（可用性より単一実行を優先する厳密なモード）。**開発環境の配置では有効**で、旧 Worker の Pod が Kubernetes API 上で存在しない（404、または同名で UID が異なる）ことを確認でき、lease 失効から120秒が経過すると、旧 Worker の停止証拠なしに自動で解放する（§5）。この場合、強制削除された Pod が分断されたノードで動き続けていると、外部 MCP の副作用と Agent Platform 履歴への書込みは防げない。厳密さを優先する運用では、この設定を無効にする。
 - 出力の origin 判定は、その会話で最後に渡した入力の番号を使う。STOP 直後の旧 turn が、次の入力が既に渡された後に出した遅延イベントは配送され得る。
 - Worker の新しい Pod が既存会話を自動で引き取ることはない。常駐会話の再配置は idle 解放（`distributed.idle_close_seconds`）か drain を経由する。

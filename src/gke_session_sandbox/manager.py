@@ -281,8 +281,23 @@ class SandboxManager:
         )
 
     async def ensure(
-        self, key: SessionKey, *, env: Mapping[str, str] | None = None
+        self,
+        key: SessionKey,
+        *,
+        env: Mapping[str, str] | None = None,
+        new_generation_env: Mapping[str, str] | None = None,
     ) -> SessionHandle:
+        """Return the session's current generation, creating or resuming it as needed.
+
+        `env` is the creation environment of the generation: it must match the one the existing
+        generation was created with (a generation created without env conflicts with any).
+        `new_generation_env` is only used when a generation is created here (a new session, or
+        the next generation after expiry or loss) and never checked against an existing one, so a
+        caller can start passing an environment without breaking generations that predate it.
+        """
+        if env is not None and new_generation_env is not None:
+            raise ValueError("pass either env or new_generation_env, not both")
+        create_env = env if env is not None else new_generation_env
         self._check_open()
         async with self._session_lease(key) as token:
             stored = await self.repository.get(key)
@@ -296,18 +311,21 @@ class SandboxManager:
                         and utc_now() >= stored.record.expires_at
                     ):
                         stored = await self._expire_locked(token, key, stored)
-                        return await self._create_locked(token, key, env, previous=stored)
+                        return await self._create_locked(token, key, create_env, previous=stored)
                     return await self._resume_locked(token, key, stored)
                 if stored.record.state is SessionState.CREATING:
+                    # An interrupted create continues the way it started: with its env if it
+                    # had one, without if it did not (the manifest digest depends on it).
+                    resume_env = create_env if stored.record.creation_env_fingerprint else env
                     if (
                         stored.record.creation_env_fingerprint
-                        and env is None
+                        and resume_env is None
                         and stored.record.sandbox_ref is None
                     ):
                         raise ConfigurationError(
                             "resuming an interrupted initial create requires the original env map"
                         )
-                    return await self._continue_creation_locked(token, key, stored, env)
+                    return await self._continue_creation_locked(token, key, stored, resume_env)
                 if stored.record.state is SessionState.RESUMING and stored.record.sandbox_ref:
                     # An interrupted resume may have failed in the policy step: never start the
                     # Pod on policies older than the current settings.
@@ -321,11 +339,11 @@ class SandboxManager:
                     await self._open_tracker_gate(stored.record.sandbox_ref)
                     return await self._save_ready(token, key, stored, ready)
                 if stored.record.state in {SessionState.TERMINATED, SessionState.LOST}:
-                    return await self._create_locked(token, key, env, previous=stored)
+                    return await self._create_locked(token, key, create_env, previous=stored)
                 raise ResourceOwnershipError(
                     f"session is in unrecoverable operation state {stored.record.state.value!r}"
                 )
-            return await self._create_locked(token, key, env)
+            return await self._create_locked(token, key, create_env)
 
     async def get(self, key: SessionKey) -> SessionHandle | None:
         self._check_open()

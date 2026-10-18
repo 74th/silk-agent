@@ -748,7 +748,10 @@ async def _ensure_handle(request: web.Request, conversation_key: str) -> Any:
         env = await cast(Callable[[str], Awaitable[Mapping[str, str]]], provider)(conversation_key)
     manager = _service_manager(request)
     key = _session_key(conversation_key)
-    return await (manager.ensure(key, env=dict(env)) if env else manager.ensure(key))
+    # `new_generation_env`: Sandboxes created before the owner's e-mail was passed have no
+    # creation environment and keep working as they are; the e-mail applies to every
+    # generation created from now on.
+    return await (manager.ensure(key, new_generation_env=dict(env)) if env else manager.ensure(key))
 
 
 def _service_manager(request: web.Request) -> Any:

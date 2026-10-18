@@ -1094,8 +1094,8 @@ async def test_ensure_passes_the_conversation_owners_email_to_the_sandbox():
     ensured = []
 
     class Manager:
-        async def ensure(self, key, env=None):
-            ensured.append(env)
+        async def ensure(self, key, new_generation_env=None):
+            ensured.append(new_generation_env)
             return SimpleNamespace(
                 generation=1,
                 state=SimpleNamespace(value="ready"),

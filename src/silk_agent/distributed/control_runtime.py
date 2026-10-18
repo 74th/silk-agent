@@ -233,6 +233,7 @@ class OutboxSenderLoop:
         self.backlog = False  # some conversation still had output when its pass ended
 
     async def run_once(self) -> int:
+        self.backlog = False  # a failed listing below must not inherit the previous pass's
         paged = getattr(self._outbox, "list_pending_page", None)
         if paged is not None:
             # Resume after the last page: a stuck conversation must not fill every page.
@@ -240,7 +241,6 @@ class OutboxSenderLoop:
         else:
             keys = await self._outbox.list_conversations_with_pending(limit=self._batch_size)
         delivered = 0
-        self.backlog = False
 
         async def drain(key: str) -> int:
             count = 0
