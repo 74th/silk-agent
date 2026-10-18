@@ -32,10 +32,15 @@ if [[ "${current_context}" != "${expected_context}" ]]; then
   exit 2
 fi
 
-env_file="${SILK_AGENT_ENV_FILE:-${repo_root}/.env}"
-for key in SLACK_BOT_TOKEN SLACK_APP_TOKEN; do
-  grep -q "^${key}=." "${env_file}" || { echo "${key} is not set in ${env_file}" >&2; exit 3; }
-done
+# The single-process Bot gets its Slack tokens from a Secret made from an env file. A distributed
+# deployment does not: its Gateway and Control read them from Secret Manager (see below), so no
+# env file is read, and none can be picked up by mistake.
+if [[ -z "${distributed_dir}" ]]; then
+  env_file="${SILK_AGENT_ENV_FILE:-${repo_root}/.env}"
+  for key in SLACK_BOT_TOKEN SLACK_APP_TOKEN; do
+    grep -q "^${key}=." "${env_file}" || { echo "${key} is not set in ${env_file}" >&2; exit 3; }
+  done
+fi
 
 if [[ -n "${distributed_dir}" ]]; then
   : "${SYSTEM_NAMESPACE:?Set SYSTEM_NAMESPACE to the management namespace (<name>-system)}"
@@ -45,11 +50,10 @@ if [[ -n "${distributed_dir}" ]]; then
     exit 4
   fi
   kubectl create namespace "${SYSTEM_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f -
-  # Gateway reads both tokens, Control only the bot token (chosen by the role manifests); the
-  # Worker mounts no Secret.
-  kubectl -n "${SYSTEM_NAMESPACE}" create secret generic silk-agent-slack \
-    --from-env-file=<(grep -E '^(SLACK_BOT_TOKEN|SLACK_APP_TOKEN)=' "${env_file}") \
-    --dry-run=client -o yaml | kubectl apply -f -
+  # The Slack tokens are not created here. Register them in Secret Manager first
+  # (`gcloud secrets versions add <name>-slack-bot-token --data-file=-`, and the app token); the
+  # Gateway (both) and Control (bot token) read them with their Workload Identity, the Worker and
+  # the Sandbox Service never do. A role without a readable token fails to start.
   # Fingerprint key for the sandbox creation env: create once, never rotate implicitly.
   if ! kubectl -n "${SYSTEM_NAMESPACE}" get secret silk-agent-sandbox >/dev/null 2>&1; then
     kubectl -n "${SYSTEM_NAMESPACE}" create secret generic silk-agent-sandbox \

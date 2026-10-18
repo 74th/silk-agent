@@ -74,9 +74,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-          envFrom:
-            - secretRef:
-                name: silk-agent-slack
+          # No Slack token here: the Gateway reads both from Secret Manager (slack.bot_token_secret /
+          # app_token_secret in its config) with its Workload Identity.
           startupProbe:
             httpGet:
               path: /healthz
@@ -285,12 +284,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            # Control only posts to Slack: the bot token, never the app token.
-            - name: SLACK_BOT_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: silk-agent-slack
-                  key: SLACK_BOT_TOKEN
+            # Control reads only the bot token (never the app token) from Secret Manager; its
+            # Workload Identity is granted that one Secret.
           startupProbe:
             httpGet:
               path: /healthz

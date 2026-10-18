@@ -47,7 +47,7 @@ def test_script_is_valid_bash():
     subprocess.run(["bash", "-n", str(ROOT / "k8s/deploy.sh")], check=True)
 
 
-def test_distributed_mode_creates_the_secrets_in_the_target_namespace_and_waits_for_four_roles(
+def test_distributed_mode_creates_the_sandbox_secret_but_no_slack_secret_and_waits_for_four_roles(
     tmp_path,
 ):
     result, calls = run_deploy(
@@ -57,9 +57,8 @@ def test_distributed_mode_creates_the_secrets_in_the_target_namespace_and_waits_
     )
     assert result.returncode == 0, result.stderr
     assert "kubectl create namespace demo-system --dry-run=client -o yaml" in calls
-    assert any(
-        c.startswith("kubectl -n demo-system create secret generic silk-agent-slack") for c in calls
-    )
+    # The Slack tokens come from Secret Manager: no Slack Secret is made, and no env file read.
+    assert not any("silk-agent-slack" in c for c in calls)
     assert "kubectl -n demo-system get secret silk-agent-sandbox" in calls
     assert any(
         c.startswith("kubectl -n demo-system create secret generic silk-agent-sandbox ")
@@ -94,3 +93,14 @@ def test_distributed_mode_requires_the_namespace_and_excludes_kustomize_dir(tmp_
         SYSTEM_NAMESPACE="x",
     )
     assert result.returncode == 2
+
+
+def test_distributed_mode_does_not_need_an_env_file(tmp_path):
+    result, calls = run_deploy(
+        tmp_path,
+        DISTRIBUTED_DIR="usecases/demo/k8s/distributed/steady",
+        SYSTEM_NAMESPACE="demo-system",
+        SILK_AGENT_ENV_FILE=str(tmp_path / "does-not-exist.env"),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "kubectl apply -k usecases/demo/k8s/distributed/steady" in calls

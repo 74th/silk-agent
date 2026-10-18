@@ -218,13 +218,16 @@ Sandboxのイメージを変えても、すでにある会話のSandboxは、次
    共通の定義（`k8s/distributed/base/`、`k8s/distributed/platform/`）にはプロジェクト、イメージ、接頭辞、バケットの値を書かない。変更が必要なら本体のリポジトリで直す。
 5. **配置（bootstrap → 起動）**: 本体のチェックアウトから`deploy.sh`を分散構成のモードで実行する。初回はbootstrap（3つの役割のレプリカが0）を適用し、運用runbook（`docs/distributed-operations-runbook.md` §2）の順序で役割を起動し、確認後にsteadyを適用する。
 
+Slackのトークンは、Secret Manager（Terraformが作った`<名前>-slack-bot-token`、`<名前>-slack-app-token`）に先に登録する。`.env`も、k8sのSecretも使わない。
+
 ```bash
-export SILK_AGENT_ENV_FILE=/path/to/<名前>.env   # このユースケースのSlackトークン
+printf '%s' "$SLACK_BOT_TOKEN" | gcloud secrets versions add <名前>-slack-bot-token --data-file=-
+printf '%s' "$SLACK_APP_TOKEN" | gcloud secrets versions add <名前>-slack-app-token --data-file=-
 DISTRIBUTED_DIR=usecases/<名前>/k8s/distributed/bootstrap SYSTEM_NAMESPACE=<名前>-system k8s/deploy.sh
 DISTRIBUTED_DIR=usecases/<名前>/k8s/distributed/steady    SYSTEM_NAMESPACE=<名前>-system k8s/deploy.sh
 ```
 
-`kubectl kustomize usecases/<名前>/k8s/distributed/steady`で、適用前にマニフェストを確認できる。`deploy.sh`は対象のnamespaceにSlackの Secretと`silk-agent-sandbox`の Secretを作り、4役割のrolloutを待つ。
+`kubectl kustomize usecases/<名前>/k8s/distributed/steady`で、適用前にマニフェストを確認できる。`deploy.sh`は対象のnamespaceに`silk-agent-sandbox`の Secretを作り、4役割のrolloutを待つ（Slackのトークンは作らない。GatewayとControlが、設定の`slack.bot_token_secret`/`app_token_secret`から、自分のWorkload Identityで読む。Gatewayは両方、Controlはbot tokenだけ、WorkerとSandbox Serviceは読めない）。トークンのローテーションは、Secret Managerに新しいバージョンを登録して、GatewayとControlを再起動する（`kubectl -n <名前>-system rollout restart deploy/silk-agent-gateway deploy/silk-agent-control`）。トークンの指定漏れで開発用の`.env`に切り替わることはない（分散構成の`deploy.sh`は`.env`を読まない）。
 
 ### 4.3 運用
 
