@@ -307,3 +307,12 @@ def test_drain_wait_ignores_workers_that_stopped_heartbeating(monkeypatch, tmp_p
     output = capsys.readouterr().out
     assert "worker=dead" in output and "stale=true" in output
     assert "worker=live" in output and output.count("stale=true") == 1
+
+
+def test_sandbox_network_admin_parses_reapply_and_verify():
+    args = build_parser().parse_args(["sandbox-network", "reapply", "--all", "-c", "w.yaml"])
+    assert (args.command, args.action, args.all) == ("sandbox-network", "reapply", True)
+    args = build_parser().parse_args(
+        ["sandbox-network", "verify", "--conversation", "slack:T:C.1", "--deny", "example.com:443"]
+    )
+    assert (args.conversation, args.deny) == ("slack:T:C.1", ["example.com:443"])

@@ -127,6 +127,40 @@ def test_config_accepts_normal_overrides_and_has_lifecycle_defaults() -> None:
     assert config.lifecycle.retention_seconds == 604800
 
 
+def test_dns_pod_selectors_default_to_kube_dns_and_node_local_dns() -> None:
+    config = ManagerConfig(runtime=runtime_settings())
+
+    assert config.network.dns_pod_selectors == (
+        {"k8s-app": "kube-dns"},
+        {"k8s-app": "node-local-dns"},
+    )
+
+
+def test_single_dns_pod_selector_is_accepted_as_one_element() -> None:
+    config = ManagerConfig(
+        runtime=runtime_settings(), network={"dns_pod_selector": {"k8s-app": "custom-dns"}}
+    )
+
+    assert config.network.dns_pod_selectors == ({"k8s-app": "custom-dns"},)
+
+
+def test_dns_pod_selector_and_selectors_cannot_be_combined() -> None:
+    with pytest.raises(ValidationError, match="only one of dns_pod_selector"):
+        ManagerConfig(
+            runtime=runtime_settings(),
+            network={
+                "dns_pod_selector": {"k8s-app": "kube-dns"},
+                "dns_pod_selectors": [{"k8s-app": "node-local-dns"}],
+            },
+        )
+
+
+@pytest.mark.parametrize("selectors", [[], [{}]])
+def test_dns_pod_selectors_reject_empty_values(selectors: list[object]) -> None:
+    with pytest.raises(ValidationError, match="dns_pod_selectors"):
+        ManagerConfig(runtime=runtime_settings(), network={"dns_pod_selectors": selectors})
+
+
 def test_ready_timeout_defaults_to_180_seconds_and_can_be_set() -> None:
     assert ManagerConfig(runtime=runtime_settings()).runtime.ready_timeout_seconds == 180
     config = ManagerConfig(runtime=runtime_settings(ready_timeout_seconds=600))

@@ -36,3 +36,8 @@ output "kube_context" {
   description = "Expected kubeconfig context for deployment checks."
   value       = "gke_${var.project_id}_${var.zone}_${google_container_cluster.gke.name}"
 }
+
+output "node_local_dns_cache_enabled" {
+  description = "Whether NodeLocal DNSCache is enabled on the cluster."
+  value       = var.enable_node_local_dns_cache
+}

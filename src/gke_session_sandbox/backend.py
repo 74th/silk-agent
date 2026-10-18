@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, Protocol
 
@@ -22,6 +23,9 @@ class SandboxCustomObjectsApi(Protocol):
     async def patch_namespaced_custom_object(
         self, group: str, version: str, namespace: str, plural: str, name: str, body: Any
     ) -> Any: ...
+    async def replace_namespaced_custom_object(
+        self, group: str, version: str, namespace: str, plural: str, name: str, body: Any
+    ) -> Any: ...
     async def delete_namespaced_custom_object(
         self, group: str, version: str, namespace: str, plural: str, name: str, body: Any = None
     ) -> Any: ...
@@ -36,8 +40,27 @@ class SandboxCoreApi(Protocol):
 class SandboxNetworkingApi(Protocol):
     async def create_namespaced_network_policy(self, namespace: str, body: Any) -> Any: ...
     async def read_namespaced_network_policy(self, name: str, namespace: str) -> Any: ...
+    async def replace_namespaced_network_policy(
+        self, name: str, namespace: str, body: Any
+    ) -> Any: ...
     async def delete_namespaced_network_policy(
         self, name: str, namespace: str, body: Any = None
+    ) -> Any: ...
+
+
+# (apiVersion, kind, name) of a policy a session may or may not currently own.
+PolicyName = tuple[str, str, str]
+
+_NETWORK_POLICY = ("networking.k8s.io/v1", "NetworkPolicy")
+_FQDN_POLICY = ("networking.gke.io/v1alpha1", "FQDNNetworkPolicy")
+_FQDN_GROUP = ("networking.gke.io", "v1alpha1", "fqdnnetworkpolicies")
+
+
+class SandboxExecApi(Protocol):
+    """CoreV1Api bound to a WebSocket client (kubernetes_asyncio.stream.WsApiClient)."""
+
+    async def connect_get_namespaced_pod_exec(
+        self, name: str, namespace: str, **kwargs: Any
     ) -> Any: ...
 
 
@@ -56,10 +79,12 @@ class CoreSandboxBackend:
         custom_api: SandboxCustomObjectsApi,
         core_api: SandboxCoreApi,
         networking_api: SandboxNetworkingApi,
+        exec_api: SandboxExecApi | None = None,
     ) -> None:
         self._custom = custom_api
         self._core = core_api
         self._networking = networking_api
+        self._exec = exec_api
 
     async def create_suspended(
         self,
@@ -148,6 +173,115 @@ class CoreSandboxBackend:
             refs.append(_resource_ref(created, namespace, api_version=api_version, kind=kind))
         return tuple(refs)
 
+    async def apply_policies(
+        self,
+        namespace: str,
+        policies: Sequence[Mapping[str, Any]],
+        *,
+        owner: ResourceRef,
+    ) -> tuple[ResourceRef, ...]:
+        """Create each policy, or replace the spec of one this Sandbox already owns.
+
+        An existing policy is changed only when both its ownerReference UID and its
+        session labels match; otherwise ResourceOwnershipError is raised untouched.
+        """
+        refs: list[ResourceRef] = []
+        for policy in policies:
+            body = copy.deepcopy(dict(policy))
+            metadata = body.setdefault("metadata", {})
+            metadata["namespace"] = namespace
+            metadata["ownerReferences"] = [
+                {
+                    "apiVersion": owner.api_version,
+                    "kind": owner.kind,
+                    "name": owner.name,
+                    "uid": owner.uid,
+                    "controller": False,
+                    "blockOwnerDeletion": False,
+                }
+            ]
+            api_version, kind = str(body.get("apiVersion", "")), str(body.get("kind", ""))
+            name = metadata.get("name")
+            if (api_version, kind) == _NETWORK_POLICY:
+                try:
+                    applied = await self._networking.create_namespaced_network_policy(
+                        namespace, body
+                    )
+                except Exception as exc:
+                    if getattr(exc, "status", None) != 409:
+                        raise
+                    existing = await self._networking.read_namespaced_network_policy(
+                        name, namespace
+                    )
+                    _validate_policy_owner(existing, metadata, kind, owner)
+                    _carry_resource_version(existing, body)
+                    applied = await self._networking.replace_namespaced_network_policy(
+                        name, namespace, body
+                    )
+            elif (api_version, kind) == _FQDN_POLICY:
+                group, version, plural = _FQDN_GROUP
+                try:
+                    applied = await self._custom.create_namespaced_custom_object(
+                        group, version, namespace, plural, body
+                    )
+                except Exception as exc:
+                    if getattr(exc, "status", None) != 409:
+                        raise
+                    existing = await self._custom.get_namespaced_custom_object(
+                        group, version, namespace, plural, name
+                    )
+                    _validate_policy_owner(existing, metadata, kind, owner)
+                    _carry_resource_version(existing, body)
+                    applied = await self._custom.replace_namespaced_custom_object(
+                        group, version, namespace, plural, name, body
+                    )
+            else:
+                raise ResourceOwnershipError(f"unsupported policy resource {api_version}/{kind}")
+            refs.append(_resource_ref(applied, namespace, api_version=api_version, kind=kind))
+        return tuple(refs)
+
+    async def delete_policies(
+        self,
+        namespace: str,
+        names: Sequence[PolicyName],
+        *,
+        owner: ResourceRef,
+        labels: Mapping[str, str],
+    ) -> tuple[PolicyName, ...]:
+        """Delete policies that exist, are owned by this Sandbox, and are no longer wanted."""
+        deleted: list[PolicyName] = []
+        expected = {"labels": dict(labels)}
+        for api_version, kind, name in names:
+            if (api_version, kind) == _NETWORK_POLICY:
+                try:
+                    existing = await self._networking.read_namespaced_network_policy(
+                        name, namespace
+                    )
+                except Exception as exc:
+                    if getattr(exc, "status", None) == 404:
+                        continue
+                    raise
+                _validate_policy_owner(existing, expected, kind, owner)
+                await self._networking.delete_namespaced_network_policy(name, namespace)
+            elif (api_version, kind) == _FQDN_POLICY:
+                group, version, plural = _FQDN_GROUP
+                try:
+                    existing = await self._custom.get_namespaced_custom_object(
+                        group, version, namespace, plural, name
+                    )
+                except Exception as exc:
+                    if getattr(exc, "status", None) == 404:
+                        continue
+                    raise
+                _validate_policy_owner(existing, expected, kind, owner)
+                await self._custom.delete_namespaced_custom_object(
+                    group, version, namespace, plural, name
+                )
+            else:
+                raise ResourceOwnershipError(f"unsupported policy resource {api_version}/{kind}")
+            deleted.append((api_version, kind, name))
+        return tuple(deleted)
+
     async def create_with_policies(
         self,
         manifest: Mapping[str, Any],
@@ -158,7 +292,7 @@ class CoreSandboxBackend:
     ) -> tuple[ResourceRef, tuple[ResourceRef, ...]]:
         """Do not expose a Running Pod until its network policies exist."""
         sandbox_ref = await self.create_suspended(manifest, namespace=namespace, name=name)
-        policy_refs = await self.create_policies(namespace, policies, owner=sandbox_ref)
+        policy_refs = await self.apply_policies(namespace, policies, owner=sandbox_ref)
         await self.start(sandbox_ref)
         return sandbox_ref, policy_refs
 
@@ -314,6 +448,51 @@ class CoreSandboxBackend:
             raise ResourceOwnershipError("Sandbox serviceFQDN is not a DNS name")
         return f"http://{fqdn}:{tracker_port}"
 
+    async def exec_diagnostic(
+        self,
+        ref: ResourceRef,
+        command: Sequence[str],
+        *,
+        container: str,
+        timeout_seconds: float = 60,
+    ) -> tuple[int, str]:
+        """Run a command in the Sandbox's Pod through the Kubernetes exec API.
+
+        This bypasses the in-Pod command tracker on purpose: nothing is journaled or saved
+        under /workspace, and the tracker's active-command count (which feeds idle
+        detection) is untouched. Returns (exit code, stdout and stderr combined).
+        """
+        if self._exec is None:
+            raise ResourceOwnershipError("pod exec is not configured for this backend")
+        sandbox = await self._read_owned(ref)
+        selector = _field(_field(sandbox, "status", {}) or {}, "selector")
+        pods = await self._core.list_namespaced_pod(ref.namespace or "", label_selector=selector)
+        pod = next((p for p in _field(pods, "items", []) or [] if _pod_ready(p)), None)
+        if pod is None:
+            raise ResourceOwnershipError("Sandbox has no Ready Pod to run a diagnostic in")
+        pod_name = _field(_field(pod, "metadata", {}), "name")
+        # The exec API drops the exit status when output is preloaded, so report it in-band.
+        marker = f"__exit_{uuid.uuid4().hex}__"
+        wrapped = ["sh", "-c", '"$@" 2>&1; printf "\n%s%s\n" "$0" "$?"', marker, *command]
+        output = await asyncio.wait_for(
+            self._exec.connect_get_namespaced_pod_exec(
+                pod_name,
+                ref.namespace or "",
+                command=wrapped,
+                container=container,
+                stdin=False,
+                stdout=True,
+                stderr=True,
+                tty=False,
+            ),
+            timeout=timeout_seconds,
+        )
+        text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else output
+        body, _, tail = text.rstrip("\n").rpartition("\n")
+        if not tail.startswith(marker) or not tail[len(marker) :].isdigit():
+            raise ResourceOwnershipError("diagnostic did not report an exit status")
+        return int(tail[len(marker) :]), body
+
     async def wait_ready(
         self,
         ref: ResourceRef,
@@ -439,7 +618,12 @@ def _pod_ready(pod: Any) -> bool:
     )
 
 
-def _validate_policy_owner(existing: Any, expected_metadata: Mapping[str, Any], kind: str) -> None:
+def _validate_policy_owner(
+    existing: Any,
+    expected_metadata: Mapping[str, Any],
+    kind: str,
+    owner: ResourceRef | None = None,
+) -> None:
     metadata = _field(existing, "metadata", {})
     expected_labels = expected_metadata.get("labels", {}) or {}
     actual_labels = _field(metadata, "labels", {}) or {}
@@ -447,3 +631,21 @@ def _validate_policy_owner(existing: Any, expected_metadata: Mapping[str, Any], 
         actual_labels.get(key) != value for key, value in expected_labels.items()
     ):
         raise ResourceOwnershipError(f"{kind} name already belongs to another owner")
+    if owner is not None:
+        owner_uids = {
+            _field(reference, "uid") for reference in _field(metadata, "ownerReferences", []) or []
+        }
+        if owner.uid not in owner_uids:
+            raise ResourceOwnershipError(f"{kind} name already belongs to another owner")
+
+
+def _carry_resource_version(existing: Any, body: dict[str, Any]) -> None:
+    """Replace needs the current resourceVersion; keep labels other tools added."""
+    metadata = _field(existing, "metadata", {})
+    version = _field(metadata, "resourceVersion")
+    if version is not None:
+        body["metadata"]["resourceVersion"] = version
+    body["metadata"]["labels"] = {
+        **(_field(metadata, "labels", {}) or {}),
+        **(body["metadata"].get("labels") or {}),
+    }

@@ -75,3 +75,9 @@ variable "node_machine_type" {
   type        = string
   default     = "e2-standard-2"
 }
+
+variable "enable_node_local_dns_cache" {
+  description = "Enable NodeLocal DNSCache. The default matches the existing cluster; Sandbox DNS egress allows both kube-dns and node-local-dns either way."
+  type        = bool
+  default     = true
+}

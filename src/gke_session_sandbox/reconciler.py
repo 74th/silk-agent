@@ -432,6 +432,7 @@ class LifecycleReconciler:
         if snapshot.get("metadata", {}).get("deletionTimestamp"):
             await self._mark_lost(token, stored)
             return
+        await self.manager.apply_policies_before_resume_locked(record, record.key_hash)
         await self.manager.backend.resume(record.sandbox_ref)
         ready = await self.manager.backend.wait_ready(
             record.sandbox_ref, timeout_seconds=self.manager._ready_timeout

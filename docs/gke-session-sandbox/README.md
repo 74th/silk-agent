@@ -370,7 +370,7 @@ FQDNNetworkPolicyにはDataplane V2、cluster DNS、feature有効化が必要。
 
 各世代固有のlabelをSandboxのPod templateとpolicy selectorへ付ける。ポリシーは次を基本とする。
 
-- 通常NetworkPolicyでdefault deny ingress / egress、cluster DNSへのUDP / TCP 53と管理API processからruntimeのTCP 8080 / 8081を許可。9090はtrackerからPod内で使い、外部からのユーザcommand迂回を許可しない。
+- 通常NetworkPolicyでdefault deny ingress / egress、cluster DNSへのUDP / TCP 53と管理API processからruntimeのTCP 8080 / 8081を許可。DNSの許可先は`network.dns_pod_selectors`（既定は`k8s-app=kube-dns`と`k8s-app=node-local-dns`）の`network.dns_namespace`内のPodで、NodeLocal DNSCacheの有無にかかわらず名前解決できる。Dataplane V2はkube-dnsのClusterIPへの通信を転送後のPod（NodeLocal DNSCacheが有効なら`node-local-dns`のPod）で評価するため、ClusterIPや`169.254.20.10`への`ipBlock`では許可できない。単数の`network.dns_pod_selector`も1要素の指定として使えるが、`dns_pod_selectors`との同時指定は設定エラーになる。NodeLocal DNSCacheの有効・無効は`terraform/gke`の`enable_node_local_dns_cache`（既定`true`）で宣言する。9090はtrackerからPod内で使い、外部からのユーザcommand迂回を許可しない。
 - 外部egressはFQDNNetworkPolicyで設定されたname / patternとportに限定。
 - cluster内通信は通常NetworkPolicyのnamespace / pod selectorで許可。
 - 管理clientのegressも制限される場合は、sandbox runtimeとKubernetes APIへの必要経路を別途許可。

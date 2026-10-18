@@ -11,6 +11,8 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Callable, Sequence
+from typing import Any
 
 
 def _request(base: str, path: str, method: str = "GET", body=None):
@@ -186,6 +188,79 @@ def tracker(base: str, recovered_id: str = "") -> None:
     )
 
 
+DEFAULT_VERIFY_NAMES = ("kubernetes.default.svc.cluster.local", "example.com")
+
+
+def _nameservers(resolv_conf: str) -> list[str]:
+    try:
+        with open(resolv_conf, encoding="utf-8") as stream:
+            lines = stream.read().splitlines()
+    except OSError as exc:
+        return [f"unreadable ({exc})"]
+    return [
+        parts[1] for line in lines if len(parts := line.split()) >= 2 and parts[0] == "nameserver"
+    ]
+
+
+def _host_port(target: str) -> tuple[str, int]:
+    host, _, port = target.rpartition(":")
+    if not host or not port.isdigit():
+        raise ValueError(f"expected HOST:PORT, got {target!r}")
+    return host, int(port)
+
+
+def verify(
+    names: Sequence[str],
+    allow: Sequence[str],
+    deny: Sequence[str],
+    *,
+    resolv_conf: str = "/etc/resolv.conf",
+    resolve: Callable[..., Any] = socket.getaddrinfo,
+    connect: Callable[..., Any] = socket.create_connection,
+    emit: Callable[[str], None] = print,
+) -> bool:
+    """Check DNS, allowed destinations and blocked destinations; one line per check.
+
+    Writes nothing to disk. A blocked destination that cannot be resolved is a failure
+    too, because it would not show that the connection itself is refused.
+    """
+    ok = True
+    emit(f"nameservers {_nameservers(resolv_conf)}")
+    for name in names:
+        try:
+            addresses = sorted({item[4][0] for item in resolve(name, None)})
+            emit(f"dns-ok name={name} addresses={addresses}")
+        except OSError as exc:
+            ok = False
+            emit(f"dns-fail name={name} error={exc}")
+    for target in allow:
+        host, port = _host_port(target)
+        try:
+            with connect((host, port), timeout=4):
+                pass
+            emit(f"allow-ok target={target}")
+        except OSError as exc:
+            ok = False
+            emit(f"allow-fail target={target} error={exc}")
+    for target in deny:
+        host, port = _host_port(target)
+        try:
+            resolve(host, None)
+        except OSError as exc:
+            ok = False
+            emit(f"deny-unverified target={target} error=cannot resolve: {exc}")
+            continue
+        try:
+            with connect((host, port), timeout=4):
+                pass
+        except OSError as exc:
+            emit(f"deny-ok target={target} blocked={exc}")
+        else:
+            ok = False
+            emit(f"deny-fail target={target} error=connected but should be blocked")
+    return ok
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -194,10 +269,23 @@ def main() -> None:
         command.add_argument("target")
         if name == "tcp":
             command.add_argument("port", type=int)
+    command = sub.add_parser("verify")
+    command.add_argument("--name", action="append", dest="names", help="name to resolve")
+    command.add_argument("--allow", action="append", default=[], help="HOST:PORT that must connect")
+    command.add_argument(
+        "--deny", action="append", default=[], help="HOST:PORT that must be blocked"
+    )
     command = sub.add_parser("tracker")
     command.add_argument("base_url")
     command.add_argument("recovered_id", nargs="?", default="")
     args = parser.parse_args()
+    if args.mode == "verify":
+        try:
+            ok = verify(args.names or DEFAULT_VERIFY_NAMES, args.allow, args.deny)
+        except ValueError as exc:
+            print(f"verify probe failed: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        raise SystemExit(0 if ok else 1)
     try:
         if args.mode == "dns":
             addresses = sorted({item[4][0] for item in socket.getaddrinfo(args.target, None)})

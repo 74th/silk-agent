@@ -199,9 +199,30 @@ class NetworkSettings(StrictSettings):
     allowed_fqdns: tuple[AllowedFQDN, ...] = ()
     allow_gke_metadata_server: StrictBool = False
     dns_namespace: StrictStr = "kube-system"
-    dns_pod_selector: dict[StrictStr, StrictStr] = Field(
-        default_factory=lambda: {"k8s-app": "kube-dns"}
+    # Dataplane V2 evaluates policies on the Pod behind the kube-dns ClusterIP, which is
+    # node-local-dns when NodeLocal DNSCache is enabled, so both must be reachable.
+    dns_pod_selectors: tuple[dict[StrictStr, StrictStr], ...] = Field(
+        default_factory=lambda: ({"k8s-app": "kube-dns"}, {"k8s-app": "node-local-dns"})
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_single_dns_pod_selector(cls, data: Any) -> Any:
+        if isinstance(data, Mapping) and "dns_pod_selector" in data:
+            if "dns_pod_selectors" in data:
+                raise ValueError("specify only one of dns_pod_selector or dns_pod_selectors")
+            data = {**data, "dns_pod_selectors": (data["dns_pod_selector"],)}
+            del data["dns_pod_selector"]
+        return data
+
+    @field_validator("dns_pod_selectors")
+    @classmethod
+    def dns_pod_selectors_are_not_empty(
+        cls, value: tuple[dict[str, str], ...]
+    ) -> tuple[dict[str, str], ...]:
+        if not value or any(not selector for selector in value):
+            raise ValueError("dns_pod_selectors must contain at least one non-empty selector")
+        return value
 
     @field_validator("dns_namespace")
     @classmethod

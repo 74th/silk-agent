@@ -36,7 +36,7 @@ from .errors import (
 )
 from .files import FileClient
 from .kube import load_kube_client_config
-from .network import build_session_network_policies, sandbox_pod_labels
+from .network import build_session_network_policies, optional_policy_names, sandbox_pod_labels
 from .repository import LeaseToken, StoredSession
 from .repository_factory import create_local_repository
 from .repository_port import SessionRepository
@@ -54,7 +54,25 @@ from .types import (
 )
 from .volumes import OwnedWorkspacePVCManager, attach_shared_code_volume
 
+_ANNOTATION_TENANT_ID = "session-sandbox.example.com/tenant-id"
+_ANNOTATION_SESSION_ID = "session-sandbox.example.com/session-id"
+
 PolicyFactory = Callable[[SessionKey, int, Mapping[str, Any]], Sequence[Mapping[str, Any]]]
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticResult:
+    exit_code: int
+    output: str  # stdout and stderr combined
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkReapplyResult:
+    """Outcome of re-applying the current network settings to one conversation."""
+
+    key_hash: str
+    status: str  # "applied", "skipped" or "failed"
+    detail: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +161,7 @@ class SandboxManager:
         policy_factory: PolicyFactory | None = None,
         pvc_manager: OwnedWorkspacePVCManager | None = None,
         api_client: Any | None = None,
+        exec_api_client: Any | None = None,
         holder_identity: str | None = None,
     ) -> None:
         self.config = config
@@ -157,6 +176,7 @@ class SandboxManager:
         )
         self._pvc_manager = pvc_manager
         self._api_client = api_client
+        self._exec_api_client = exec_api_client
         self._holder_identity = (
             holder_identity or f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex}"
         )
@@ -194,7 +214,12 @@ class SandboxManager:
         core_api: Any = client.CoreV1Api(api_client)
         custom_api: Any = client.CustomObjectsApi(api_client)
         networking_api: Any = client.NetworkingV1Api(api_client)
-        backend = CoreSandboxBackend(custom_api, core_api, networking_api)
+        from kubernetes_asyncio.stream import WsApiClient
+
+        exec_api_client = WsApiClient()
+        backend = CoreSandboxBackend(
+            custom_api, core_api, networking_api, exec_api=client.CoreV1Api(exec_api_client)
+        )
         template_path = Path(settings.template_file)
         if not template_path.is_absolute():
             template_path = (
@@ -218,6 +243,7 @@ class SandboxManager:
             policy_factory=policy_factory,
             pvc_manager=OwnedWorkspacePVCManager(core_api),
             api_client=api_client,
+            exec_api_client=exec_api_client,
         )
 
     async def ensure(
@@ -249,6 +275,11 @@ class SandboxManager:
                         )
                     return await self._continue_creation_locked(token, key, stored, env)
                 if stored.record.state is SessionState.RESUMING and stored.record.sandbox_ref:
+                    # An interrupted resume may have failed in the policy step: never start the
+                    # Pod on policies older than the current settings.
+                    await self._apply_current_policies_locked(
+                        key, stored.record.generation, stored.record.sandbox_ref
+                    )
                     await self.backend.resume(stored.record.sandbox_ref)
                     ready = await self.backend.wait_ready(
                         stored.record.sandbox_ref, timeout_seconds=self._ready_timeout
@@ -399,6 +430,100 @@ class SandboxManager:
         records = await self.repository.list_records()
         return tuple(item.record for item in records if state is None or item.record.state is state)
 
+    async def run_diagnostic_command(
+        self, key: SessionKey, command: Sequence[str], *, timeout_seconds: int = 60
+    ) -> DiagnosticResult:
+        """Run a command in a READY session without touching its lifecycle or workspace.
+
+        Unlike ``SessionHandle.commands`` this never resumes, re-creates or extends the session
+        and records nothing in the repository. It also does not go through the in-Pod command
+        tracker, so nothing is journaled under /workspace and idle detection sees no activity.
+        A session that is not READY is refused rather than woken up.
+        """
+        self._check_open()
+        stored = await self.repository.get(key)
+        if stored is None:
+            raise ConfigurationError("no such session")
+        record = stored.record
+        if record.state is not SessionState.READY or record.sandbox_ref is None:
+            raise ConfigurationError(
+                f"session is {record.state.value}, not ready; diagnostics do not resume sessions"
+            )
+        exit_code, output = await self.backend.exec_diagnostic(
+            record.sandbox_ref,
+            command,
+            container=self.config.runtime.container_name,
+            timeout_seconds=timeout_seconds,
+        )
+        return DiagnosticResult(exit_code, output)
+
+    async def reapply_network_policies(
+        self, key: SessionKey | None = None
+    ) -> tuple[NetworkReapplyResult, ...]:
+        """Re-apply the current network settings without restarting any Pod.
+
+        With a key, only that conversation; without one, every stored conversation. Each
+        conversation is handled under its own lease, which is not waited for: one held by
+        a lifecycle operation is reported as skipped so the caller can retry it.
+        """
+        self._check_open()
+        if key is not None:
+            return (await self._reapply_network_by_hash(key.stable_hash(), key),)
+        records = await self.repository.list_records()
+        return tuple(
+            [await self._reapply_network_by_hash(item.record.key_hash, None) for item in records]
+        )
+
+    async def _reapply_network_by_hash(
+        self, key_hash: str, key: SessionKey | None
+    ) -> NetworkReapplyResult:
+        try:
+            async with self._session_lease_by_hash(key_hash, wait=False):
+                stored = await self.repository.get_by_hash(key_hash)
+                if stored is None:
+                    return NetworkReapplyResult(key_hash, "skipped", "no such session")
+                record = stored.record
+                ref = record.sandbox_ref
+                if ref is None or record.state not in (SessionState.READY, SessionState.SUSPENDED):
+                    return NetworkReapplyResult(
+                        key_hash, "skipped", f"state {record.state.value} has no settled Sandbox"
+                    )
+                if key is None:
+                    key = await self._session_key_from_sandbox(key_hash, ref)
+                await self._apply_current_policies_locked(key, record.generation, ref)
+                return NetworkReapplyResult(
+                    key_hash, "applied", f"generation {record.generation} {record.state.value}"
+                )
+        except SessionLeaseHeldError:
+            return NetworkReapplyResult(key_hash, "skipped", "session lease is held")
+        except Exception as exc:
+            return NetworkReapplyResult(key_hash, "failed", f"{type(exc).__name__}: {exc}")
+
+    async def apply_policies_before_resume_locked(
+        self, record: SessionRecord, key_hash: str
+    ) -> None:
+        """Policy step of a resume whose caller only has the stored record (the reconciler).
+
+        Called under the session lease. Failure propagates so the session stays RESUMING and
+        is retried, rather than starting the Sandbox on stale network policies.
+        """
+        assert record.sandbox_ref is not None
+        key = await self._session_key_from_sandbox(key_hash, record.sandbox_ref)
+        await self._apply_current_policies_locked(key, record.generation, record.sandbox_ref)
+
+    async def _session_key_from_sandbox(self, key_hash: str, ref: ResourceRef) -> SessionKey:
+        """Recover the key from the Sandbox annotations, which the hash alone cannot give."""
+        sandbox = await self.backend.get_owned(ref)
+        annotations = (sandbox.get("metadata", {}) or {}).get("annotations", {}) or {}
+        tenant_id = annotations.get(_ANNOTATION_TENANT_ID)
+        session_id = annotations.get(_ANNOTATION_SESSION_ID)
+        if not tenant_id or not session_id:
+            raise ResourceOwnershipError("Sandbox has no tenant / session annotations")
+        key = SessionKey(tenant_id=tenant_id, session_id=session_id)
+        if key.stable_hash() != key_hash:
+            raise ResourceOwnershipError("Sandbox annotations do not match the stored session")
+        return key
+
     async def close(self) -> None:
         if self._closed:
             return
@@ -406,6 +531,8 @@ class SandboxManager:
         close_repository = getattr(self.repository, "close", None)
         if close_repository is not None:
             await close_repository()
+        if self._exec_api_client is not None:
+            await self._exec_api_client.close()
         if self._api_client is not None:
             await self._api_client.close()
 
@@ -485,13 +612,7 @@ class SandboxManager:
         pod_template = manifest.setdefault("spec", {}).setdefault("podTemplate", {})
         pod_labels = pod_template.setdefault("metadata", {}).setdefault("labels", {})
         pod_labels.update(sandbox_pod_labels(key, generation))
-        policies = [
-            copy.deepcopy(dict(policy))
-            for policy in self._policy_factory(key, generation, manifest)
-        ]
-        for policy in policies:
-            policy_labels = policy.setdefault("metadata", {}).setdefault("labels", {})
-            policy_labels.update(labels)
+        policies = self._render_policies(key, generation, manifest, labels)
         ref = record.sandbox_ref
         if ref is None:
             ref, _policy_refs = await self.backend.create_with_policies(
@@ -516,6 +637,39 @@ class SandboxManager:
         ready = await self.backend.wait_ready(ref, timeout_seconds=self._ready_timeout)
         return await self._save_ready(token, key, stored, ready)
 
+    def _render_policies(
+        self,
+        key: SessionKey,
+        generation: int,
+        manifest: Mapping[str, Any],
+        labels: Mapping[str, str],
+    ) -> list[dict[str, Any]]:
+        policies = [
+            copy.deepcopy(dict(policy))
+            for policy in self._policy_factory(key, generation, manifest)
+        ]
+        for policy in policies:
+            policy_labels = policy.setdefault("metadata", {}).setdefault("labels", {})
+            policy_labels.update(labels)
+        return policies
+
+    async def _apply_current_policies_locked(
+        self, key: SessionKey, generation: int, ref: ResourceRef
+    ) -> tuple[ResourceRef, ...]:
+        """Bring one generation's policies in line with the current config, without a restart."""
+        manifest, _digest = self._render_manifest(None)
+        labels = sandbox_pod_labels(key, generation)
+        policies = self._render_policies(key, generation, manifest, labels)
+        applied = await self.backend.apply_policies(self.config.namespace, policies, owner=ref)
+        rendered = {policy["metadata"]["name"] for policy in policies}
+        await self.backend.delete_policies(
+            self.config.namespace,
+            [name for name in optional_policy_names(key, generation) if name[2] not in rendered],
+            owner=ref,
+            labels=labels,
+        )
+        return applied
+
     async def _resume_locked(
         self, token: LeaseToken, key: SessionKey, stored: StoredSession
     ) -> SessionHandle:
@@ -536,6 +690,7 @@ class SandboxManager:
         stored = await self.repository.compare_and_swap(
             token, intent, expected_resource_version=stored.resource_version
         )
+        await self._apply_current_policies_locked(key, record.generation, record.sandbox_ref)
         await self.backend.resume(record.sandbox_ref)
         ready = await self.backend.wait_ready(
             record.sandbox_ref, timeout_seconds=self._ready_timeout
@@ -894,7 +1049,9 @@ class SandboxManager:
             yield token
 
     @asynccontextmanager
-    async def _session_lease_by_hash(self, key_hash: str) -> AsyncIterator[LeaseToken]:
+    async def _session_lease_by_hash(
+        self, key_hash: str, *, wait: bool = True
+    ) -> AsyncIterator[LeaseToken]:
         holder = f"{self._holder_identity}-{uuid.uuid4().hex}"
         deadline = asyncio.get_running_loop().time() + self.config.lease_acquire_timeout_seconds
         delay = 0.05
@@ -903,7 +1060,7 @@ class SandboxManager:
                 token = await self.repository.acquire_lease_by_hash(key_hash, holder)
                 break
             except SessionLeaseHeldError:
-                if asyncio.get_running_loop().time() >= deadline:
+                if not wait or asyncio.get_running_loop().time() >= deadline:
                     raise
                 await asyncio.sleep(delay)
                 delay = min(delay * 1.5, 0.5)

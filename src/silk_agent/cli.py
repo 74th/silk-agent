@@ -33,6 +33,22 @@ def build_parser() -> argparse.ArgumentParser:
         "sandbox-service", help="run the authenticated internal Sandbox API"
     )
     sandbox_service.add_argument("--config", "-c", help=f"config file (default: ${CONFIG_ENV})")
+    network = sub.add_parser(
+        "sandbox-network",
+        help="re-apply network policies to, or verify the network of, existing Sandboxes",
+    )
+    network.add_argument("action", choices=("reapply", "verify"))
+    network.add_argument(
+        "--conversation", help="conversation key, e.g. slack:T123:C123.456 (required for verify)"
+    )
+    network.add_argument("--all", action="store_true", help="reapply: every conversation")
+    network.add_argument(
+        "--ephemeral", action="store_true", help="verify: create a test session, then terminate it"
+    )
+    network.add_argument("--name", action="append", dest="names", help="verify: name to resolve")
+    network.add_argument("--allow", action="append", default=[], help="verify: HOST:PORT to reach")
+    network.add_argument("--deny", action="append", default=[], help="verify: HOST:PORT blocked")
+    network.add_argument("--config", "-c", help=f"config file (default: ${CONFIG_ENV})")
     admin = sub.add_parser("worker", help="run a distributed Worker, or inspect/drain Workers")
     admin.add_argument(
         "action",
@@ -138,6 +154,27 @@ def main(argv: Sequence[str] | None = None) -> None:
 
         asyncio.run(run_sandbox_service(config))
         return
+
+    if args.command == "sandbox-network":
+        if args.action == "verify" and not args.conversation:
+            sys.exit("sandbox-network verify requires --conversation")
+        if args.action == "reapply" and bool(args.conversation) == bool(args.all):
+            sys.exit("sandbox-network reapply takes exactly one of --conversation or --all")
+        from silk_agent.sandbox.service_runtime import run_sandbox_network_admin
+
+        raise SystemExit(
+            asyncio.run(
+                run_sandbox_network_admin(
+                    config,
+                    args.action,
+                    conversation_key=args.conversation,
+                    names=args.names,
+                    allow=args.allow,
+                    deny=args.deny,
+                    ephemeral=args.ephemeral,
+                )
+            )
+        )
 
     if args.command == "recovery":
         if config.execution_mode != "distributed":

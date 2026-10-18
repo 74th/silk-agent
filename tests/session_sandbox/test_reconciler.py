@@ -50,7 +50,18 @@ class FakeBackend:
         self.endpoint = ""
         self.suspended: list[str] = []
 
+    async def apply_policies(self, namespace, policies, *, owner):
+        if getattr(self, "fail_policies", False):
+            raise RuntimeError("simulated policy API failure")
+        self.applied = getattr(self, "applied", []) + [owner.name]
+        return ()
+
+    async def delete_policies(self, namespace, names, *, owner, labels):
+        return ()
+
     async def create_with_policies(self, manifest, policies, *, namespace: str, name: str):
+        self.sandbox_annotations = getattr(self, "sandbox_annotations", {})
+        self.sandbox_annotations[name] = dict(manifest["metadata"]["annotations"])
         ref = ResourceRef(
             api_version="agents.x-k8s.io/v1beta1",
             kind="Sandbox",
@@ -85,7 +96,10 @@ class FakeBackend:
             from gke_session_sandbox.errors import ResourceOwnershipError
 
             raise ResourceOwnershipError("owned Sandbox no longer exists")
-        metadata = {"uid": ref.uid}
+        metadata = {
+            "uid": ref.uid,
+            "annotations": getattr(self, "sandbox_annotations", {}).get(ref.name, {}),
+        }
         if getattr(self, "deleting", False):
             metadata["deletionTimestamp"] = "2030-01-01T00:00:00Z"
         return {"metadata": metadata}
@@ -371,6 +385,7 @@ async def test_reconciler_recovers_resuming_state_and_opens_command_gate(tmp_pat
     assert recovered.record.state is SessionState.READY
     assert recovered.record.expires_at is None
     assert backend.resumed == [handle.sandbox_ref.name]
+    assert backend.applied == [handle.sandbox_ref.name]
     assert gate_state["accepting"] is True
     assert backend.annotations["session-sandbox.example.com/expires-at"] == ""
 
@@ -501,6 +516,34 @@ async def test_suspend_failure_keeps_gate_closed_and_recovers_from_durable_inten
     assert await reconciler.reconcile_once() == ()
     assert (await repository.get(key)).record.state is SessionState.SUSPENDED
     assert backend.suspended == [handle.sandbox_ref.name]
+
+    await manager.close()
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_reconciler_does_not_finish_resume_while_policy_update_keeps_failing(tmp_path):
+    manager, backend, repository, key, handle, gate_state, server = await setup_manager(tmp_path)
+    token = await repository.acquire_lease(key, "test-setup")
+    stored = await repository.get(key)
+    pending = stored.record.model_copy(
+        update={"state": SessionState.RESUMING, "desired_state": DesiredSandboxState.RUNNING}
+    )
+    await repository.compare_and_swap(
+        token, pending, expected_resource_version=stored.resource_version
+    )
+    await repository.release_lease(token)
+
+    backend.fail_policies = True
+    errors = await LifecycleReconciler(manager).reconcile_once()
+    assert len(errors) == 1 and "policy API failure" in errors[0]
+    assert (await repository.get(key)).record.state is SessionState.RESUMING
+    assert getattr(backend, "resumed", []) == []
+
+    backend.fail_policies = False
+    assert await LifecycleReconciler(manager).reconcile_once() == ()
+    assert (await repository.get(key)).record.state is SessionState.READY
+    assert backend.resumed == [handle.sandbox_ref.name]
 
     await manager.close()
     await server.close()

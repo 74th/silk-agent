@@ -21,6 +21,15 @@ def sandbox_pod_labels(key: SessionKey, generation: int) -> dict[str, str]:
     }
 
 
+def optional_policy_names(key: SessionKey, generation: int) -> tuple[tuple[str, str, str], ...]:
+    """(apiVersion, kind, name) of policies that are rendered only for some settings."""
+    suffix = f"{key.stable_hash()[:10]}-g{generation}"
+    return (
+        ("networking.gke.io/v1alpha1", "FQDNNetworkPolicy", f"sandbox-fqdn-egress-{suffix}"),
+        ("networking.k8s.io/v1", "NetworkPolicy", f"sandbox-metadata-egress-{suffix}"),
+    )
+
+
 def build_session_network_policies(
     config: ManagerConfig,
     key: SessionKey,
@@ -85,8 +94,9 @@ def build_session_network_policies(
                                         "kubernetes.io/metadata.name": config.network.dns_namespace
                                     }
                                 },
-                                "podSelector": {"matchLabels": config.network.dns_pod_selector},
+                                "podSelector": {"matchLabels": dict(dns_selector)},
                             }
+                            for dns_selector in config.network.dns_pod_selectors
                         ],
                         "ports": [
                             {"protocol": protocol, "port": 53} for protocol in ("UDP", "TCP")
