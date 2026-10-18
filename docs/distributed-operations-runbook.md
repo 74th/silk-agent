@@ -289,3 +289,11 @@ dev（`session-sandbox-system`）と bigquery-analysis（`bigquery-analysis-syst
 | `silk-agent worker status-all`（bigquery-analysis の Worker から） | bigquery-analysis の Worker 2 台だけが出る（接頭辞が違うので dev の Worker は見えない） |
 
 確認用の Pod と ConfigMap は削除した。照合のコードは dev の現行イメージ（`sha256:00675bf4...`）には入っていないので、dev の Pod は照合を行わない。dev のイメージを更新したときに有効になる。
+
+### 12.1 bigquery-analysis の実会話（`support-distributed-usecases` 6.3、2026-10-18）
+
+dev と同じ Slack アプリ（試験用に同じトークン）に「日本の直近2日の急上昇検索語を…」と依頼した。bigquery-analysis 側で処理され、`google-trends` Skill と `bash`（`query.sh`）が成功して Slack に返信された（所要 53 秒）。
+
+- 会話は `bigquery-analysis_conversations` に 1 件記録され、同じ会話 ID は dev の `silk-agent_conversations` にない。
+- Sandbox は `bigquery-analysis-sandboxes` に作られた（`session-4d6cf1e092-g1`）。dev の `session-sandboxes` に新しい Sandbox はない。
+- Sandbox の管理情報は `bigquery-analysis_sandbox_operations` に入った。
