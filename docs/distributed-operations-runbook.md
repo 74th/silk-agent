@@ -116,6 +116,7 @@ silk-agent recovery confirm-stopped CONVERSATION_KEY --evidence "node gke-xxx de
 | 停止境界より後なのに、停止される turn に渡ってしまった入力 | `uncertain`（実際に処理されたか不明。再送しない） |
 | shutdown / drain / lease 喪失で中断された turn の入力 | `uncertain` |
 | 結果も中断の理由も記録されずに SDK のストリームが終わった turn の入力 | `uncertain` |
+| query の直前の記録（session_id・入力・attempt の関連）が拒否された、または Firestore のエラーで保存できなかった入力 | `uncertain`（プロンプトは SDK に送られていない。再送しない。ユーザには失敗が表示される） |
 | SDK へ渡した後に「accepted」の記録が拒否された入力 | `uncertain`（再送・再試行しない） |
 | 準備（ガード、履歴、開始者の確定）が12回失敗し続けた入力 | `blocked`（後続の入力が進めるように） |
 | 送信者を確定的に解決できない入力（`user_not_found`、`user_not_visible`。3回） | `blocked`。Gateway がスレッドに「送信者を確認できなかったため…」と投稿する（Outbox を通さない直接の投稿で、失敗しても再試行しない） |

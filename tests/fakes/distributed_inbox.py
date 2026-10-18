@@ -443,6 +443,7 @@ class FakeInboxStore:
         if (
             current is None
             or self.owners.get(conversation_key) != owner
+            or current.conversation_generation != owner.conversation_generation
             or current.delivery_state is not InputDeliveryState.ACCEPTED
             or current.dispatch_attempt_id != dispatch_attempt_id
         ):

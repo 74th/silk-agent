@@ -496,8 +496,10 @@ def query_start_recorder(
     SDK gets the prompt.
 
     Inputs without an attempt (internal prompts) have nothing to associate. A refusal means this
-    Worker no longer owns the input (stop, reset, new owner): the prompt must not be sent, and
-    the turn ends as unknown rather than running under a stale lease.
+    Worker no longer owns the input (lost lease, new owner, a reset that settled it): the prompt
+    must not be sent, and the turn ends as unknown rather than running under a stale lease. An
+    applied stop is handled by the session before the query, not here. A store error is not told
+    apart from a refusal: it also ends the turn, and the input is settled as ``uncertain``.
     """
 
     async def record(
