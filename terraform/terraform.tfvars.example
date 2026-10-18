@@ -3,5 +3,6 @@ region = "us-central1"
 model_armor_template_id = "silk-agent-test"
 firestore_database_id = "silk-agent"
 firestore_database_mode = "create"
-command_output_bucket_name = "nnyn-dev-silk-agent-command-output"
+firestore_backup_bucket_name = "nnyn-dev-silk-agent-firestore-backup"
+firestore_backup_retention_days = 90
 command_output_retention_days = 30

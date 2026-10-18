@@ -406,9 +406,17 @@ resource "google_storage_bucket" "skills" {
   depends_on = [google_project_service.apis]
 }
 
+moved {
+  from = google_storage_bucket.command_output
+  to   = google_storage_bucket.command_output["silk-agent"]
+}
+
+# One bucket per use case: its Worker reads it and its Sandbox Service writes it, and no other
+# use case's role has any access.
 resource "google_storage_bucket" "command_output" {
+  for_each                    = var.usecases
   project                     = var.project_id
-  name                        = var.command_output_bucket_name
+  name                        = each.value.command_output_bucket
   location                    = upper(var.region)
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
@@ -420,6 +428,28 @@ resource "google_storage_bucket" "command_output" {
     }
     condition {
       age = var.command_output_retention_days
+    }
+  }
+
+  depends_on = [google_project_service.apis]
+}
+
+# Firestore exports. No workload identity gets any access to this bucket (the exports hold every
+# use case's conversations); operators take and read them with their own credentials.
+resource "google_storage_bucket" "firestore_backup" {
+  project                     = var.project_id
+  name                        = var.firestore_backup_bucket_name
+  location                    = upper(var.region)
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  force_destroy               = false
+
+  lifecycle_rule {
+    action {
+      type = "Delete"
+    }
+    condition {
+      age = var.firestore_backup_retention_days
     }
   }
 
@@ -604,7 +634,7 @@ moved {
 
 resource "google_storage_bucket_iam_member" "gke_worker_output_reader" {
   for_each = local.gke_principals
-  bucket   = google_storage_bucket.command_output.name
+  bucket   = google_storage_bucket.command_output[each.key].name
   role     = "roles/storage.objectViewer"
   member   = each.value["worker"]
 }
@@ -616,7 +646,7 @@ moved {
 
 resource "google_storage_bucket_iam_member" "gke_sandbox_service_output" {
   for_each = local.gke_principals
-  bucket   = google_storage_bucket.command_output.name
+  bucket   = google_storage_bucket.command_output[each.key].name
   role     = "roles/storage.objectAdmin"
   member   = each.value["sandbox-service"]
 }
@@ -646,7 +676,7 @@ moved {
 
 resource "google_storage_bucket_iam_member" "gke_legacy_bot_command_output" {
   for_each = local.legacy_bot_principals
-  bucket   = google_storage_bucket.command_output.name
+  bucket   = google_storage_bucket.command_output[each.key].name
   role     = "roles/storage.objectAdmin"
   member   = each.value
 }

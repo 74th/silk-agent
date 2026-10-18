@@ -21,6 +21,7 @@ def usecase(name: str, **overrides) -> dict:
             "bot_token": f"{name}-slack-bot-token",
             "app_token": f"{name}-slack-app-token",
         },
+        "command_output_bucket": f"{name}-command-output",
     }
     value.update(overrides)
     return value
@@ -85,3 +86,11 @@ def test_a_shared_slack_secret_is_rejected_even_with_distinct_namespaces(tmp_pat
 def test_the_same_secret_for_bot_and_app_token_is_rejected(tmp_path):
     same = usecase("alpha", slack_secret_ids={"bot_token": "one", "app_token": "one"})
     assert rejected(plan(tmp_path, {"alpha": same}), "slack_secret_ids")
+
+
+def test_a_shared_command_output_bucket_is_rejected(tmp_path):
+    shared = {
+        "alpha": usecase("alpha", command_output_bucket="shared-output"),
+        "beta": usecase("beta", command_output_bucket="shared-output"),
+    }
+    assert rejected(plan(tmp_path, shared), "command_output_bucketはユースケースごとに異なる値")

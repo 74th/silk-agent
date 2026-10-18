@@ -6,7 +6,7 @@ distributed:
   firestore_database: silk-agent
   firestore_prefix: bigquery-analysis
   sandbox_service_url: http://silk-agent-sandbox-service.bigquery-analysis-system.svc:8080
-  command_output_bucket: nnyn-dev-silk-agent-command-output
+  command_output_bucket: nnyn-dev-bigquery-analysis-command-output
   sandbox_service_audience: silk-agent-sandbox-service
   sandbox_service_allowed_ksas:
     - system:serviceaccount:bigquery-analysis-system:silk-agent-worker

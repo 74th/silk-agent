@@ -28,10 +28,21 @@ variable "skills_bucket_name" {
   default     = "nnyn-dev-silk-agent-skills"
 }
 
-variable "command_output_bucket_name" {
-  description = "分散コマンド出力を保存する GCS バケット名（グローバルに一意）"
+variable "firestore_backup_bucket_name" {
+  description = "Firestore のバックアップ（エクスポート）を置く専用の GCS バケット名（グローバルに一意）。どのワークロードにも権限を与えない。"
   type        = string
-  default     = "nnyn-dev-silk-agent-command-output"
+  default     = "nnyn-dev-silk-agent-firestore-backup"
+}
+
+variable "firestore_backup_retention_days" {
+  description = "バックアップのオブジェクトを自動削除する保持日数（コマンド出力より長くする）"
+  type        = number
+  default     = 90
+
+  validation {
+    condition     = var.firestore_backup_retention_days > 0
+    error_message = "firestore_backup_retention_days は正の値を指定してください。"
+  }
 }
 
 variable "command_output_retention_days" {
@@ -76,6 +87,9 @@ variable "usecases" {
     k8s の overlay と設定ファイルの distributed.firestore_prefix に一致させる。
     legacy_bot_access は単一プロセスの Bot 用サービスアカウントに Slack の Secret の読み取りを許す
     （開発環境だけ true）。
+    command_output_bucket は、そのユースケースのコマンド出力を保存する GCS バケット名（グローバルに
+    一意）。ユースケースごとに別のバケットを作り、そのユースケースの役割だけに権限を与える。
+    設定ファイルの distributed.command_output_bucket に一致させる。
   EOT
   type = map(object({
     system_namespace  = string
@@ -85,7 +99,8 @@ variable "usecases" {
       bot_token = string
       app_token = string
     })
-    legacy_bot_access = optional(bool, false)
+    legacy_bot_access     = optional(bool, false)
+    command_output_bucket = string
   }))
   default = {
     "silk-agent" = {
@@ -96,7 +111,8 @@ variable "usecases" {
         bot_token = "silk-agent-slack-bot-token"
         app_token = "silk-agent-slack-app-token"
       }
-      legacy_bot_access = true
+      legacy_bot_access     = true
+      command_output_bucket = "nnyn-dev-silk-agent-command-output"
     }
     "bigquery-analysis" = {
       system_namespace  = "bigquery-analysis-system"
@@ -106,6 +122,7 @@ variable "usecases" {
         bot_token = "bigquery-analysis-slack-bot-token"
         app_token = "bigquery-analysis-slack-app-token"
       }
+      command_output_bucket = "nnyn-dev-bigquery-analysis-command-output"
     }
   }
 
@@ -130,6 +147,13 @@ variable "usecases" {
       == 2 * length(var.usecases)
     )
     error_message = "system_namespace と sandbox_namespace は、全ユースケースを通して重複しない値にしてください（同じ namespace を複数のユースケースや用途で共有できません）。"
+  }
+
+  # A command output bucket is used by exactly one use case: a shared one would let another use
+  # case's Worker read its outputs.
+  validation {
+    condition     = length(distinct([for u in values(var.usecases) : u.command_output_bucket])) == length(var.usecases)
+    error_message = "command_output_bucket はユースケースごとに異なる値にしてください（共有すると別のユースケースのコマンド出力を読めてしまいます）。"
   }
 
   # Every Slack Secret is used by exactly one role pair of one use case: a shared Secret would let
