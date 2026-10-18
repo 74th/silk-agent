@@ -52,6 +52,14 @@ async def test_plain_output_passes(sanitizer):
     assert r.status == "pass", r
 
 
+async def test_history_lost_notice_passes_the_output_guard(sanitizer):
+    from silk_agent.agent.engine import HISTORY_LOST_NOTICE
+
+    r = await sanitizer.sanitize(HISTORY_LOST_NOTICE)
+    assert r.status == "pass", r
+    assert r.text == HISTORY_LOST_NOTICE
+
+
 async def test_email_in_output_is_masked(sanitizer):
     r = await sanitizer.sanitize("担当者の連絡先は taro.yamada@example.com です。")
     assert r.status == "masked", r

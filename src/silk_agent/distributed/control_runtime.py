@@ -328,6 +328,7 @@ async def run_control(config: Config) -> None:
     from silk_agent.stores.firestore.outbox import FirestoreOutboxStore
     from silk_agent.stores.firestore.ownership import FirestoreOwnershipStore
     from silk_agent.stores.firestore.quiesce import FirestoreQuiesceMailbox
+    from silk_agent.stores.firestore.retention import RetentionPolicy
     from silk_agent.stores.firestore.session_state import FirestoreProgressStateStore
 
     bot_token = load_bot_token(config)
@@ -336,11 +337,12 @@ async def run_control(config: Config) -> None:
     METRICS.add_collector(process_memory_collector)
     client = create_firestore_client(config.distributed)
     prefix = config.distributed.firestore_prefix
+    retention = RetentionPolicy.from_config(config.distributed.retention)
     identity = f"{os.environ.get('HOSTNAME', 'control')}:{uuid.uuid4().hex}"
     conversations = FirestoreConversationStore(client, collection_prefix=prefix)
     allocator = ControlAllocatorLoop(
         conversations,
-        FirestoreWorkerDirectory(client, collection_prefix=prefix),
+        FirestoreWorkerDirectory(client, collection_prefix=prefix, retention=retention),
         FirestoreAllocator(client, collection_prefix=prefix),
         clock,
         allocator_id=identity,
@@ -348,7 +350,7 @@ async def run_control(config: Config) -> None:
         worker_lease_seconds=config.distributed.lease_seconds,
         on_tick=health.loop("allocator", 120),
     )
-    inbox = FirestoreInboxStore(client, collection_prefix=prefix)
+    inbox = FirestoreInboxStore(client, collection_prefix=prefix, retention=retention)
     authorizer = ControlAuthorizer(
         inbox,
         clock,
@@ -356,7 +358,7 @@ async def run_control(config: Config) -> None:
     )
     http_session = aiohttp.ClientSession()
     web_client = AsyncWebClient(token=bot_token, session=http_session)
-    outbox = FirestoreOutboxStore(client, collection_prefix=prefix)
+    outbox = FirestoreOutboxStore(client, collection_prefix=prefix, retention=retention)
     slack = SlackOutput(
         web_client,
         clock,
@@ -392,7 +394,9 @@ async def run_control(config: Config) -> None:
     recovery = RecoveryLoop(
         ownership,
         DistributedRecoveryCoordinator(ownership, clock),
-        QuiesceRequester(FirestoreQuiesceMailbox(client, collection_prefix=prefix), clock),
+        QuiesceRequester(
+            FirestoreQuiesceMailbox(client, collection_prefix=prefix, retention=retention), clock
+        ),
         clock,
         skew_seconds=config.distributed.lease_clock_skew_seconds,
         on_tick=health.loop("recovery", 180),

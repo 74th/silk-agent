@@ -194,3 +194,85 @@ Firestore の操作数は Cloud Monitoring の `firestore.googleapis.com/api/req
 - Gateway と Control は1台で運用しており、2台構成での受信の重複排除と割当の競合は、Firestore Emulator の試験までの確認。
 - `drain-all --wait` は、死んだ Pod の古い登録が残っていると完了しなかった（2026-10-18 に修正: heartbeat が lease の期間内にある Worker だけを待つ。古い登録は `status-all` に `stale=true` と表示される。実クラスタで確認済み）。
 
+
+## 11. データの保持期間とバックフィル（`add-data-retention`）
+
+処理が済んだ Firestore の記録は、終端状態に変わる書き込みで `expire_at`（Timestamp）が付き、Firestore の TTL が保持期間の後に削除する。処理中・未確定（uncertain）・保留（held）・完了通知が済んでいないコマンドには付けない。所有権と lease の期限 `expires_at` には TTL を付けない（名前が似ているので注意）。
+
+### 11.1 保持期間の設定
+
+`distributed.retention`（単位は日。0 以下は設定エラー）。
+
+| 設定 | 既定 | 対象 |
+| --- | --- | --- |
+| `terminal_days` | 30 | 入力（completed / blocked / cancelled / suppressed）、制御要求と `control_queue`（handled / filtered / stale）、outbox（delivered / suppressed）、コマンドと `sandbox_operations`、quiesce 要求（answered） |
+| `receipt_days` | 7 | Slack の受信記録（受信時刻から。Slack の再送は数時間以内） |
+| `worker_days` | 7 | Worker の登録（最後の heartbeat から。生きている Worker は 20 秒ごとに延びる） |
+
+コマンドは「終了」と「通知が済んだ」の遅い方から数える。バックグラウンドコマンドの通知は、その `command_finished` 入力が completed になった時点で delivered になる（STOP などで取り消された入力は suppressed）。入力が uncertain のまま残ったコマンドは、運用者が確認するまで消えない。
+
+削除してはならないもの: 会話ごとの管理情報（`conversations`、`ownership`、`sandboxes`、`resource_leases`、`user_rate_limits`）。会話の入力がすべて消えても会話は再開できる。試験用の会話（`acceptance:*`、`loadtest:*`）の掃除はこの仕組みの対象外。
+
+TTL による削除は、期限から最大24時間ほど遅れる。TTL の削除は Firestore の課金対象の削除操作になる。
+
+### 11.2 Terraform（TTL ポリシー）
+
+`terraform/main.tf` が、対象のコレクションの `expire_at` に TTL ポリシーを設定する（コレクショングループ: `inputs`、`controls`。接頭辞つき: `outbox`、`commands`、`sandbox_operations`、`quiesce_requests`、`slack_receipts`、`control_queue`、`workers`）。`expire_at` は索引から外してある。コレクション名の接頭辞は `firestore_prefix`（既定 `silk-agent`）で、設定ファイルの `distributed.firestore_prefix` と一致させる。
+
+```sh
+cd terraform
+terraform plan   # TTL の追加だけが出ること（既存の索引に差分がないこと）
+terraform apply
+gcloud firestore fields ttls list --database=silk-agent --project=nnyn-dev \
+  --format="table(name.scope(collectionGroups),ttlConfig.state)"   # 9 件が ACTIVE になるまで数分〜
+```
+
+`inputs` の TTL は `moved` で新しいリソース名に引き継がれる（再作成されない）。
+
+### 11.3 既存の記録へのバックフィル
+
+保持期限の仕組みを入れる前に終端になった記録には `expire_at` がない。次の手順で付ける。
+
+1. バックアップを取る（TTL の削除は戻せない）: `gcloud firestore export gs://<bucket>/retention-$(date +%Y%m%d) --database=silk-agent --project=nnyn-dev`。`gcloud firestore operations describe` で `operationState: SUCCESSFUL` を確認する。
+2. 新しいコードを配置する（新しい記録から期限が付く）。その後 `terraform apply` で TTL を有効にする（§11.2）。
+3. 件数だけを確認する（書き込まない）:
+   ```sh
+   silk-agent retention backfill --config CONFIG
+   ```
+   種類ごとの調べた件数（examined）、対象（eligible）、除外（excluded と理由）が出る。`state uncertain` / `state held` / `notice pending` などの除外は想定どおりか確認する。
+4. 書き込む:
+   ```sh
+   silk-agent retention backfill --apply --config CONFIG
+   ```
+   件数を絞るなら `--limit 100` のように指定する（種類ごとの上限）。1 件ずつ transaction で「状態がまだ終端で、`expire_at` がない」ことを確認してから書く。終端時刻が保存されていない記録（受信記録など）は実行時刻から数える。保存されている時刻（outbox の `updated_at`、Worker の `heartbeat_at` など）がある記録は、その時刻から数えるので、保持期間より古いものは次の TTL の実行で消える。
+5. もう一度手順 3 を実行し、対象（eligible）が全種類で 0 になることを確認する。翌日以降、outbox と inputs の件数が減り、uncertain・held の件数が変わらないことを確認する。
+
+`notice pending` のコマンド（この change の前に終了して通知が pending のまま残ったもの）、`state requested` のまま応答のない quiesce 要求、`pending` のまま配送されない outbox は、期限が付かない（除外の表で件数を確認できる）。件数が少なければそのまま残し、増えるようなら原因を調べる。
+
+2026-10-18 の実績（dev、`silk-agent` DB）: バックアップは `gs://nnyn-dev-silk-agent-command-output/firestore-backups/`（このバケットは 30 日で削除される）、TTL は 9 件すべて ACTIVE。バックフィルの件数表示は、inputs 108 / controls 16 / control_queue 16 / outbox 818 / commands 99 / sandbox_operations 99 / slack_receipts 71 / workers 92 が対象で、uncertain の入力 30、通知 pending のコマンド 13、pending の outbox 29・uncertain の outbox 3、応答のない quiesce 要求 23 が除外。
+
+戻す場合: Terraform で該当の `google_firestore_field` を削除して TTL を外す。既に消えた記録はバックアップからしか戻せない。
+
+### 11.4 履歴を失った会話
+
+会話の履歴（Agent Platform Sessions）は作成から30日（`session_store.ttl_seconds`、下限は24時間）で消える。入力を処理するたびに、残りが半分を下回っていれば期限を延ばすので、使われている会話の履歴は消えない。
+
+- 長く使われなかった会話の履歴が消えていた場合、新しい履歴で続け、スレッドに「以前の会話の履歴は保存期間を過ぎたため引き継げませんでした。作業領域のファイルは残っています。」と表示する。入力は失敗にならない。会話の管理情報に `history_reset_reason=expired` が残り、`sdk_session_id` は新しいものになる。会話をリセットすると `history_reset_reason` は消える。
+- 処理中に履歴が消えた場合（追記が「存在しない」で失敗）は、保存先を作り直して追記を続け、同じ `history_reset_reason` を記録する（その turn は SDK のメモリの履歴で続く）。ユーザへの通知は出ない。
+- 延長に失敗しても turn は止まらない（ログ `could not extend session` を確認する。次の入力で再試行する）。
+- 履歴の調査: 会話のドキュメントの `history_reset_reason` と `sdk_session_id` を見る。作業領域（Sandbox のファイル）は履歴と別に残っている。
+
+## 付録 A. Agent Platform Sessions の期限延長の実機確認（2026-10-18、`add-data-retention` 1.1）
+
+dev の Agent Platform（`reasoningEngines/868017700884971520`）に試験用セッションを作り、SDK の `client.agent_engines.sessions._update` で期限を更新できるかを確認した。試験用セッションは確認後に削除した。
+
+| 確認 | 結果 |
+|---|---|
+| `ttl` の下限 | **24 時間**。`ttl=3600s` での作成は `400 INVALID_ARGUMENT: ttl must be at least 24 hours` で拒否される |
+| `_update(name=, config={"ttl": "172800s", "update_mask": "ttl", "wait_for_completion": True})` | 成功。`expire_time` は **更新時刻 + ttl** になった（作成時の 24 時間後 → 更新時の 48 時間後） |
+| `_update(name=, config={"expire_time": <datetime>, "update_mask": "expire_time", "wait_for_completion": True})` | 成功。`expire_time` が指定した時刻になった |
+| イベントの追記（`events.append`） | `update_time` は進むが `expire_time` は延びない |
+| 公開の `update` | ない（`_update` のみ）。REST の PATCH を直接呼ぶ必要はなく、`_update` で足りる |
+| `delete` | `config` に `wait_for_completion` を渡すと検証エラーになる。`delete(name=)` だけで削除できる |
+
+この change では `update_mask="ttl"` を使い、`ttl` は `{ttl_seconds}s` で渡す。

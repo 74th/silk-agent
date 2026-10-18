@@ -25,6 +25,7 @@ _PATCH_FIELDS = frozenset(
         "progress_ref",
         "progress_snapshot",
         "history_uncertain",
+        "history_reset_reason",
         "running_command_ids",
         "bot_instance_id",
     }
@@ -313,6 +314,7 @@ class FirestoreConversationStore:
                     "turn_status": "idle",
                     "guard_history": [],
                     "history_uncertain": False,
+                    "history_reset_reason": firestore.DELETE_FIELD,
                     "stop_seq": 0,
                     "reset_pending": False,
                     "reset_seq": None,
@@ -398,6 +400,8 @@ def _validate_patch(patch: Mapping[str, Any]) -> None:
         raise ValueError("progress_snapshot must be a mapping")
     if "history_uncertain" in patch and not isinstance(patch["history_uncertain"], bool):
         raise ValueError("history_uncertain must be a bool")
+    if "history_reset_reason" in patch and not isinstance(patch["history_reset_reason"], str):
+        raise ValueError("history_reset_reason must be a string")
     if "running_command_ids" in patch and (
         not isinstance(patch["running_command_ids"], list)
         or not all(isinstance(item, str) for item in patch["running_command_ids"])

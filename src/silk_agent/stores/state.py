@@ -27,6 +27,7 @@ def state_to_dict(state: ConversationState) -> dict[str, Any]:
         "owner_user": state.owner_user,
         "owner_email": state.owner_email,
         "progress_snapshot": state.progress_snapshot,
+        "history_reset_reason": state.history_reset_reason,
     }
 
 
@@ -44,6 +45,7 @@ def state_from_dict(data: dict[str, Any]) -> ConversationState:
         owner_user=data.get("owner_user"),
         owner_email=data.get("owner_email"),
         progress_snapshot=dict(data.get("progress_snapshot") or {}),
+        history_reset_reason=data.get("history_reset_reason"),
     )
 
 

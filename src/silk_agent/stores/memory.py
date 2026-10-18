@@ -33,4 +33,5 @@ def _copy(s: ConversationState) -> ConversationState:
         s.owner_user,
         s.owner_email,
         dict(s.progress_snapshot),
+        s.history_reset_reason,
     )

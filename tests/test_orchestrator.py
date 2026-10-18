@@ -72,6 +72,27 @@ async def test_distributed_output_sink_receives_only_sanitized_events(clock, cha
     assert not channel.events
 
 
+async def test_history_lost_notice_goes_out_through_the_ordinary_output_path(clock, channel):
+    from silk_agent.agent.engine import HISTORY_LOST_NOTICE
+
+    stored = []
+
+    async def save(event):
+        stored.append(event)
+
+    orch, _ = make(
+        clock,
+        channel,
+        [Text("unused")],
+        sanitizer=FakeSanitizer(["履歴"]),  # a sanitizer that would mask this word
+        outbox_sink=save,
+    )
+    await orch.emit(Notice("k", HISTORY_LOST_NOTICE))
+    # A fixed system text is delivered as is, in the conversation's own output sequence.
+    assert stored == [Notice("k", HISTORY_LOST_NOTICE)]
+    assert not channel.events
+
+
 async def test_message_to_turn_finished(clock, channel):
     orch, _ = make(clock, channel, [Tool("bash", "ls"), Text("done")])
     await orch.handle(msg("run"))

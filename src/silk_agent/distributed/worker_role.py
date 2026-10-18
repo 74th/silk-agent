@@ -346,6 +346,7 @@ async def run_worker(config: Config) -> None:
     from silk_agent.stores.firestore.ownership import FirestoreOwnershipStore
     from silk_agent.stores.firestore.quiesce import FirestoreQuiesceMailbox
     from silk_agent.stores.firestore.rate_limits import FirestoreUserRateLimitStore
+    from silk_agent.stores.firestore.retention import RetentionPolicy
     from silk_agent.stores.firestore.watch import worker_reservation_watch
     from silk_agent.stores.firestore.workers import FirestoreWorkerDirectory
 
@@ -362,7 +363,8 @@ async def run_worker(config: Config) -> None:
         ttl_seconds=config.session_store.ttl_seconds,
     )
     ownership = FirestoreOwnershipStore(client, collection_prefix=prefix)
-    directory = FirestoreWorkerDirectory(client, collection_prefix=prefix)
+    retention = RetentionPolicy.from_config(dist.retention)
+    directory = FirestoreWorkerDirectory(client, collection_prefix=prefix, retention=retention)
     conversations = FirestoreConversationStore(client, collection_prefix=prefix)
     # The SDK keys stored history by working directory, so every Worker must use the same
     # path; a per-process temp directory made resume on another Worker fail
@@ -387,11 +389,13 @@ async def run_worker(config: Config) -> None:
     factory = WorkerActorFactory(
         config=config,
         clock=clock,
-        inbox=FirestoreInboxStore(client, collection_prefix=prefix),
+        inbox=FirestoreInboxStore(client, collection_prefix=prefix, retention=retention),
         conversations=conversations,
-        outbox_writer=FirestoreOutboxWriter(client, collection_prefix=prefix),
+        outbox_writer=FirestoreOutboxWriter(client, collection_prefix=prefix, retention=retention),
         rate_limits=FirestoreUserRateLimitStore(client, collection_prefix=prefix),
-        command_monitor_store=FirestoreCommandMonitorStore(client, collection_prefix=prefix),
+        command_monitor_store=FirestoreCommandMonitorStore(
+            client, collection_prefix=prefix, retention=retention
+        ),
         runtime=runtime,
         session_store=AgentPlatformSessionStore(sessions_api),
         skills=skills,
@@ -451,7 +455,7 @@ async def run_worker(config: Config) -> None:
         on_tick=health.loop("heartbeat", 3 * dist.lease_renewal_seconds),
     )
     responder = QuiesceResponder(
-        FirestoreQuiesceMailbox(client, collection_prefix=prefix),
+        FirestoreQuiesceMailbox(client, collection_prefix=prefix, retention=retention),
         worker,
         clock,
         worker_id=identity.worker_id,

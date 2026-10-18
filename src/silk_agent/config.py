@@ -72,7 +72,8 @@ class SessionStoreConfig(_Model):
     project: str = ""  # required for provider "agent_platform"
     location: str = "us-central1"
     agent_runtime: str = ""  # required for provider "agent_platform"
-    ttl_seconds: int = 2592000
+    # Agent Platform rejects a session `ttl` under 24 hours.
+    ttl_seconds: int = Field(default=2592000, ge=86400)
 
 
 class AgentConfig(_Model):
@@ -103,6 +104,14 @@ class SandboxConfig(_Model):
     run_reconciler: bool = True
 
 
+class RetentionConfig(_Model):
+    """Days a processed Firestore record is kept before TTL deletes it."""
+
+    terminal_days: int = Field(default=30, gt=0)  # inputs, controls, outbox, commands, quiesce
+    receipt_days: int = Field(default=7, gt=0)  # Slack receipts (must outlive Slack's replays)
+    worker_days: int = Field(default=7, gt=0)  # from the last heartbeat
+
+
 class DistributedExecutionConfig(_Model):
     firestore_project: str = ""
     firestore_database: str = "(default)"
@@ -110,6 +119,7 @@ class DistributedExecutionConfig(_Model):
     sandbox_service_url: str = ""
     command_output_bucket: str = ""
     command_output_retention_days: int = Field(default=30, gt=0)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
     lease_seconds: int = Field(default=60, gt=0)
     lease_renewal_seconds: int = Field(default=20, gt=0)
     lease_clock_skew_seconds: int = Field(default=5, ge=0)

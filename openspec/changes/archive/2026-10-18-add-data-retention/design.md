@@ -52,19 +52,21 @@
 
 期限は終端になった時刻から数える。入力には `completed_at`（Timestamp）を同時に書く。コマンドは既存の `completed_at` ではなく、通知が済んだ時刻（`notification_state` が delivered / suppressed / none になった時刻）から数える。終端と通知のどちらか遅い方で期限を決める。受信記録には `received_at` を新しく書く。
 
+コマンドの通知が済んだことの記録（2026-10-18 に追記）: 実装には `notification_state` を `delivered` にする処理がなく、`notify` の経路のコマンドは `pending` のまま残っていた。そこで、`advance_input` が `command_finished` の入力を COMPLETED にする同じ transaction で、`payload.command_id` のコマンドを `notification_state=delivered`（`notification_updated_at`、`expire_at`）にし、同じ操作 ID の `sandbox_operations` にも同じ `expire_at` を書く。コマンドが既に終端でないとき（通常は起きない）や、通知の状態が pending / held 以外に変わっているときは触らない。`foreground` で結果を返した（`none`）コマンドと、`suppressed` のコマンドは、終端にする書き込み（`observe_terminal`、`request_cancel` で終端のコマンドを suppressed にする場合）で期限を書く。
+
 ### D4. Sandbox 操作はコマンドと一緒に期限を付ける
 
 `sandbox_operations` は終端の状態を持たず、`is_dispatch_allowed` と `list_for_stop` が参照する。コマンドとは `accept_intent`（`service_operations.py:30-149`）で同時に作られる。コマンドに期限を書く transaction で、同じ操作 ID の操作にも同じ期限を書く。コマンドが作られなかった操作は期限を付けない（件数は少なく、運用者がバックフィルの出力で確認する）。
 
 ### D5. Worker の登録
 
-heartbeat の書き込みで `expire_at = heartbeat_at + worker_days` を書く。生きている Worker は 20 秒ごとに延びるので消えない。`workers/{id}/incarnations/*` は TTL ではサブコレクションごとに消えないので、`incarnations` のドキュメントにも登録時と heartbeat 時に同じ期限を書く。reservations は解放時に既に削除されている。
+heartbeat の書き込みで `expire_at = heartbeat_at + worker_days` を書く。生きている Worker は 20 秒ごとに延びるので消えない。`register` の書き込み（新しい incarnation の `set`）も同じ期限を書く。`workers/{id}/incarnations/*` は実在するドキュメントではなく（`reservations` の親のパスとしてだけ使われている）、TTL の対象にならない。クラッシュした Worker に残る reservations の掃除は、この change では扱わない（2026-10-18 に確認して対象外にした）。
 
 ### D6. Agent Platform Sessions の期限の延長
 
 `AgentPlatformSessions` に `extend(session_id)` を加え、`update_mask=ttl`（または `expire_time`）で期限を「今 + ttl_seconds」に更新する。呼ぶのは入力を SDK に渡す直前で、残りが `ttl_seconds / 2` を下回るときだけにする（毎回の呼び出しを避けるため、残りの期間は `get` の `expire_time` をプロセス内に記録して判断する）。対象は会話の SDK セッション（`c-...`）と、単一プロセス構成の管理用セッション（`m-...`）の両方。
 
-最初のタスクで、実機で次を確認する: 更新で `expire_time` が延びるか、`ttl` と `expire_time` のどちらの mask が通るか、公開されていない `_update` の代わりに REST の PATCH を直接呼ぶ必要があるか。延ばせない場合は、この change の延長の要件（session-persistence の「活動中の会話の履歴を期限で失わない」）を外し、D7 だけで進める。その場合はユーザに確認してから spec と tasks を更新する。
+実機で確認済み（2026-10-18、`docs/distributed-operations-runbook.md` 付録 A）: 延長できる。呼び出しは SDK の `sessions._update(name=..., config={"ttl": "<ttl_seconds>s", "update_mask": "ttl", "wait_for_completion": True})` で、`expire_time` は更新時刻 + ttl になる。`expire_time` の mask も通るが、`ttl` を使う。REST の PATCH を直接呼ぶ必要はない。イベントの追記では期限は延びない。`ttl` の下限は 24 時間なので、`ttl_seconds` が 86400 未満の設定は作成と延長の両方で拒否される（設定の検証で弾く）。
 
 ### D7. 履歴を失った会話の再開
 
@@ -76,7 +78,7 @@ heartbeat の書き込みで `expire_at = heartbeat_at + worker_days` を書く�
 
 ### D8. Terraform
 
-`terraform/variables.tf` に `firestore_prefix`（既定 `silk-agent`）を追加し、既存の索引のコレクション名も `"${var.firestore_prefix}_commands"` などに置き換える（値は変わらないので plan の差分は出ない）。TTL は `google_firestore_field` で、`inputs`、`controls`（コレクショングループ）、`<prefix>_outbox`、`<prefix>_commands`、`<prefix>_sandbox_operations`、`<prefix>_quiesce_requests`、`<prefix>_slack_receipts`、`<prefix>_control_queue`、`<prefix>_workers`、`incarnations`（コレクショングループ）の `expire_at` に設定する。`expire_at` は索引から外す（`index_config {}`）。
+`terraform/variables.tf` に `firestore_prefix`（既定 `silk-agent`）を追加し、既存の索引のコレクション名も `"${var.firestore_prefix}_commands"` などに置き換える（値は変わらないので plan の差分は出ない）。TTL は `google_firestore_field` で、`inputs`、`controls`（コレクショングループ）、`<prefix>_outbox`、`<prefix>_commands`、`<prefix>_sandbox_operations`、`<prefix>_quiesce_requests`、`<prefix>_slack_receipts`、`<prefix>_control_queue`、`<prefix>_workers` の `expire_at` に設定する。`expire_at` は索引から外す（`index_config {}`）。
 
 ### D9. 既存の記録へのバックフィル
 

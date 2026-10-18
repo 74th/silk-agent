@@ -56,6 +56,9 @@ def test_defaults_with_minimal_file(tmp_path):
     assert cfg.distributed.idle_close_seconds == 600
     assert cfg.distributed.drain_timeout_seconds is None
     assert cfg.distributed.command_output_retention_days == 30
+    assert cfg.distributed.retention.terminal_days == 30
+    assert cfg.distributed.retention.receipt_days == 7
+    assert cfg.distributed.retention.worker_days == 7
 
 
 @pytest.mark.parametrize(
@@ -73,6 +76,26 @@ def test_defaults_with_minimal_file(tmp_path):
 def test_distributed_config_rejects_invalid_durations_and_limits(field, value):
     with pytest.raises(ValueError):
         Config(distributed={field: value})
+
+
+@pytest.mark.parametrize("field", ["terminal_days", "receipt_days", "worker_days"])
+@pytest.mark.parametrize("value", [0, -1])
+def test_distributed_retention_rejects_non_positive_days(field, value):
+    with pytest.raises(ValueError):
+        Config(distributed={"retention": {field: value}})
+
+
+def test_distributed_retention_accepts_overrides():
+    cfg = Config(distributed={"retention": {"terminal_days": 14, "receipt_days": 3}})
+    assert cfg.distributed.retention.terminal_days == 14
+    assert cfg.distributed.retention.receipt_days == 3
+    assert cfg.distributed.retention.worker_days == 7
+
+
+def test_session_ttl_below_agent_platform_minimum_is_rejected():
+    with pytest.raises(ValueError):
+        Config(session_store={"ttl_seconds": 3600})
+    assert Config(session_store={"ttl_seconds": 86400}).session_store.ttl_seconds == 86400
 
 
 def test_distributed_config_requires_renewal_interval_below_lease():

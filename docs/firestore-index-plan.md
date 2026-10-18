@@ -41,22 +41,60 @@ fields are introduced; do not exempt fields used by a listed query.
 
 ## TTL and child document cleanup
 
-`inputs.expire_at` is eligible for Firestore TTL only after a record reaches
-`completed`, `blocked`, `cancelled`, or `suppressed`. The default retention is
-30 days from its terminal timestamp and the helper allows configuration. No
-TTL value is written for `pending`, `dispatching`, `queued`, `accepted`, or `uncertain`.
-In particular, uncertain delivery remains available for operator recovery.
-The TTL field itself should have its single-field index disabled except for
-the TTL policy.
+Processed records carry `expire_at` (a Firestore Timestamp, written by the same transaction
+that ends the record; `stores/firestore/retention.py` decides which states qualify). The field
+is `expire_at` everywhere. `expires_at` means an ownership, lease or Sandbox retention deadline
+and never has a TTL policy.
 
-Slack receipt documents can use a separate configurable expiry because they
-are deduplication markers; their retention must cover the supported replay
-window. Do not TTL-delete the conversation parent as a way to remove its
-children. Firestore TTL and deleting a parent document do not recursively
-remove subcollection documents. A future purge operation must page through
-and delete terminal `inputs` and `controls` documents first, then receipts and
-other children, and delete the parent last. It must keep pending and uncertain
+| Collection | `expire_at` is written when | Counted from | Retention |
+|---|---|---|---|
+| `inputs` (group) | `completed`, `blocked`, `cancelled`, `suppressed` | that time (`completed_at` is written too) | `terminal_days` (30) |
+| `controls` (group), `control_queue` | `handled`, `filtered`, `stale` | that time | `terminal_days` |
+| `outbox` | `delivered`, `suppressed` | that time | `terminal_days` |
+| `commands`, `sandbox_operations` | terminal command whose notice is `none`, `delivered` or `suppressed`; the operation gets the same value in the same transaction | the later of the end and the notice | `terminal_days` |
+| `quiesce_requests` | `answered` | answer time | `terminal_days` |
+| `slack_receipts` | created (`received_at` is written too) | reception | `receipt_days` (7) |
+| `workers` | register and every heartbeat | last heartbeat | `worker_days` (7) |
+
+No value is written for `pending`, `dispatching`, `queued`, `accepted`, `held` or `uncertain`
+inputs, `pending` / `dispatching` / `uncertain` outputs, running commands, or commands whose
+notice is `pending` or `held`; a transition back out of a terminal-looking state removes it. In
+particular, uncertain delivery remains available for operator recovery. The TTL field has its
+single-field index disabled (`index_config {}`). `workers/*/incarnations/*` is only the parent
+path of `reservations` documents, so it has no TTL.
+
+A command's notice becomes `delivered` when its `command_finished` input completes, or
+`suppressed` when that input is cancelled, blocked or suppressed (a STOP, a reset).
+
+Existing records are given the same `expire_at` by `silk-agent retention backfill`
+(`--apply` writes; the default only counts). See the operations runbook, section 11.
+
+Conversation documents and their ownership, Sandbox and lease records are not deleted by TTL.
+Do not TTL-delete the conversation parent as a way to remove its children: Firestore TTL and
+deleting a parent document do not recursively remove subcollection documents. A future purge
+operation must page through and delete terminal `inputs` and `controls` documents first, then
+receipts and other children, and delete the parent last. It must keep pending and uncertain
 records. Batch work must be checkpointed so it can resume after interruption.
+
+### Reads of TTL-eligible collections (audit, 2026-10-18, `add-data-retention` 1.2)
+
+Every get / query of a collection that gets `expire_at` was checked for a read that
+needs a terminal record. None does; the reads that can see a deleted record degrade safely.
+
+| Collection | Reads | Terminal record needed? |
+|---|---|---|
+| `inputs` | `list_unfinished`, `list_held`, `has_waiting_input`, ownership recovery queries: only non-terminal states. `advance_input` / `record_query_start` / `recover_dispatching`: by ID, expect a non-terminal state. `accept_*`: by ID for idempotent redelivery. `list_sender_enrichment_due`: `next_sender_lookup_at`, pending only | No. A redelivery after the record was deleted needs the Slack receipt (7 days) to be gone too, so it creates a new input only after the replay window |
+| `controls`, `control_queue` | `list_pending_controls`, `list_authorized_controls`, `list_sender_enrichment_due`: pending / authorized only | No |
+| `outbox` | `list_conversations_with_pending`, `claim_next`: pending / dispatching / uncertain only. `mark_delivery` and `revalidate_claim`: by ID on a dispatching record | No |
+| `commands` | `list_due`, `list_for_stop`, `claim`: non-terminal only. `get_command` (Monitor, `BackgroundCommands.status`, `command_output`): by command ID | A status or output request for a command older than the retention returns `unknown` (the archived output in GCS has the same 30-day retention) |
+| `sandbox_operations` | `list_for_stop`: `accepted` only, and `is_dispatch_allowed` (new operations). `get_operation` (Sandbox Service): idempotency check by request ID, and command status / cancel / output | A request ID is unique per turn; a status request for an operation older than the retention returns 404 `unknown_command` |
+| `quiesce_requests` | `list_requested`: `requested` only. `get`: polled by the requester until `answered` (seconds) | No |
+| `slack_receipts` | `accept_received`: by ID, inside the receive transaction | The marker must outlive the Slack replay window (hours); 7 days |
+| `workers` | `list_available`, `list_workers`, `get_worker`, CLI `status-all`: filtered by `heartbeat_at` or listed | A Worker that stopped heartbeating more than 7 days ago disappears from `status-all` |
+
+`workers/*/incarnations/*` is not a document: it exists only as the parent path of
+`reservations` documents, so it gets no TTL. Reservations left by a crashed Worker are
+outside the retention (released by recovery).
 
 Terraform materializes these index, exemption, and TTL declarations. The
 release record below captures the first live apply and verification.

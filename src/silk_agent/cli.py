@@ -77,6 +77,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="how the stop was verified (e.g. node fenced, ticket); stored with the release",
     )
     recovery_confirm.add_argument("--config", "-c", help=f"config file (default: ${CONFIG_ENV})")
+    retention = sub.add_parser("retention", help="manage the retention of processed records")
+    retention_actions = retention.add_subparsers(dest="retention_action", required=True)
+    retention_backfill = retention_actions.add_parser(
+        "backfill",
+        help="give expire_at to records that ended before retention existed "
+        "(counts only unless --apply)",
+    )
+    retention_backfill.add_argument(
+        "--apply", action="store_true", help="write expire_at (default: only count)"
+    )
+    retention_backfill.add_argument(
+        "--limit", type=int, help="handle at most this many eligible records per kind"
+    )
+    retention_backfill.add_argument("--config", "-c", help=f"config file (default: ${CONFIG_ENV})")
     migration = sub.add_parser(
         "migration", help="export, reconcile and import stopped legacy state"
     )
@@ -180,6 +194,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         if config.execution_mode != "distributed":
             sys.exit("recovery administration requires execution_mode: distributed")
         raise SystemExit(asyncio.run(_administer_recovery(config, args)))
+
+    if args.command == "retention":
+        if config.execution_mode != "distributed":
+            sys.exit("retention administration requires execution_mode: distributed")
+        if args.limit is not None and args.limit < 1:
+            sys.exit("--limit must be positive")
+        raise SystemExit(asyncio.run(_retention_backfill(config, args)))
 
     if args.command == "migration":
         import json
@@ -389,6 +410,28 @@ def main(argv: Sequence[str] | None = None) -> None:
             client.close()
 
     raise SystemExit(asyncio.run(administer()))
+
+
+async def _retention_backfill(config, args) -> int:
+    from silk_agent.core.clock import SystemClock
+    from silk_agent.stores.firestore.client import create_firestore_client
+    from silk_agent.stores.firestore.retention import RetentionPolicy
+    from silk_agent.stores.firestore.retention_backfill import backfill, format_reports
+
+    client = create_firestore_client(config.distributed)
+    try:
+        reports = await backfill(
+            client,
+            prefix=config.distributed.firestore_prefix,
+            policy=RetentionPolicy.from_config(config.distributed.retention),
+            now=SystemClock().now(),
+            apply=args.apply,
+            limit=args.limit,
+        )
+    finally:
+        client.close()
+    print(format_reports(reports, apply=args.apply))
+    return 0
 
 
 async def _administer_recovery(config, args) -> int:
