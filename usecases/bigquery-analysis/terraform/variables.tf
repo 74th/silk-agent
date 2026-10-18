@@ -26,3 +26,14 @@ variable "ksa_name" {
   type        = string
   default     = "bigquery-analysis"
 }
+
+variable "daily_query_limit_gib" {
+  description = "Daily BigQuery query usage (GiB processed) allowed for the project, and for each user (the GSA). A query over it is rejected with quotaExceeded. The quota is project-wide: it also limits other BigQuery use in the same project."
+  type        = number
+  default     = 100
+
+  validation {
+    condition     = var.daily_query_limit_gib > 0
+    error_message = "daily_query_limit_gib must be positive."
+  }
+}

@@ -13,6 +13,15 @@ from typing import Any
 
 def _error_kind(error: BaseException) -> str:
     names = {cls.__name__ for cls in type(error).__mro__}
+    # The daily query quota answers 403 Forbidden with reason quotaExceeded: it is not a
+    # permission problem, and retrying today does not help.
+    reasons = {
+        str(item.get("reason", ""))
+        for item in (getattr(error, "errors", None) or [])
+        if isinstance(item, dict)
+    }
+    if reasons & {"quotaExceeded", "rateLimitExceeded"} or names & {"TooManyRequests"}:
+        return "quota"
     if names & {"PermissionDenied", "Forbidden", "Unauthorized", "RefreshError"}:
         return "permission"
     if names & {"DeadlineExceeded", "ServiceUnavailable", "RetryError", "ConnectionError"}:

@@ -2,3 +2,4 @@ project_id    = "your-gcp-project"
 region        = "asia-northeast1"
 ksa_namespace = "bigquery-analysis-sandboxes"
 ksa_name      = "bigquery-analysis"
+daily_query_limit_gib = 100
