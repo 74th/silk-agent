@@ -819,6 +819,43 @@ async def test_observe_commands_never_resumes_or_creates_a_sandbox() -> None:
 
 
 @pytest.mark.asyncio
+async def test_observe_commands_reads_status_and_output_of_a_ready_sandbox() -> None:
+    async def command_state(_request):
+        return web.json_response(
+            {"command_id": "c", "state": "running", "started_at": "2030-01-01T00:00:00Z"}
+        )
+
+    async def command_output(_request):
+        return web.json_response(
+            {
+                "command_id": "c",
+                "stream": "stdout",
+                "data": "aGVsbG8=",
+                "cursor": 5,
+                "total_bytes": 5,
+                "complete": True,
+                "output_complete": True,
+            }
+        )
+
+    app = web.Application()
+    app.router.add_get("/v1/commands/{command_id}", command_state)
+    app.router.add_get("/v1/commands/{command_id}/output", command_output)
+    async with TestServer(app) as server:
+        repository, backend = MemoryRepository(), FakeBackend()
+        backend.endpoint = str(server.make_url("")).rstrip("/")
+        manager = SandboxManager(config(), repository, backend, template=template())
+        handle = await manager.ensure(SessionKey(tenant_id="tenant", session_id="observed-ok"))
+        async with handle.observe_commands as commands:
+            record = await commands.get("c")
+            page = await commands.read_output("c", stream="stdout", cursor=0)
+        assert record["state"] == "running"
+        assert (page.data, page.cursor, page.complete) == (b"hello", 5, True)
+        assert backend.endpoint_refs == [handle.sandbox_ref]  # resolved without ensure()
+        await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_observe_commands_of_an_older_generation_is_stale() -> None:
     manager, repository, _backend = await _ready_manager()
     key = SessionKey(tenant_id="tenant", session_id="replaced")
