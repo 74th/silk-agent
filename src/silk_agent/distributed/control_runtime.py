@@ -54,6 +54,9 @@ class RecoveryLoop:
         self._backoff_base = backoff_base_seconds
         self._backoff_max = backoff_max_seconds
         self._schedule: dict[str, tuple[int, datetime]] = {}  # key -> (failures, next attempt)
+        self._cursor: Any | None = None
+        self._cycle_seen: set[str] = set()
+        self._cycle_pending = 0
         self._pod_gone = pod_gone
         self._current_incarnation = current_incarnation
         self._auto_after = timedelta(seconds=auto_recover_after_seconds)
@@ -70,15 +73,24 @@ class RecoveryLoop:
         self._batch_size = batch_size
 
     async def run_once(self) -> int:
-        expired = await self._ownership.list_expired(
-            before=self._clock.now() - self._skew, limit=self._batch_size
-        )
+        before = self._clock.now() - self._skew
+        paged = getattr(self._ownership, "list_expired_page", None)
+        if paged is not None:
+            # Resume after the previous page: expired ownerships nobody is waiting on must not
+            # fill a fixed first page and hide the ones that are.
+            expired, self._cursor = await paged(
+                before=before, limit=self._batch_size, after=self._cursor
+            )
+        else:
+            expired = await self._ownership.list_expired(before=before, limit=self._batch_size)
+            self._cursor = None
 
         now = self._clock.now()
-        live = {token.conversation_key for token in expired}
-        for key in tuple(self._schedule):
-            if key not in live:
-                del self._schedule[key]  # released or renewed: forget its backoff
+        self._cycle_seen.update(token.conversation_key for token in expired)
+        if self._cursor is None:  # the pass over every ownership is complete
+            for key in tuple(self._schedule):
+                if key not in self._cycle_seen:
+                    del self._schedule[key]  # released or renewed: forget its backoff
 
         async def recover(token: Any) -> int:
             key = token.conversation_key
@@ -117,7 +129,11 @@ class RecoveryLoop:
 
         released = sum(await asyncio.gather(*(recover(token) for token in expired)))
         # Expired and not released: each is waiting for stop evidence (recovery_blocked).
-        METRICS.set("control_recovery_pending", len(expired) - released)
+        self._cycle_pending += len(expired) - released
+        if self._cursor is None:
+            METRICS.set("control_recovery_pending", self._cycle_pending)
+            self._cycle_seen.clear()
+            self._cycle_pending = 0
         return released
 
     def _back_off(self, key: str, failures: int) -> None:
@@ -199,10 +215,11 @@ class OutboxSenderLoop:
         poll_seconds: float = 1,
         batch_size: int = 100,
         concurrency: int = 8,
+        max_per_conversation: int = 20,
         on_tick: Callable[[], None] | None = None,
     ) -> None:
         self._on_tick = on_tick
-        if min(poll_seconds, batch_size, concurrency) <= 0:
+        if min(poll_seconds, batch_size, concurrency, max_per_conversation) <= 0:
             raise ValueError("sender loop values must be positive")
         self._outbox = outbox
         self._sender = sender
@@ -210,6 +227,10 @@ class OutboxSenderLoop:
         self._batch_size = batch_size
         self._slots = asyncio.Semaphore(concurrency)
         self._cursor: Any | None = None
+        # Outputs sent for one conversation in one pass. A conversation that always has
+        # something to send must not keep the pass from reaching the next page.
+        self._max_per_conversation = max_per_conversation
+        self.backlog = False  # some conversation still had output when its pass ended
 
     async def run_once(self) -> int:
         paged = getattr(self._outbox, "list_pending_page", None)
@@ -219,13 +240,16 @@ class OutboxSenderLoop:
         else:
             keys = await self._outbox.list_conversations_with_pending(limit=self._batch_size)
         delivered = 0
+        self.backlog = False
 
         async def drain(key: str) -> int:
             count = 0
             async with self._slots:
                 try:
-                    while await self._sender.run_once(key):
+                    while count < self._max_per_conversation and await self._sender.run_once(key):
                         count += 1
+                    if count >= self._max_per_conversation:
+                        self.backlog = True
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -247,6 +271,9 @@ class OutboxSenderLoop:
                 raise
             except Exception as exc:
                 log.warning("Outbox listing failed (%s)", type(exc).__name__)
+            if self.backlog:
+                await asyncio.sleep(0)  # more to send: go straight to the next page
+                continue
             try:
                 await asyncio.wait_for(stop.wait(), timeout=self._poll_seconds)
             except TimeoutError:

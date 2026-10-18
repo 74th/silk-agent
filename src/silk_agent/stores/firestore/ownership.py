@@ -84,6 +84,37 @@ class FirestoreOwnershipStore:
         except Exception as exc:
             raise convert_firestore_error("list_expired_ownership", exc) from None
 
+    async def list_expired_page(
+        self, *, before: datetime, limit: int = 100, after: Any | None = None
+    ) -> tuple[tuple[OwnershipToken, ...], Any | None]:
+        """Like `list_expired`, in document order, resuming after the cursor `after`.
+
+        Returns (expired ownerships, cursor for the next call); the cursor is None once the
+        whole collection was covered and the caller starts over. A fixed first page would let
+        a hundred expired ownerships nobody is waiting on hide every later one.
+        """
+        _validate_utc(before, "before")
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        query = (
+            self._collection("ownership")
+            .where(filter=FieldFilter("phase", "in", ["assigned", "active", "recovering"]))
+            .order_by("__name__")
+        )
+        if after is not None:
+            query = query.start_after(after)
+        try:
+            tokens = []
+            async for snapshot in query.stream():
+                token = decode_record(snapshot.to_dict() or {}, OwnershipToken)
+                if token.expires_at < before:
+                    tokens.append(token)
+                    if len(tokens) >= limit:
+                        return tuple(tokens), snapshot
+            return tuple(tokens), None
+        except Exception as exc:
+            raise convert_firestore_error("list_expired_ownership", exc) from None
+
     async def list_for_worker(
         self, *, worker_id: str, worker_incarnation: str
     ) -> tuple[OwnershipToken, ...]:

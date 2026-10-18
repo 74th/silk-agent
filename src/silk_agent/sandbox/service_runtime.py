@@ -135,7 +135,9 @@ async def run_sandbox_service(config: Config) -> None:
         raise ConfigError("sandbox.config_file is required")
 
     from silk_agent.core.clock import SystemClock
+    from silk_agent.core.ports import AGENT_USER_EMAIL_ENV
     from silk_agent.stores.firestore.client import create_firestore_client
+    from silk_agent.stores.firestore.conversations import FirestoreConversationStore
     from silk_agent.stores.firestore.ownership import FirestoreOwnershipStore
     from silk_agent.stores.firestore.retention import RetentionPolicy
     from silk_agent.stores.firestore.service_operations import FirestoreServiceOperationStore
@@ -165,6 +167,13 @@ async def run_sandbox_service(config: Config) -> None:
             return None
         return owner
 
+    conversations = FirestoreConversationStore(firestore_client, collection_prefix=prefix)
+
+    async def env_for(conversation_key: str) -> dict[str, str]:
+        record = await conversations.get_conversation(conversation_key)
+        email = record.get("owner_email") if record else None
+        return {AGENT_USER_EMAIL_ENV: email} if isinstance(email, str) and email else {}
+
     app = create_app(
         audience=config.distributed.sandbox_service_audience,
         allowed_ksas=allowed_ksas,
@@ -172,6 +181,7 @@ async def run_sandbox_service(config: Config) -> None:
         conversation_authorizer=authorize,
         owner_provider=owner_for,
         operation_store=operations,
+        env_provider=env_for,
         clock=clock.now,
     )
 

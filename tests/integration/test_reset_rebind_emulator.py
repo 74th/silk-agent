@@ -104,3 +104,108 @@ async def test_a_reset_that_stops_before_the_rebind_is_finished_by_the_next_owne
         assert "rebind_pending" not in (await conversation_ref.get()).to_dict()
     finally:
         client.close()
+
+
+async def _half_done_reset(prefix_suffix):
+    """Generation 2 is in place, two inputs still carry generation 1, the marker is set."""
+    host = os.environ.get("SILK_AGENT_FIRESTORE_EMULATOR_HOST")
+    if not host:
+        pytest.skip("set SILK_AGENT_FIRESTORE_EMULATOR_HOST to run the Firestore emulator test")
+    client = create_firestore_client(
+        DistributedExecutionConfig(firestore_project=f"silk-agent-test-{uuid.uuid4().hex[:12]}"),
+        emulator_host=host,
+    )
+    inbox = FirestoreInboxStore(client, collection_prefix=f"test-{uuid.uuid4().hex[:12]}")
+    key = f"conversation-{prefix_suffix}-{uuid.uuid4().hex}"
+    now = datetime.now(UTC)
+    reset = await inbox.accept_control(
+        conversation_key=key,
+        input_id="reset-1",
+        conversation_generation=1,
+        kind="reset_candidate",
+        sender_id="user-1",
+        payload={"text": "reset"},
+        created_at=now,
+    )
+    inputs = [
+        await inbox.accept_input(
+            conversation_key=key,
+            input_id=f"after-{n}",
+            conversation_generation=1,
+            kind="message",
+            payload={"text": f"message {n}"},
+            created_at=now,
+        )
+        for n in range(2)
+    ]
+    conversation_ref = inbox._collection("conversations").document(inbox._conversation_id(key))
+    await conversation_ref.update(
+        {
+            "conversation_generation": 2,
+            "rebind_pending": {"previous_generation": 1, "reset_seq": reset.seq},
+        }
+    )
+    owner = OwnershipToken(key, "worker-a", "incarnation-a", 2, 2, now + timedelta(hours=1))
+    owner_ref = inbox._collection("ownership").document(inbox._conversation_id(key))
+    await owner_ref.set({**encode_record(owner), "phase": "active"})
+    return client, inbox, key, now, reset, inputs, owner, owner_ref, conversation_ref
+
+
+async def test_a_lease_renewal_during_the_rebind_does_not_lose_inputs_or_the_marker():
+    (
+        client,
+        inbox,
+        key,
+        now,
+        reset,
+        inputs,
+        owner,
+        owner_ref,
+        conversation_ref,
+    ) = await _half_done_reset("renewed")
+    try:
+        # The Worker renewed its lease: same holder, later expiry. Its token in the rebind
+        # call still carries the old expiry.
+        renewed = OwnershipToken(
+            key, owner.worker_id, owner.worker_incarnation, owner.epoch, 2, now + timedelta(hours=2)
+        )
+        await owner_ref.set({**encode_record(renewed), "phase": "active"})
+        rebound = await inbox.rebind_after_reset(
+            conversation_key=key, previous_generation=1, reset_seq=reset.seq, owner=owner
+        )
+        assert rebound == 2
+        assert {
+            e.conversation_generation for e in await inbox.list_unfinished(key, after_seq=reset.seq)
+        } == {2}
+        assert await inbox.pending_rebind(key) is None
+    finally:
+        client.close()
+
+
+async def test_when_the_owner_changed_the_marker_stays_for_the_next_owner():
+    (
+        client,
+        inbox,
+        key,
+        now,
+        reset,
+        inputs,
+        owner,
+        owner_ref,
+        conversation_ref,
+    ) = await _half_done_reset("taken")
+    try:
+        taken = OwnershipToken(key, "worker-b", "incarnation-b", 3, 2, now + timedelta(hours=1))
+        await owner_ref.set({**encode_record(taken), "phase": "active"})
+        rebound = await inbox.rebind_after_reset(
+            conversation_key=key, previous_generation=1, reset_seq=reset.seq, owner=owner
+        )
+        assert rebound == 0  # this owner is fenced out: nothing moved...
+        assert await inbox.pending_rebind(key) == (1, reset.seq)  # ...and the job is not lost
+        # The new owner finishes it.
+        moved = await inbox.rebind_after_reset(
+            conversation_key=key, previous_generation=1, reset_seq=reset.seq, owner=taken
+        )
+        assert moved == 2 and await inbox.pending_rebind(key) is None
+    finally:
+        client.close()

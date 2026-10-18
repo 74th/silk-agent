@@ -173,3 +173,28 @@ async def test_a_restarted_container_is_recovered_automatically():
         assert old is not None
     finally:
         env.client.close()
+
+
+async def test_list_expired_page_covers_every_expired_ownership_in_pages():
+    env = Env()
+    try:
+        expired_keys = set()
+        for number in range(5):
+            worker = WorkerRecord(f"worker-p{number}", f"inc-p{number}", 4, 0, 0, False, env.now)
+            await env.directory.register(worker)
+            key = f"conversation-page-{number}"
+            await env.assign(key, worker, activate=True)
+            expired_keys.add(key)
+        later = env.now + timedelta(seconds=60)
+        seen, cursor = set(), None
+        for _ in range(10):
+            page, cursor = await env.ownership.list_expired_page(
+                before=later, limit=2, after=cursor
+            )
+            assert len(page) <= 2
+            seen.update(token.conversation_key for token in page)
+            if cursor is None:
+                break
+        assert cursor is None and seen == expired_keys
+    finally:
+        env.client.close()

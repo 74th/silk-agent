@@ -166,7 +166,9 @@ class CommandMonitor:
             raise ValueError("stored output metadata is invalid")
         stream_record: Mapping[str, object]
         stream_cursor: int
-        if cursor < stdout_size or (stdout_size == 0 and cursor == 0):
+        # One cursor runs over stdout then stderr. An empty stdout has nothing at cursor 0, so
+        # the cursor already points into stderr.
+        if cursor < stdout_size:
             stream_record = stdout
             stream_cursor = cursor
             offset = 0

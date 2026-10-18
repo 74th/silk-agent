@@ -247,3 +247,51 @@ async def test_a_newer_incarnation_still_waits_for_the_self_stop_window():
     ownership = Ownership(token(expired_for=30))
     assert await replaced_loop(ownership, json.dumps([UID, "boot-2"])).run_once() == 0
     assert ownership.confirmed == []
+
+
+class PagedOwnership(Ownership):
+    """A stable-order collection of expired ownerships, served in pages like Firestore."""
+
+    def __init__(self, count):
+        self.tokens = [
+            OwnershipToken(
+                f"slack:T:C:{n}",
+                "worker-pod-a",
+                json.dumps([UID, "boot"]),
+                3,
+                1,
+                NOW - timedelta(seconds=300),
+            )
+            for n in range(count)
+        ]
+        self.confirmed = []
+
+    async def list_expired_page(self, *, before, limit, after):
+        start = 0 if after is None else after
+        page = self.tokens[start : start + limit]
+        nxt = start + limit
+        return tuple(page), (nxt if nxt < len(self.tokens) else None)
+
+
+@pytest.mark.asyncio
+async def test_an_ownership_nobody_waits_on_cannot_hide_a_later_one_that_is_waited_on():
+    # More expired ownerships than one page, and the only one with a waiting input is last.
+    ownership = PagedOwnership(5)
+    asked = []
+
+    async def has_demand(tok):
+        asked.append(tok.conversation_key)
+        return tok.conversation_key == "slack:T:C:4"
+
+    recovery = RecoveryLoop(
+        ownership,
+        Coordinator(),
+        object(),
+        Clock(),
+        batch_size=2,
+        has_demand=has_demand,
+        current_incarnation=None,
+    )
+    for _ in range(3):  # three pages: 0-1, 2-3, 4
+        await recovery.run_once()
+    assert "slack:T:C:4" in asked

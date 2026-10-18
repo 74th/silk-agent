@@ -532,6 +532,47 @@ async def test_monitor_reads_archived_output_with_a_combined_cursor():
     assert await monitor.command_output("archived-command", cursor=3, limit_bytes=2) == ("DE", 5)
 
 
+async def test_archived_output_with_an_empty_stdout_reads_stderr_from_the_start():
+    now = datetime(2026, 10, 14, tzinfo=UTC)
+    store = FakeSharedStore()
+    owner = OwnershipToken(
+        "conversation", "worker", "incarnation", 1, 1, now + timedelta(minutes=1)
+    )
+    store.owners["conversation"] = owner
+    store.ownership_phases["conversation"] = "active"
+    await store.create_intent(
+        command_id="stderr-only",
+        request_hash="hash",
+        conversation_key="conversation",
+        conversation_generation=1,
+        sandbox_generation=4,
+        origin_turn="turn-1",
+        origin_epoch=1,
+        origin_seq=1,
+        owner=owner,
+        created_at=now,
+    )
+    store.commands["stderr-only"].update(
+        state=CommandExecutionState.FINISHED,
+        result={
+            "exit_code": 1,
+            "output": {
+                "stdout": {"uri": "gs://test/stdout", "size_bytes": 0},
+                "stderr": {"uri": "gs://test/stderr", "size_bytes": 3},
+            },
+        },
+    )
+    monitor = CommandMonitor(
+        store,
+        StatusRuntime(),
+        MutableClock(now),
+        monitor_id="monitor",
+        output_reader=MemoryOutputReader({"gs://test/stdout": b"", "gs://test/stderr": b"err"}),
+    )
+    assert await monitor.command_output("stderr-only", cursor=0, limit_bytes=2) == ("er", 2)
+    assert await monitor.command_output("stderr-only", cursor=2, limit_bytes=2) == ("r", 3)
+
+
 async def test_monitor_does_not_finish_command_when_output_archive_fails():
     class FailingObjects:
         async def put(self, **_kwargs):

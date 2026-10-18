@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -110,6 +111,29 @@ async def test_sender_loop_drains_each_conversation_in_order_and_isolates_failur
     loop = OutboxSenderLoop(Outbox(), sender)
     assert await loop.run_once() == 4  # room-1 x3 + room-3 x1; room-2's error stays local
     assert sender.calls.count("room-1") == 4 and sender.calls.count("room-2") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_that_always_has_output_does_not_hold_back_the_next_page():
+    from silk_agent.distributed.control_runtime import OutboxSenderLoop
+
+    pages = {None: (("busy",), "p1"), "p1": (("calm",), None)}
+    sent = []
+
+    class Outbox:
+        async def list_pending_page(self, *, limit, after):
+            return pages[after]
+
+    class Sender:
+        async def run_once(self, key):
+            sent.append(key)
+            return key == "busy"  # never runs dry
+
+    loop = OutboxSenderLoop(Outbox(), Sender(), max_per_conversation=5)
+    await asyncio.wait_for(loop.run_once(), 1)  # returns although "busy" never empties
+    assert sent.count("busy") == 5 and loop.backlog
+    await asyncio.wait_for(loop.run_once(), 1)
+    assert "calm" in sent  # the next page was reached
 
 
 @pytest.mark.asyncio

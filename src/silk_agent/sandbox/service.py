@@ -51,6 +51,7 @@ MANAGER_KEY = web.AppKey("manager", object)
 AUTHORIZER_KEY = web.AppKey("conversation_authorizer", object)
 OWNER_PROVIDER_KEY = web.AppKey("owner_provider", object)
 OPERATION_STORE_KEY = web.AppKey("operation_store", object)
+ENV_PROVIDER_KEY = web.AppKey("env_provider", object)
 CLOCK_KEY = web.AppKey("clock", object)
 METRICS_KEY = web.AppKey("request_metrics", dict)
 MAX_FILE_BYTES = 8 * 1024 * 1024
@@ -79,6 +80,7 @@ def create_app(
     conversation_authorizer: ConversationAuthorizer | None = None,
     owner_provider: OwnerProvider | None = None,
     operation_store: ServiceOperationStore | None = None,
+    env_provider: Callable[[str], Awaitable[Mapping[str, str]]] | None = None,
     clock: Callable[[], datetime] = _utc_now,
 ) -> web.Application:
     """Build a service app; injected review/readiness callbacks keep tests isolated."""
@@ -159,6 +161,8 @@ def create_app(
         app[OWNER_PROVIDER_KEY] = owner_provider
     if operation_store is not None:
         app[OPERATION_STORE_KEY] = operation_store
+    if env_provider is not None:
+        app[ENV_PROVIDER_KEY] = env_provider
     app[CLOCK_KEY] = clock
     app.router.add_get("/healthz", _health)
     app.router.add_get("/readyz", _readiness)
@@ -213,8 +217,7 @@ async def _ensure_session(request: web.Request) -> web.Response:
     body = await _json_body(request)
     conversation_key = _required_string(body, "conversation_key")
     await _authorize_conversation(request, conversation_key)
-    key = _session_key(conversation_key)
-    handle = await _service_manager(request).ensure(key)
+    handle = await _ensure_handle(request, conversation_key)
     return web.json_response(_session_payload(handle))
 
 
@@ -269,7 +272,7 @@ async def _start_command(request: web.Request) -> web.Response:
     await _authorize_conversation(request, command.conversation_key)
     await _current_owner(request, command)  # fail fast before starting anything
 
-    handle = await _service_manager(request).ensure(_session_key(command.conversation_key))
+    handle = await _ensure_handle(request, command.conversation_key)
     if handle.generation < 1:
         raise ServiceError(409, "sandbox_unavailable", "Sandbox generation is unavailable")
     # A cold start can outlast a lease renewal; use the token that is current now.
@@ -589,7 +592,7 @@ async def _sync_skills(request: web.Request) -> web.Response:
 async def _owned_handle(request: web.Request, identity: Any) -> tuple[Any, OwnershipToken]:
     await _authorize_conversation(request, identity.conversation_key)
     await _current_owner(request, identity)  # fail fast before starting anything
-    handle = await _service_manager(request).ensure(_session_key(identity.conversation_key))
+    handle = await _ensure_handle(request, identity.conversation_key)
     # ensure() can take a minute on a cold start, during which the Worker renews its lease;
     # operate with the token that is current now, still for the same epoch and generation.
     owner = await _current_owner(request, identity)
@@ -730,6 +733,22 @@ def _session_payload(handle: Any) -> dict[str, Any]:
         "ready": handle.state.value == "ready",
         "sandbox_generation": record.generation,
     }
+
+
+async def _ensure_handle(request: web.Request, conversation_key: str) -> Any:
+    """ensure() the Sandbox with the environment of the conversation's owner.
+
+    `AGENT_USER_EMAIL` is the e-mail of the user who started the conversation (saved before
+    the first ensure and never changed), so every ensure, including a resume after somebody
+    else wrote in the thread, passes the same value.
+    """
+    provider = request.app.get(ENV_PROVIDER_KEY)
+    env: Mapping[str, str] = {}
+    if provider is not None:
+        env = await cast(Callable[[str], Awaitable[Mapping[str, str]]], provider)(conversation_key)
+    manager = _service_manager(request)
+    key = _session_key(conversation_key)
+    return await (manager.ensure(key, env=dict(env)) if env else manager.ensure(key))
 
 
 def _service_manager(request: web.Request) -> Any:
