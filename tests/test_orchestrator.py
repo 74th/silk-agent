@@ -449,3 +449,71 @@ def test_the_excluding_filter_is_named(clock):
     chain = default_chain(clock, deny_guests=True)
     decision = chain.check(UserMessage("k", "U1", "hi", sender=None))
     assert not decision.allowed and decision.reason == "SenderKindFilter"
+
+
+class GatedGuard:
+    """The guard answers a message only once its gate is opened (a slow Gemini call)."""
+
+    def __init__(self):
+        self.gates: dict[str, asyncio.Event] = {}
+
+    def gate(self, text):
+        return self.gates.setdefault(text, asyncio.Event())
+
+    async def check(self, text, history):
+        from silk_agent.core.ports import GuardVerdict
+
+        await self.gate(text).wait()
+        return GuardVerdict("allow")
+
+
+async def _settle():
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+
+async def test_a_slow_guard_does_not_let_a_later_input_overtake_it(clock, channel):
+    guard = GatedGuard()
+    orch, engines = make(clock, channel, lambda req: [Text(req.text)], guard=guard)
+    first = asyncio.create_task(orch.handle(msg("A")))
+    await _settle()
+    second = asyncio.create_task(orch.handle(msg("B")))
+    await _settle()
+    guard.gate("B").set()  # B is cleared first, A is still being checked
+    await _settle()
+    assert not engines  # B waits for A
+    guard.gate("A").set()
+    await asyncio.gather(first, second)
+    await channel.wait_for(TurnFinished)
+    # B joins A's turn (append mode) or follows it; it never starts the conversation.
+    assert engines["k"].requests[0].text == "A"
+    assert [r.text for r in engines["k"].requests[1:]] + engines["k"].appended == ["B"]
+
+
+async def test_a_stop_during_the_guard_voids_the_input_and_is_not_nothing_running(clock, channel):
+    guard = GatedGuard()
+    orch, engines = make(clock, channel, lambda req: [Text(req.text)], guard=guard)
+    first = asyncio.create_task(orch.handle(msg("A")))
+    await _settle()
+    await orch.handle(msg("停止"))
+    assert [n.text for n in channel.of(Notice)] != ["実行中の処理はありません。"]
+    guard.gate("A").set()
+    await first
+    assert not engines  # A never reached the session
+    # An input after the stop is processed normally.
+    guard.gate("C").set()
+    await orch.handle(msg("C"))
+    await channel.wait_for(TurnFinished)
+    assert [r.text for r in engines["k"].requests] == ["C"]
+
+
+async def test_a_reserved_arrival_that_is_never_handled_does_not_block_later_inputs(clock, channel):
+    orch, engines = make(clock, channel, lambda req: [Text(req.text)])
+    arrival = orch.reserve("k")  # e.g. the sender lookup failed
+    task = asyncio.create_task(orch.handle(msg("B", arrival=orch.reserve("k"))))
+    await _settle()
+    assert not engines
+    orch.release("k", arrival)
+    await task
+    await channel.wait_for(TurnFinished)
+    assert [r.text for r in engines["k"].requests] == ["B"]

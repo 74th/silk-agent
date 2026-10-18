@@ -286,6 +286,52 @@ async def test_completion_notification_is_held_after_interruption(clock, channel
     assert channel.of(Notice)[-1].text == "バックグラウンド処理が完了しました。結果は保留中です。"
 
 
+async def test_a_held_notice_reaches_the_next_turn_in_single_pod_mode(clock, channel):
+    env = Env(
+        clock,
+        channel,
+        lambda req: (
+            [Tool("bash", duration=300), Text("never")] if req.text == "work" else [Text("ok")]
+        ),
+    )
+    session = await env.send("k", "work")
+    await channel.wait_for(TurnStarted)
+    assert await session.stop()
+    assert await session.notify("make build: exit code 0") == "held"
+    await session.submit(UserMessage("k", "u", "どうなった？"))
+    await channel.wait_for(TurnFinished)
+    assert env.engines["k"].requests[-1].notices == ("make build: exit code 0",)
+    # Delivered once.
+    await session.submit(UserMessage("k", "u", "もう一度"))
+    await channel.wait_for(TurnFinished, count=2)
+    assert env.engines["k"].requests[-1].notices == ()
+
+
+async def test_a_durable_held_input_is_not_also_kept_in_memory(clock, channel):
+    env = Env(clock, channel, [Tool("bash", "sleep", duration=300), Text("never")])
+    session = await env.send("k", "work")
+    await channel.wait_for(TurnStarted)
+    assert await session.stop()
+    assert await session.notify("done", input_id="finished-1") == "held"
+    assert session._held_notices == []  # the inbox holds and releases it
+
+
+async def test_interrupt_mode_does_not_hold_notices_for_the_replacing_turn(clock, channel):
+    env = Env(
+        clock,
+        channel,
+        lambda req: [Tool("bash", duration=100), Text(req.text)],
+        interrupt_mode="interrupt",
+    )
+    s = await env.send("k", "T1")
+    await channel.wait_for(TurnStarted)
+    await s.submit(UserMessage("k", "u", "M"))  # interrupts T1, M runs next
+    await channel.wait_for(TurnInterrupted)
+    await channel.wait_for(TurnStarted, count=2)
+    assert await s.notify("command finished") == "appended"  # M is running: join it
+    assert env.engines["k"].appended == ["command finished"]
+
+
 async def test_append_falls_back_to_a_queued_turn_when_the_turn_cannot_take_it(clock, channel):
     env = Env(clock, channel, lambda req: [Tool("bash", duration=10), Text(req.text)])
     s = await env.send("k", "T1")

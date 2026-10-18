@@ -39,6 +39,9 @@ class UserMessage:
     # Stable inbox identity in distributed mode; empty for local/system messages.
     input_id: str = ""
     dispatch_attempt_id: str = ""
+    # Position in the conversation's arrival order, taken when the event reached the Bot
+    # (single Pod). None: the orchestrator takes it when it first sees the message.
+    arrival: int | None = None
 
 
 @dataclass(frozen=True)

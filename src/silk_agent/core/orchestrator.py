@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
@@ -127,6 +128,15 @@ class ConversationOrchestrator:
         self._guard_on_error = guard_on_error
         self._state_store = state_store
         self._owner_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # Arrival order of the inputs of one conversation (single Pod). Inputs are checked
+        # (guard, rate limit) concurrently but reach the session in this order, and a stop
+        # voids every input that arrived before it.
+        self._arrivals: dict[str, int] = defaultdict(int)
+        self._stop_arrival: dict[str, int] = defaultdict(int)
+        self._tickets: dict[str, dict[int, asyncio.Future[None]]] = defaultdict(dict)
+        self._arrival_var: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+            "silk_agent_arrival", default=None
+        )
         self._history: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=HISTORY_FOR_GUARD))
         self._guard_history_loader = guard_history_loader
         self._guard_history_recorder = guard_history_recorder
@@ -158,11 +168,42 @@ class ConversationOrchestrator:
         elif isinstance(event, ResumeRequest):
             await self._handle_message(UserMessage(event.conversation_key, event.user, RESUME_TEXT))
 
+    def reserve(self, conversation_key: str) -> int:
+        """Take the next place in the conversation's arrival order (call it when the event
+        arrives, before any await) and pass it as `UserMessage.arrival`. Every reservation
+        must end in `release` (or by handling the message)."""
+        self._arrivals[conversation_key] += 1
+        arrival = self._arrivals[conversation_key]
+        self._tickets[conversation_key][arrival] = asyncio.get_running_loop().create_future()
+        return arrival
+
+    def release(self, conversation_key: str, arrival: int) -> None:
+        tickets = self._tickets.get(conversation_key)
+        future = tickets.pop(arrival, None) if tickets is not None else None
+        if future is not None and not future.done():
+            future.set_result(None)
+        if tickets is not None and not tickets:
+            self._tickets.pop(conversation_key, None)
+
     async def _handle_message(self, message: UserMessage) -> None:
-        if not await self.prepare_message(message):
-            return
-        session = await self._registry.get_or_create(message.conversation_key)
-        await session.submit(message)
+        key = message.conversation_key
+        arrival = message.arrival if message.arrival is not None else self.reserve(key)
+        token = self._arrival_var.set(arrival)
+        try:
+            if not await self.prepare_message(message):
+                return
+            # Earlier inputs still being checked go first.
+            earlier = [f for a, f in self._tickets.get(key, {}).items() if a < arrival]
+            if earlier:
+                await asyncio.gather(*earlier, return_exceptions=True)
+            if arrival <= self._stop_arrival[key]:
+                log.info("input dropped: a stop arrived after it (%s)", key)
+                return
+            session = await self._registry.get_or_create(key)
+            await session.submit(message)
+        finally:
+            self._arrival_var.reset(token)
+            self.release(key, arrival)
 
     async def prepare_message(self, message: UserMessage) -> bool:
         """Apply normal input checks and durable management updates without submitting.
@@ -251,6 +292,11 @@ class ConversationOrchestrator:
 
     async def _handle_stop(self, request: StopRequest) -> None:
         key = request.conversation_key
+        # Everything that arrived so far is before this stop; inputs still being checked are
+        # dropped when they finish, and count as something this stop stopped.
+        own = self._arrival_var.get()
+        self._stop_arrival[key] = self._arrivals[key]
+        voided = any(a != own for a in self._tickets.get(key, {}))
 
         # Background commands first: they are stopped on request and send no completion.
         async def cancel_background() -> int | CommandCancelReport:
@@ -267,7 +313,7 @@ class ConversationOrchestrator:
         stop_task = asyncio.create_task(session.stop()) if session is not None else None
         background = await background_task
         stopped = await stop_task if stop_task is not None else False
-        await self.report_stop(key, background, stopped)
+        await self.report_stop(key, background, stopped or voided)
 
     async def report_stop(
         self, key: str, background: int | CommandCancelReport, stopped: bool
