@@ -109,11 +109,23 @@ def test_script_emits_success_json_for_data_and_empty_results(
         }
 
 
+def _forbidden_with_reason(reason: str) -> Exception:
+    error = type("Forbidden", (Exception,), {})("403")
+    error.errors = [{"reason": reason, "message": "Quota exceeded: Your usage exceeded..."}]  # type: ignore[attr-defined]
+    return error
+
+
 @pytest.mark.parametrize(
     ("error", "message"),
     [
         (type("PermissionDenied", (Exception,), {})("denied"), "permission failure"),
         (type("ServiceUnavailable", (Exception,), {})("offline"), "communication failure"),
+        # The daily query quota: 403 Forbidden, but a quota problem and not a permission one.
+        (
+            _forbidden_with_reason("quotaExceeded"),
+            "quota failure",
+        ),
+        (_forbidden_with_reason("accessDenied"), "permission failure"),
     ],
 )
 def test_script_reports_api_failures_without_returning_result(

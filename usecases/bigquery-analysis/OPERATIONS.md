@@ -156,3 +156,14 @@ terraform -chdir=usecases/bigquery-analysis/terraform destroy -var-file=terrafor
 ## コマンド出力の保存先
 
 このユースケースのコマンド出力は、専用のバケット `nnyn-dev-bigquery-analysis-command-output`（リポジトリ直下の Terraform の `usecases.bigquery-analysis.command_output_bucket`）に保存する。設定ファイル `k8s/distributed/steady/config/silk-agent-distributed.yaml` の `distributed.command_output_bucket` と同じ値にする。他のユースケースのバケットには権限がない。2026-10-19 より前のコマンド出力は `silk-agent` のバケットにあり、このユースケースの Worker からは読めない（移行していない）。
+
+## クエリ量の上限と依頼できる人
+
+エージェントは Sandbox から任意の SQL を BigQuery に実行できるので、費用の上限をサーバ側で強制する。
+
+- **日次のクエリ量の上限**: ユースケースの Terraform の `daily_query_limit_gib`（既定 100 GiB）を、BigQuery のカスタムクォータ `QueryUsagePerDay`（プロジェクト単位）と `QueryUsagePerUserPerDay`（ユーザ単位。このユースケースでは GSA）に設定する。変えるときは `terraform.tfvars` の値を直して `terraform apply` する。反映は数分かかる。実効値は、`https://serviceusage.googleapis.com/v1beta1/projects/<project>/services/bigquery.googleapis.com/consumerQuotaMetrics` の `bigquery.googleapis.com/quota/query/usage`（単位は MiB。100 GiB = 102400）で確認できる。
+- **超過したとき**: BigQuery がクォータの超過（403、reason `quotaExceeded`）でクエリを拒否する。Skill のスクリプトは `quota failure` として報告し、エージェントは「1日の上限に達した」と伝える（検索語や結果は作らない）。2026-10-19 に、上限を一時的に 1 GiB にして、12 GB を処理するクエリが `QueryUsagePerDay` の超過で拒否されることを実機で確認した。
+- **プロジェクト単位のクォータ**: 同じプロジェクトの他の BigQuery の利用にも効く。他の用途と同居させるなら、プロジェクトを分ける。
+- **トークンの持ち出し**: Sandbox はメタデータサーバから GSA のトークンを取得できる（Workload Identity に必要）。GSA の権限は `roles/bigquery.jobUser` だけで、データセットの読み取り権限はなく、持ち出されても上のクォータの範囲を超えて使えない。
+- **依頼できる人**: `k8s/distributed/steady/config/silk-agent-distributed.yaml` の `filter.allowed_users`（Slack のユーザ ID の配列）に、依頼を許す人を書く。空のときは制限しない（現状は空）。ユーザ ID は Slack のプロフィールの「メンバー ID をコピー」で調べる。
+
