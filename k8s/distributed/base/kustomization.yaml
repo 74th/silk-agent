@@ -1,0 +1,13 @@
+# The four roles (Gateway / Worker / Control / Sandbox Service) without any environment or use
+# case value: no namespace, image digest, project, Firestore prefix or bucket. A use case
+# (usecases/<name>/k8s/distributed) or an environment (overlays/dev) adds the platform
+# component, its two Namespaces, its configuration and the image.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - sandbox-service.yaml
+  - roles.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: silk-agent-distributed
+    includeSelectors: false

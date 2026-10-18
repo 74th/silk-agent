@@ -1,18 +1,10 @@
+# The ClusterRole `silk-agent-sandbox-service-token-review` is shared by every use case and is
+# applied once with the platform (k8s/platform/base.yaml): deleting one use case must not remove it.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: silk-agent-sandbox-service
-  namespace: session-sandbox-system
 automountServiceAccountToken: true
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: silk-agent-sandbox-service-token-review
-rules:
-  - apiGroups: [authentication.k8s.io]
-    resources: [tokenreviews]
-    verbs: [create]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -25,53 +17,11 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: silk-agent-sandbox-service
-    namespace: session-sandbox-system
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: silk-agent-sandbox-service-management
-  namespace: session-sandboxes
-subjects:
-  - kind: ServiceAccount
-    name: silk-agent-sandbox-service
-    namespace: session-sandbox-system
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: sandbox-management
----
-# Network diagnostics (`silk-agent sandbox-network verify`) run through the Kubernetes exec API
-# so they bypass the in-Pod command tracker. Only this ServiceAccount gets pods/exec.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: sandbox-diagnostics
-  namespace: session-sandboxes
-rules:
-  - apiGroups: [""]
-    resources: ["pods/exec"]
-    verbs: ["get", "create"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: silk-agent-sandbox-service-diagnostics
-  namespace: session-sandboxes
-subjects:
-  - kind: ServiceAccount
-    name: silk-agent-sandbox-service
-    namespace: session-sandbox-system
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: sandbox-diagnostics
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: silk-agent-sandbox-service
-  namespace: session-sandbox-system
 spec:
   podSelector:
     matchLabels:
@@ -89,7 +39,8 @@ spec:
     - to:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: session-sandboxes
+              # Replaced by the platform component with the use case's Sandbox namespace.
+              kubernetes.io/metadata.name: SANDBOX_NAMESPACE
           podSelector:
             matchLabels:
               session-sandbox.example.com/managed: "true"
@@ -119,7 +70,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: silk-agent-sandbox-service
-  namespace: session-sandbox-system
 spec:
   selector:
     app.kubernetes.io/name: silk-agent-sandbox-service
@@ -132,7 +82,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: silk-agent-sandbox-service
-  namespace: session-sandbox-system
 spec:
   replicas: 1
   strategy:
@@ -165,6 +114,11 @@ spec:
               value: INFO
             - name: SILK_AGENT_CONFIG
               value: /config/silk-agent-distributed.yaml
+            # The role compares this with the namespaces named in its config (namespace_check).
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             - name: SILK_AGENT_SANDBOX_FINGERPRINT_KEY
               valueFrom:
                 secretKeyRef:

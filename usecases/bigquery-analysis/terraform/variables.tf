@@ -18,7 +18,7 @@ variable "gsa_account_id" {
 variable "ksa_namespace" {
   description = "Namespace containing the BigQuery sandbox Kubernetes service account."
   type        = string
-  default     = "session-sandboxes"
+  default     = "bigquery-analysis-sandboxes"
 }
 
 variable "ksa_name" {

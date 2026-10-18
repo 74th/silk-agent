@@ -1,0 +1,68 @@
+# Resources in the Sandbox namespace (placeholders are replaced by ./kustomization.yaml).
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    silk-agent.dev/in-sandbox-namespace: "true"
+  name: sandbox-management
+  namespace: SANDBOX_NAMESPACE
+rules:
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "persistentvolumeclaims", "services"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["networking.gke.io"]
+    resources: ["fqdnnetworkpolicies"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    silk-agent.dev/in-sandbox-namespace: "true"
+  name: silk-agent-sandbox-service-management
+  namespace: SANDBOX_NAMESPACE
+subjects:
+  - kind: ServiceAccount
+    name: silk-agent-sandbox-service
+    namespace: SYSTEM_NAMESPACE
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-management
+---
+# Network diagnostics (`silk-agent sandbox-network verify`) run through the Kubernetes exec API
+# so they bypass the in-Pod command tracker. Only this ServiceAccount gets pods/exec.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    silk-agent.dev/in-sandbox-namespace: "true"
+  name: sandbox-diagnostics
+  namespace: SANDBOX_NAMESPACE
+rules:
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    silk-agent.dev/in-sandbox-namespace: "true"
+  name: silk-agent-sandbox-service-diagnostics
+  namespace: SANDBOX_NAMESPACE
+subjects:
+  - kind: ServiceAccount
+    name: silk-agent-sandbox-service
+    namespace: SYSTEM_NAMESPACE
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-diagnostics

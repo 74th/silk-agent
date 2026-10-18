@@ -1,4 +1,10 @@
-"""Explicit GKE acceptance without Slack: real Firestore, API and gVisor commands."""
+"""Explicit GKE acceptance without Slack: real Firestore, API and gVisor commands.
+
+The test creates its own conversation and Worker record under the `silk-agent` prefix, so a
+running Control would allocate that conversation to a real Worker first. Run it with the dev
+Control scaled to zero (`kubectl -n session-sandbox-system scale deploy/silk-agent-control
+--replicas=0`) and scale it back to 1 afterwards.
+"""
 
 import asyncio
 import base64
@@ -81,7 +87,9 @@ async def test_real_commands_files_dedup_cancel_and_owner_fencing_without_slack(
             input_id=f"validation-input-{run_id}",
             conversation_generation=1,
             kind="message",
-            payload={"text": "validation", "user": "test"},
+            # No "user": a sender would be looked up by the running Gateway, which gives up on this
+            # made-up user and moves the input to "blocked", ending the ownership test early.
+            payload={"text": "validation"},
             created_at=clock.now(),
         )
         token = await owners.acquire(
@@ -257,7 +265,7 @@ async def test_real_commands_files_dedup_cancel_and_owner_fencing_without_slack(
                 manager_config = yaml.safe_load(
                     await asyncio.to_thread(
                         Path(
-                            "k8s/distributed/sandbox-service/config/sandbox-service-config.yaml"
+                            "k8s/distributed/overlays/dev/config/sandbox-service-config.yaml"
                         ).read_text
                     )
                 )

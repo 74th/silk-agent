@@ -1,0 +1,47 @@
+# Distributed deployment of this use case (Gateway / Worker / Control / Sandbox Service).
+# Replace every `your-...` value (docs/usecase-guide.md, "分散構成"). Steady state: Gateway 1 /
+# Worker 2 / Control 1. The first build uses ../bootstrap (zero replicas).
+#
+# Outside the silk-agent repository, reference the base and component by tag instead of the
+# relative paths:
+#   github.com/<org>/silk-agent//k8s/distributed/base?ref=v0.1.0
+#   github.com/<org>/silk-agent//k8s/distributed/platform?ref=v0.1.0
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../../k8s/distributed/base
+components:
+  - ../../../../../k8s/distributed/platform
+configMapGenerator:
+  # The two namespaces: the only place they are chosen here (read by the platform component, not
+  # rendered). Keep them equal to terraform `usecases[...]` and to the config files below.
+  - name: silk-agent-namespaces
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        config.kubernetes.io/local-config: "true"
+    literals:
+      - system=your-usecase-system
+      - sandbox=your-usecase-sandboxes
+  - name: silk-agent-sandbox-service-config
+    options:
+      # Selects the ConfigMap for the platform component's namespace replacement.
+      labels:
+        app.kubernetes.io/part-of: silk-agent-distributed
+    files:
+      - silk-agent-distributed.yaml=config/silk-agent-distributed.yaml
+      - sandbox-config.yaml=config/sandbox-service-config.yaml
+      - mcp.json=config/mcp.json
+patches:
+  # The ClusterRoleBinding is cluster-scoped: give it this use case's name.
+  - target:
+      kind: ClusterRoleBinding
+      name: silk-agent-sandbox-service-token-review
+    patch: |-
+      - op: replace
+        path: /metadata/name
+        value: silk-agent-sandbox-service-token-review-your-usecase
+images:
+  - name: silk-agent
+    newName: us-central1-docker.pkg.dev/your-gcp-project/your-repository/usecase-bot
+    newTag: 0.1.0

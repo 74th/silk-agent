@@ -1,31 +1,14 @@
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: session-sandbox-system
----
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: session-sandboxes
----
+# Cluster-wide, environment-independent platform resources. The namespaces and the
+# `sandbox-management` Role are per environment / use case: k8s/distributed/platform. The
+# ClusterRole is shared by all use cases (each has its own ClusterRoleBinding).
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
-  name: sandbox-management
-  namespace: session-sandboxes
+  name: silk-agent-sandbox-service-token-review
 rules:
-  - apiGroups: ["agents.x-k8s.io"]
-    resources: ["sandboxes"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  - apiGroups: [""]
-    resources: ["pods", "persistentvolumeclaims", "services"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["networkpolicies"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
-  - apiGroups: ["networking.gke.io"]
-    resources: ["fqdnnetworkpolicies"]
-    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass

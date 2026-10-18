@@ -1,0 +1,13 @@
+# The dev environment's two namespaces. The platform component reads this ConfigMap, which is
+# local-only (it is not part of the rendered output).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+generatorOptions:
+  disableNameSuffixHash: true
+  annotations:
+    config.kubernetes.io/local-config: "true"
+configMapGenerator:
+  - name: silk-agent-namespaces
+    literals:
+      - system=session-sandbox-system
+      - sandbox=session-sandboxes

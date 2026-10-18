@@ -1,0 +1,8 @@
+# Only the dev namespaces and the Sandbox-namespace Role / RoleBindings (what k8s/platform/base.yaml
+# used to hold). The single-process Bot (k8s/base) needs these too.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../dev-namespaces
+components:
+  - ../../platform

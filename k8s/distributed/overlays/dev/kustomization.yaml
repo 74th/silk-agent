@@ -1,0 +1,24 @@
+# The dev environment (nnyn-dev): the namespaces, names, Firestore prefix and image that were
+# fixed in k8s/distributed before it was split into base/ and overlays/. Steady state:
+# Gateway 1 / Worker 2 / Control 1.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - ../dev-namespaces
+components:
+  - ../../platform
+configMapGenerator:
+  - name: silk-agent-sandbox-service-config
+    options:
+      # Selects the ConfigMap for the platform component's namespace replacement.
+      labels:
+        app.kubernetes.io/part-of: silk-agent-distributed
+    files:
+      - silk-agent-distributed.yaml=config/silk-agent-distributed.yaml
+      - sandbox-config.yaml=config/sandbox-service-config.yaml
+      - mcp.json=config/mcp.json
+images:
+  - name: silk-agent
+    newName: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent
+    digest: sha256:00675bf4516fbb3a7b289d3750265fdadeac4c821707aa2320afa9e59ff8c855

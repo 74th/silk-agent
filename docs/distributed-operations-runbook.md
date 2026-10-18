@@ -21,14 +21,14 @@ Gateway / Worker / Control / Sandbox Service からなる分散構成の構築�
 ## 1. 構築
 
 1. Terraform で Firestore・index・IAM・KSA 用 principal を作る。`terraform -chdir=terraform plan -var-file=terraform.tfvars` の差分に replace / delete が無いことを確認してから apply する。役割別の GKE principal は `silk-agent-gateway` / `silk-agent-worker` / `silk-agent-control` / `silk-agent-sandbox-service`。
-2. イメージを作って push する: `k8s/build-image.sh`（出力される digest を `k8s/distributed/kustomization.yaml` の `images[].digest` に入れる）。**digest は役割追加前のイメージのままだと Worker/Control/Gateway が起動しない。**
+2. イメージを作って push する: `k8s/build-image.sh`（出力される digest を `k8s/distributed/overlays/dev/kustomization.yaml` の `images[].digest`（ユースケースは `usecases/<name>/k8s/distributed/kustomization.yaml`） に入れる）。**digest は役割追加前のイメージのままだと Worker/Control/Gateway が起動しない。**
 3. Slack Secret `silk-agent-slack` を作る（`k8s/deploy.sh` が `.env` から作る）。Gateway は両方、Control は `SLACK_BOT_TOKEN` だけを参照する。Worker には Secret を渡さない。
-4. `kubectl kustomize k8s/distributed-bootstrap` を確認し、`kubectl apply -k k8s/distributed-bootstrap` で適用する。bootstrap は `k8s/distributed` と同じ resource で、Gateway / Worker / Control の replicas を `0` にしたもの。この時点では Slack に接続せず、SDK も起動しない。**`k8s/distributed` を直接 apply すると、Gateway が Slack に接続し Worker が起動する**（定常状態の構成: Gateway 1 / Worker 2 / Control 1）ので、移行（§2）の前には使わない。
+4. `kubectl kustomize k8s/distributed/overlays/dev-bootstrap` を確認し、`kubectl apply -k k8s/distributed/overlays/dev-bootstrap` で適用する。bootstrap は `k8s/distributed/overlays/dev` と同じ resource で、Gateway / Worker / Control の replicas を `0` にしたもの。この時点では Slack に接続せず、SDK も起動しない。**`k8s/distributed/overlays/dev` を直接 apply すると、Gateway が Slack に接続し Worker が起動する**（定常状態の構成: Gateway 1 / Worker 2 / Control 1）ので、移行（§2）の前には使わない。
 5. Sandbox Service の `rollout status` を確認する: `kubectl -n session-sandbox-system rollout status deployment/silk-agent-sandbox-service`。
 
 ## 2. 起動順序（切替）
 
-旧系の停止とデータ移行は [移行手順](distributed-migration-runbook.md)。完了後に、次の順で replicas を 1 にする（このあいだは bootstrap を apply し続ける。bootstrap を再適用すると replicas が 0 に戻るため）。切替が完了したら `kubectl apply -k k8s/distributed` で定常状態の宣言（Gateway 1 / Worker 2 / Control 1）に切り替える。
+旧系の停止とデータ移行は [移行手順](distributed-migration-runbook.md)。完了後に、次の順で replicas を 1 にする（このあいだは bootstrap を apply し続ける。bootstrap を再適用すると replicas が 0 に戻るため）。切替が完了したら `kubectl apply -k k8s/distributed/overlays/dev` で定常状態の宣言（Gateway 1 / Worker 2 / Control 1）に切り替える。
 
 ```sh
 kubectl -n session-sandbox-system scale deployment/silk-agent-control --replicas=1
@@ -276,3 +276,24 @@ dev の Agent Platform（`reasoningEngines/868017700884971520`）に試験用セ
 | `delete` | `config` に `wait_for_completion` を渡すと検証エラーになる。`delete(name=)` だけで削除できる |
 
 この change では `update_mask="ttl"` を使い、`ttl` は `{ttl_seconds}s` で渡す。
+
+## 12. 複数ユースケースの分離の確認（`support-distributed-usecases` 6.4、2026-10-18）
+
+dev（`session-sandbox-system`）と bigquery-analysis（`bigquery-analysis-system`）を同じクラスタに置いた状態で確認した。
+
+| 確認 | 結果 |
+|---|---|
+| bigquery-analysis の Worker から dev の Sandbox Service（`silk-agent-sandbox-service.session-sandbox-system.svc:8080/healthz`）へ接続 | タイムアウトで拒否（NetworkPolicy。Worker の egress は自分の namespace の Sandbox Service だけ） |
+| 同じ Worker から自分の Sandbox Service（`...bigquery-analysis-system.svc:8080/healthz`） | 200 |
+| `bigquery-analysis-system` に dev の設定（`overlays/dev/config`）で `silk-agent worker run` の Pod を作る | 起動せず終了コード 1。`ConfigError: configuration does not match the deployment: distributed.sandbox_service_url: expected namespace 'bigquery-analysis-system', got 'session-sandbox-system'` |
+| `silk-agent worker status-all`（bigquery-analysis の Worker から） | bigquery-analysis の Worker 2 台だけが出る（接頭辞が違うので dev の Worker は見えない） |
+
+確認用の Pod と ConfigMap は削除した。照合のコードは dev の現行イメージ（`sha256:00675bf4...`）には入っていないので、dev の Pod は照合を行わない。dev のイメージを更新したときに有効になる。
+
+### 12.1 bigquery-analysis の実会話（`support-distributed-usecases` 6.3、2026-10-18）
+
+dev と同じ Slack アプリ（試験用に同じトークン）に「日本の直近2日の急上昇検索語を…」と依頼した。bigquery-analysis 側で処理され、`google-trends` Skill と `bash`（`query.sh`）が成功して Slack に返信された（所要 53 秒）。
+
+- 会話は `bigquery-analysis_conversations` に 1 件記録され、同じ会話 ID は dev の `silk-agent_conversations` にない。
+- Sandbox は `bigquery-analysis-sandboxes` に作られた（`session-4d6cf1e092-g1`）。dev の `session-sandboxes` に新しい Sandbox はない。
+- Sandbox の管理情報は `bigquery-analysis_sandbox_operations` に入った。

@@ -1,8 +1,10 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  labels:
+    # Selects the resource for the platform component's namespace replacement.
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: echo-mcp
-  namespace: session-sandbox-system
 spec:
   replicas: 1
   selector:
@@ -57,8 +59,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  labels:
+    # Selects the resource for the platform component's namespace replacement.
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: echo-mcp
-  namespace: session-sandbox-system
 spec:
   type: ClusterIP
   selector:
@@ -71,8 +75,10 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  labels:
+    # Selects the resource for the platform component's namespace replacement.
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: echo-mcp-ingress
-  namespace: session-sandbox-system
 spec:
   podSelector:
     matchLabels:
@@ -82,7 +88,29 @@ spec:
     - from:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: silk-agent
+              app.kubernetes.io/name: silk-agent-worker
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+# The Worker's own NetworkPolicy allows no traffic to this namespace's other Pods; add echo-mcp.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    # Selects the resource for the platform component's namespace replacement.
+    app.kubernetes.io/part-of: silk-agent-distributed
+  name: echo-mcp-egress-from-worker
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: silk-agent-worker
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: echo-mcp
       ports:
         - protocol: TCP
           port: 8000

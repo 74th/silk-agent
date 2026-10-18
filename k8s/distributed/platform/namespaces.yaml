@@ -1,0 +1,10 @@
+# Names are placeholders; the replacements in kustomization.yaml set them.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: SYSTEM_NAMESPACE
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: SANDBOX_NAMESPACE

@@ -133,3 +133,94 @@ def test_kustomizations_render(path):
     assert result.returncode == 0, result.stderr
     assert "kind: Deployment" in result.stdout
     assert ("kind: ConfigMap" in result.stdout) == (path != "k8s/base")
+
+
+needs_kubectl = pytest.mark.skipif(shutil.which("kubectl") is None, reason="kubectl is required")
+
+
+def _render_distributed_template(tmp_path: Path, values: dict[str, str]) -> tuple[list[dict], Path]:
+    """Copy the template's distributed overlay next to the shared base, replace the `your-...`
+    values, and render it with kustomize."""
+    import yaml
+
+    shutil.copytree(ROOT / "k8s/distributed/base", tmp_path / "k8s/distributed/base")
+    shutil.copytree(ROOT / "k8s/distributed/platform", tmp_path / "k8s/distributed/platform")
+    target = tmp_path / "usecases/demo/k8s/distributed"
+    shutil.copytree(TEMPLATE / "k8s/distributed", target)
+    steady = target / "steady"
+    for path in target.rglob("*"):
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            for old, new in values.items():
+                text = text.replace(old, new)
+            path.write_text(text, encoding="utf-8")
+    out = subprocess.run(
+        ["kubectl", "kustomize", str(steady)], check=True, capture_output=True, text=True
+    ).stdout
+    return [item for item in yaml.safe_load_all(out) if item], target
+
+
+DISTRIBUTED_VALUES = {
+    "your-usecase": "demo",
+    "your-gcp-project": "proj",
+    "your-repository": "repo",
+    "your-command-output-bucket": "bucket",
+    "your-template": "armor",
+}
+
+
+@needs_kubectl
+def test_distributed_template_renders_in_the_chosen_namespaces(tmp_path):
+    rendered, _ = _render_distributed_template(tmp_path, DISTRIBUTED_VALUES)
+    namespaced = [i for i in rendered if i["kind"] not in ("Namespace", "ClusterRole")]
+    spaces = {
+        i["metadata"].get("namespace") for i in namespaced if i["kind"] != "ClusterRoleBinding"
+    }
+    assert spaces == {"demo-system", "demo-sandboxes"}
+    assert {i["metadata"]["name"] for i in rendered if i["kind"] == "Namespace"} == spaces
+    binding = next(i for i in rendered if i["kind"] == "ClusterRoleBinding")
+    assert binding["metadata"]["name"] == "silk-agent-sandbox-service-token-review-demo"
+    assert binding["subjects"][0]["namespace"] == "demo-system"
+    # Nothing of the silk-agent development environment is left.
+    text = str(rendered)
+    assert "session-sandbox-system" not in text and "session-sandboxes" not in text
+    assert "nnyn-dev" not in text
+
+
+@needs_kubectl
+def test_distributed_template_config_loads_and_passes_the_namespace_check(tmp_path, monkeypatch):
+    import yaml
+
+    _, target = _render_distributed_template(tmp_path, DISTRIBUTED_VALUES)
+    config_file = target / "steady/config/silk-agent-distributed.yaml"
+    data = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    sandbox_file = target / "steady/config/sandbox-service-config.yaml"
+    data["sandbox"]["config_file"] = str(sandbox_file)
+    data["mcp"]["config_file"] = str(target / "steady/config/mcp.json")
+    config_file.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    cfg = load_config(config_file)  # runs validate_required
+    assert cfg.distributed.firestore_prefix == "demo"
+    assert "repository_database_path" not in sandbox_file.read_text(encoding="utf-8")
+    for role in ("gateway", "worker", "control", "sandbox-service"):
+        cfg.validate_namespace(role, {"POD_NAMESPACE": "demo-system"})
+
+
+@needs_kubectl
+def test_distributed_template_bootstrap_has_no_running_role(tmp_path):
+    import yaml
+
+    _, target = _render_distributed_template(tmp_path, DISTRIBUTED_VALUES)
+    out = subprocess.run(
+        ["kubectl", "kustomize", str(target / "bootstrap")],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    replicas = {
+        i["metadata"]["name"]: i["spec"]["replicas"]
+        for i in yaml.safe_load_all(out)
+        if i and i["kind"] == "Deployment"
+    }
+    assert replicas["silk-agent-gateway"] == replicas["silk-agent-worker"] == 0
+    assert replicas["silk-agent-control"] == 0

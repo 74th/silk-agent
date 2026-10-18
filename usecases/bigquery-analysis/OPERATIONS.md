@@ -3,7 +3,7 @@
 ## 前提と課金確認
 
 - GKE クラスタでは Workload Identity と GKE Dataplane V2 / FQDN Network Policy が有効であること。
-- `session-sandboxes` と `session-sandbox-system` namespace、Sandbox CRD、`gvisor` RuntimeClass が用意されていること。
+- Sandbox CRD、`gvisor` RuntimeClass が用意されていること。namespace（`bigquery-analysis-system` / `bigquery-analysis-sandboxes`）は `deploy.sh` が作る。
 - BigQuery ジョブを実行する Google Cloud project を決め、請求先とクエリ料金を確認すること。公開データの保存料はかからないが、クエリのスキャン量に応じてジョブ実行 project に課金される。`LIMIT 10` はスキャン量を制限しない。
 - Sandbox の成功条件は特定の検索語ではなく、`refresh_date`、`rank`、`term` の列、最大10行、日付降順・順位昇順、または0行であること。
 
@@ -28,23 +28,44 @@ terraform -chdir=usecases/bigquery-analysis/terraform apply -var-file=terraform.
 terraform -chdir=usecases/bigquery-analysis/terraform output -raw gsa_email
 ```
 
+## ユースケースの一覧に追加する（Terraform）
+
+bigquery-analysis は分散構成（Gateway / Worker / Control / Sandbox Service）で動かす。`terraform/`（リポジトリ直下）の `usecases` に次の1件を追加して apply し、役割の Workload Identity の権限、Slack の Secret、Firestore の索引と TTL を作る（既存のユースケースの資源は変わらない）。
+
+```hcl
+usecases = {
+  # ...既存の silk-agent...
+  "bigquery-analysis" = {
+    system_namespace  = "bigquery-analysis-system"
+    sandbox_namespace = "bigquery-analysis-sandboxes"
+    firestore_prefix  = "bigquery-analysis"
+    slack_secret_ids = {
+      bot_token = "bigquery-analysis-slack-bot-token"
+      app_token = "bigquery-analysis-slack-app-token"
+    }
+  }
+}
+```
+
+`terraform -chdir=terraform plan` で作成だけが出る（既存の資源に変更・削除が出ない）ことを確認してから apply する。Slack の Secret の値は bigquery-analysis 用の Slack アプリのトークンを `gcloud secrets versions add` で登録する。
+
 ## KSA を先に適用する
 
-Terraform の `ksa_namespace` / `ksa_name` は `config/sandbox-config.yaml` の `namespace` / `template_overrides.spec.podTemplate.spec.serviceAccountName` と `k8s/bigquery-ksa.yaml` の namespace / name に一致させる。値を変更した場合は3箇所を揃える。
+Terraform の `ksa_namespace` / `ksa_name` は `k8s/distributed/steady/config/sandbox-service-config.yaml` の `namespace` / `template_overrides.spec.podTemplate.spec.serviceAccountName` と `k8s/distributed/steady/bigquery-ksa.yaml` の namespace / name に一致させる（`bigquery-analysis-sandboxes` / `bigquery-analysis`）。値を変更した場合は3箇所を揃える。KSA の namespace は `deploy.sh` が作るので、先に bootstrap で namespace を作ってから適用する（次の節の1回目）。
 
 ```bash
 GSA_EMAIL="$(terraform -chdir=usecases/bigquery-analysis/terraform output -raw gsa_email)"
 export GSA_EMAIL
-envsubst < usecases/bigquery-analysis/k8s/bigquery-ksa.yaml | kubectl apply -f -
-kubectl get serviceaccount bigquery-analysis -n session-sandboxes \
+envsubst < usecases/bigquery-analysis/k8s/distributed/steady/bigquery-ksa.yaml | kubectl apply -f -
+kubectl get serviceaccount bigquery-analysis -n bigquery-analysis-sandboxes \
   -o jsonpath='{.metadata.annotations.iam\.gke\.io/gcp-service-account}{"\n"}'
 ```
 
-出力が Terraform の `gsa_email` と同じであることを確認する。Bot を起動する前に KSA を適用する。Terraform の Workload Identity member は `serviceAccount:<project-id>.svc.id.goog[session-sandboxes/bigquery-analysis]` のみを許可する。
+出力が Terraform の `gsa_email` と同じであることを確認する。Sandbox を作る前に KSA を適用する。Terraform の Workload Identity member は `serviceAccount:<project-id>.svc.id.goog[bigquery-analysis-sandboxes/bigquery-analysis]` のみを許可する。
 
 ## イメージ、Secret、Kubernetes リソース
 
-`config/silk-agent.yaml`、`config/sandbox-config.yaml`、`k8s/kustomization.yaml` の `your-*` を実環境に合わせ、Bot と Sandbox のイメージを digest で固定する。Echo イメージも同じ Artifact Registry repository に push する。
+`k8s/distributed/steady/config/silk-agent-distributed.yaml`、`k8s/distributed/steady/config/sandbox-service-config.yaml`、`k8s/distributed/steady/kustomization.yaml` の `your-*` と環境の値を実環境に合わせ、Bot と Sandbox のイメージを digest で固定する。Echo イメージも同じ Artifact Registry repository に push する。
 
 ```bash
 cd usecases/bigquery-analysis
@@ -53,31 +74,37 @@ USECASE_NAME=bigquery-analysis IMAGE_REPOSITORY=REGION-docker.pkg.dev/PROJECT/RE
   SESSION_RUNTIME_IMAGE=SANDBOX_BASE@sha256:DIGEST ./build.sh
 ```
 
-`build.sh` は Bot、Sandbox、Echo MCP の3イメージをビルドして push する。出力された Sandbox image digest を `config/sandbox-config.yaml` の `runtime.image` に、Bot と Echo のイメージ名・tag を `k8s/kustomization.yaml` に設定する。
+`build.sh` は Bot、Sandbox、Echo MCP の3イメージをビルドして push する。出力された Sandbox image digest を `k8s/distributed/steady/config/sandbox-service-config.yaml` の `runtime.image` に、Bot と Echo のイメージ名・digest を `k8s/distributed/steady/kustomization.yaml` に設定する。
 
-Echo の鍵を安全な乱数で生成し、値をファイルやリポジトリへ保存せずに Secret を作成する。Bot と Echo サーバは同じ Secret の同じキーを参照する。
+Echo の鍵を安全な乱数で生成し、値をファイルやリポジトリへ保存せずに Secret を作成する。Worker と Echo サーバは同じ Secret の同じキーを参照する。Secret は管理用 namespace に作る（namespace は次の `deploy.sh` が作るので、先に `kubectl create namespace bigquery-analysis-system` でもよい）。
 
 ```bash
+kubectl create namespace bigquery-analysis-system --dry-run=client -o yaml | kubectl apply -f -
 read -r -s -p 'Echo MCP API key: ' ECHO_MCP_API_KEY
 printf '\n'
 secret_file="$(mktemp)"
 chmod 600 "$secret_file"
 printf 'ECHO_MCP_API_KEY=%s\n' "$ECHO_MCP_API_KEY" > "$secret_file"
 kubectl create secret generic bigquery-analysis-secrets \
-  --namespace session-sandbox-system --from-env-file="$secret_file" \
+  --namespace bigquery-analysis-system --from-env-file="$secret_file" \
   --dry-run=client -o yaml | kubectl apply -f -
 rm -f "$secret_file"
 unset ECHO_MCP_API_KEY secret_file
 ```
 
-Kustomize の結果を確認し、KSA と Secret が存在する状態で配備する。
+配備は silk-agent のチェックアウトから `deploy.sh` の分散構成のモードで行う。bigquery-analysis 用の Slack アプリのトークンを入れた `.env`（`SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN`）を `SILK_AGENT_ENV_FILE` に指定する。1回目は bootstrap（replicas 0）、起動は運用 runbook（`docs/distributed-operations-runbook.md` §2）の順序に従い、確認後に steady を適用する。
 
 ```bash
-kubectl kustomize usecases/bigquery-analysis/k8s
-kubectl apply -k usecases/bigquery-analysis/k8s
-kubectl rollout status deployment/echo-mcp -n session-sandbox-system
-kubectl rollout status deployment/silk-agent -n session-sandbox-system
+kubectl kustomize usecases/bigquery-analysis/k8s/distributed/steady
+export SILK_AGENT_ENV_FILE=/path/to/bigquery-analysis.env
+DISTRIBUTED_DIR=usecases/bigquery-analysis/k8s/distributed/bootstrap \
+  SYSTEM_NAMESPACE=bigquery-analysis-system k8s/deploy.sh
+DISTRIBUTED_DIR=usecases/bigquery-analysis/k8s/distributed/steady \
+  SYSTEM_NAMESPACE=bigquery-analysis-system k8s/deploy.sh
+kubectl rollout status deployment/echo-mcp -n bigquery-analysis-system
 ```
+
+Worker の状態は `silk-agent worker status-all` で確認する。
 
 ## 実動作の確認
 
@@ -94,7 +121,7 @@ kubectl rollout status deployment/silk-agent -n session-sandbox-system
 ### KSA / GSA と BigQuery
 
 ```bash
-kubectl get serviceaccount bigquery-analysis -n session-sandboxes -o yaml
+kubectl get serviceaccount bigquery-analysis -n bigquery-analysis-sandboxes -o yaml
 gcloud iam service-accounts get-iam-policy "$(terraform -chdir=usecases/bigquery-analysis/terraform output -raw gsa_email)" \
   --project="$(awk -F'"' '/^project_id/ {print $2}' usecases/bigquery-analysis/terraform/terraform.tfvars)"
 ```
@@ -105,23 +132,22 @@ BigQuery の jobUser は設定済み GSA にだけ付く。Sandbox Pod がこの
 
 ### Echo MCP
 
-Slack で「`echo-check-123` を Echo して」と依頼し、MCP `echo` ツールの呼び出しと、同じ文字列の返却を確認する。Bot Pod から認証なし・誤った鍵を送ると HTTP 401 になり、正しい鍵による Echo は Slack 経由で成功する。
+Slack で「`echo-check-123` を Echo して」と依頼し、MCP `echo` ツールの呼び出しと、同じ文字列の返却を確認する。Worker Pod から認証なし・誤った鍵を送ると HTTP 401 になり、正しい鍵による Echo は Slack 経由で成功する。
 
 ```bash
-kubectl exec -n session-sandbox-system deploy/silk-agent -- python -c \
+kubectl exec -n bigquery-analysis-system deploy/silk-agent-worker -- python -c \
   'import http.client; c=http.client.HTTPConnection("echo-mcp",8000); c.request("GET","/mcp"); assert c.getresponse().status==401; c=http.client.HTTPConnection("echo-mcp",8000); c.request("GET","/mcp",headers={"X_API_KEY":"wrong"}); assert c.getresponse().status==401'
 ```
 
-Bot の hook ログに鍵の値がなく、Echo サーバの通常ログにも鍵や認証ヘッダーが出ていないことを確認する。Echo サービスは ClusterIP のみで、NetworkPolicy は `silk-agent` Pod からの TCP 8000 ingress だけを許可する。
+Bot の hook ログに鍵の値がなく、Echo サーバの通常ログにも鍵や認証ヘッダーが出ていないことを確認する。Echo サービスは ClusterIP のみで、NetworkPolicy は `silk-agent-worker` Pod からの TCP 8000 ingress だけを許可する（Worker 側は `echo-mcp-egress-from-worker` で許可する）。
 
 ## ロールバック
 
-先に Bot と Sandbox を停止し、ユースケースの Deployment、Service、NetworkPolicy、KSA、Secret を削除する。その後専用 Terraform root のリソースを destroy する。
+ユースケースは専用の namespace に閉じているので、namespace ごと削除すれば Bot（4 役割）、Sandbox、Echo、KSA、Secret が消える。その後専用 Terraform root のリソースを destroy し、リポジトリ直下の `usecases` から bigquery-analysis を外して apply する（索引・権限・Slack の Secret が消える。Firestore の記録は TTL で消える）。
 
 ```bash
-kubectl delete -k usecases/bigquery-analysis/k8s
-kubectl delete serviceaccount bigquery-analysis -n session-sandboxes
-kubectl delete secret bigquery-analysis-secrets -n session-sandbox-system
+kubectl delete -k usecases/bigquery-analysis/k8s/distributed/steady   # 共通のClusterRole（k8s/platform）は消えない
+kubectl delete namespace bigquery-analysis-system bigquery-analysis-sandboxes
 terraform -chdir=usecases/bigquery-analysis/terraform destroy -var-file=terraform.tfvars
 ```
 

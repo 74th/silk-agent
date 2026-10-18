@@ -50,6 +50,7 @@ def main(client_factory: Callable[..., Any] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 2
+
             def adc_client_factory(**kwargs: Any) -> Any:
                 return bigquery.Client(credentials=credentials, **kwargs)
 

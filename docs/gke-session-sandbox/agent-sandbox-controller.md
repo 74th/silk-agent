@@ -6,6 +6,7 @@ First create the cluster and obtain credentials by following the [zonal cluster 
 
 ```sh
 kubectl kustomize k8s/platform | kubectl apply -f -
+kubectl kustomize k8s/distributed/overlays/dev-platform | kubectl apply -f -   # dev namespaces and the sandbox-management Role
 kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=300s
 kubectl get crd sandboxes.agents.x-k8s.io
 kubectl get runtimeclass gvisor

@@ -68,9 +68,10 @@ resource "google_firestore_index" "unfinished_inputs" {
 
 # Due nonterminal command query used by the distributed command Monitor.
 resource "google_firestore_index" "due_commands" {
+  for_each    = var.usecases
   project     = var.project_id
   database    = var.firestore_database_id
-  collection  = "${var.firestore_prefix}_commands"
+  collection  = "${each.value.firestore_prefix}_commands"
   query_scope = "COLLECTION"
 
   fields {
@@ -87,9 +88,10 @@ resource "google_firestore_index" "due_commands" {
 
 # Conversation stop barriers enumerate accepted command intents by origin sequence.
 resource "google_firestore_index" "stop_commands" {
+  for_each    = var.usecases
   project     = var.project_id
   database    = var.firestore_database_id
-  collection  = "${var.firestore_prefix}_commands"
+  collection  = "${each.value.firestore_prefix}_commands"
   query_scope = "COLLECTION"
 
   fields {
@@ -114,9 +116,10 @@ resource "google_firestore_index" "stop_commands" {
 
 # Per-conversation Sender ordering and exclusive claim for sanitized output.
 resource "google_firestore_index" "pending_outbox" {
+  for_each    = var.usecases
   project     = var.project_id
   database    = var.firestore_database_id
-  collection  = "${var.firestore_prefix}_outbox"
+  collection  = "${each.value.firestore_prefix}_outbox"
   query_scope = "COLLECTION"
 
   fields {
@@ -195,6 +198,14 @@ locals {
     "control_queue",
     "workers",
   ])
+  # ユースケースごとの接頭辞つきコレクション。キーは "<ユースケース>/<コレクション>"。
+  retention_prefixed_bindings = {
+    for pair in setproduct(keys(var.usecases), local.retention_prefixed_collections) :
+    "${pair[0]}/${pair[1]}" => {
+      prefix     = var.usecases[pair[0]].firestore_prefix
+      collection = pair[1]
+    }
+  }
 }
 
 resource "google_firestore_field" "expire_at_ttl_group" {
@@ -212,11 +223,11 @@ resource "google_firestore_field" "expire_at_ttl_group" {
 }
 
 resource "google_firestore_field" "expire_at_ttl_prefixed" {
-  for_each = local.retention_prefixed_collections
+  for_each = local.retention_prefixed_bindings
 
   project    = var.project_id
   database   = var.firestore_database_id
-  collection = "${var.firestore_prefix}_${each.value}"
+  collection = "${each.value.prefix}_${each.value.collection}"
   field      = "expire_at"
 
   ttl_config {}
@@ -228,6 +239,56 @@ resource "google_firestore_field" "expire_at_ttl_prefixed" {
 moved {
   from = google_firestore_field.input_expire_at_ttl
   to   = google_firestore_field.expire_at_ttl_group["inputs"]
+}
+
+moved {
+  from = google_firestore_field.expire_at_ttl_prefixed["outbox"]
+  to   = google_firestore_field.expire_at_ttl_prefixed["silk-agent/outbox"]
+}
+
+moved {
+  from = google_firestore_field.expire_at_ttl_prefixed["commands"]
+  to   = google_firestore_field.expire_at_ttl_prefixed["silk-agent/commands"]
+}
+
+moved {
+  from = google_firestore_field.expire_at_ttl_prefixed["sandbox_operations"]
+  to   = google_firestore_field.expire_at_ttl_prefixed["silk-agent/sandbox_operations"]
+}
+
+moved {
+  from = google_firestore_field.expire_at_ttl_prefixed["quiesce_requests"]
+  to   = google_firestore_field.expire_at_ttl_prefixed["silk-agent/quiesce_requests"]
+}
+
+moved {
+  from = google_firestore_field.expire_at_ttl_prefixed["slack_receipts"]
+  to   = google_firestore_field.expire_at_ttl_prefixed["silk-agent/slack_receipts"]
+}
+
+moved {
+  from = google_firestore_field.expire_at_ttl_prefixed["control_queue"]
+  to   = google_firestore_field.expire_at_ttl_prefixed["silk-agent/control_queue"]
+}
+
+moved {
+  from = google_firestore_field.expire_at_ttl_prefixed["workers"]
+  to   = google_firestore_field.expire_at_ttl_prefixed["silk-agent/workers"]
+}
+
+moved {
+  from = google_firestore_index.due_commands
+  to   = google_firestore_index.due_commands["silk-agent"]
+}
+
+moved {
+  from = google_firestore_index.stop_commands
+  to   = google_firestore_index.stop_commands["silk-agent"]
+}
+
+moved {
+  from = google_firestore_index.pending_outbox
+  to   = google_firestore_index.pending_outbox["silk-agent"]
 }
 
 # Sessions（会話履歴と管理情報）の親になる Agent Runtime インスタンス。エージェントコードは配備しない。
@@ -366,8 +427,14 @@ resource "google_storage_bucket" "command_output" {
 }
 
 # トークンの値は terraform に含めない。作成後に `gcloud secrets versions add` で登録する。
+locals {
+  slack_secret_ids = toset(flatten([
+    for u in values(var.usecases) : [u.slack_secret_ids.bot_token, u.slack_secret_ids.app_token]
+  ]))
+}
+
 resource "google_secret_manager_secret" "slack" {
-  for_each  = toset(var.slack_secret_ids)
+  for_each  = local.slack_secret_ids
   project   = var.project_id
   secret_id = each.value
 
@@ -400,58 +467,119 @@ resource "google_project_iam_member" "bot" {
   member   = local.bot_member
 }
 
-# Existing GKE workload identity uses the session-sandbox-system/silk-agent KSA
-# directly (see k8s/grant-iam.sh). Give it only the Firestore data role needed
-# for the live distributed-store smoke check and application runtime.
 data "google_project" "current" {
   project_id = var.project_id
 }
 
-resource "google_project_iam_member" "gke_worker_firestore" {
-  project = var.project_id
-  role    = "roles/datastore.user"
-  member  = "principal://iam.googleapis.com/projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/session-sandbox-system/sa/silk-agent"
-}
-
-# Sandbox Service keeps the Worker-only Firestore reader/writer access separate from Slack.
-resource "google_project_iam_member" "gke_sandbox_service_firestore" {
-  project = var.project_id
-  role    = "roles/datastore.user"
-  member  = "principal://iam.googleapis.com/projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/session-sandbox-system/sa/silk-agent-sandbox-service"
-}
-
-# Role-specific GKE identities for the distributed deployment (k8s/distributed/roles.yaml).
-# Each KSA gets only what its role needs: the Worker has no Slack secret, Control has no Slack
-# app token, and only the Sandbox Service (above) manages Sandbox resources.
+# The single-process Bot's KSA (<system_namespace>/silk-agent) of the use cases that set
+# legacy_bot_access. It replaces the former k8s/grant-iam.sh.
 locals {
-  gke_principal_prefix = "principal://iam.googleapis.com/projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/session-sandbox-system/sa"
+  legacy_bot_principals = {
+    for name, u in var.usecases :
+    name => "principal://iam.googleapis.com/projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/${u.system_namespace}/sa/silk-agent"
+    if u.legacy_bot_access
+  }
+  legacy_bot_roles = {
+    for pair in setproduct(keys(local.legacy_bot_principals), local.bot_roles) :
+    "${pair[0]}/${pair[1]}" => { member = local.legacy_bot_principals[pair[0]], role = pair[1] }
+  }
+}
+
+moved {
+  from = google_project_iam_member.gke_worker_firestore
+  to   = google_project_iam_member.gke_legacy_bot["silk-agent/roles/datastore.user"]
+}
+
+resource "google_project_iam_member" "gke_legacy_bot" {
+  for_each = local.legacy_bot_roles
+  project  = var.project_id
+  role     = each.value.role
+  member   = each.value.member
+}
+
+# Role-specific GKE identities for the distributed deployment (k8s/distributed/base/*.yaml), one
+# set per use case (var.usecases). Each KSA gets only what its role needs: the Worker has no Slack
+# secret, Control has no Slack app token, and only the Sandbox Service manages Sandbox resources.
+# A use case's principals live in its own system namespace, so they never reach another use
+# case's Slack secrets.
+locals {
+  gke_principal_base = "principal://iam.googleapis.com/projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns"
+  gke_principals = {
+    for name, u in var.usecases : name => {
+      for role in ["gateway", "worker", "control", "sandbox-service"] :
+      role => "${local.gke_principal_base}/${u.system_namespace}/sa/silk-agent-${role}"
+    }
+  }
   gke_role_project_roles = {
     # Claude / Gemini / Sessions, Model Armor, and Firestore state.
-    worker  = ["roles/aiplatform.user", "roles/modelarmor.user", "roles/datastore.user"]
-    gateway = ["roles/datastore.user"]
-    control = ["roles/datastore.user"]
+    worker          = ["roles/aiplatform.user", "roles/modelarmor.user", "roles/datastore.user"]
+    gateway         = ["roles/datastore.user"]
+    control         = ["roles/datastore.user"]
+    sandbox-service = ["roles/datastore.user"]
   }
   gke_role_project_bindings = merge([
-    for role, roles in local.gke_role_project_roles : {
-      for item in roles : "${role}/${item}" => {
-        member = "${local.gke_principal_prefix}/silk-agent-${role}"
-        role   = item
+    for name, principals in local.gke_principals : merge([
+      for role, roles in local.gke_role_project_roles : {
+        for item in roles : "${name}/${role}/${item}" => {
+          member = principals[role]
+          role   = item
+        }
       }
-    }
+    ]...)
   ]...)
-  # Secret IDs by name so a role never receives a token it does not use.
-  gke_role_slack_secrets = {
-    gateway = ["silk-agent-slack-bot-token", "silk-agent-slack-app-token"]
-    control = ["silk-agent-slack-bot-token"]
-  }
+  # Secret IDs by role so a role never receives a token it does not use.
   gke_role_slack_bindings = merge([
-    for role, secrets in local.gke_role_slack_secrets : {
-      for secret in secrets : "${role}/${secret}" => {
-        member = "${local.gke_principal_prefix}/silk-agent-${role}"
-        secret = secret
-      }
+    for name, u in var.usecases : {
+      "${name}/gateway/${u.slack_secret_ids.bot_token}" = { member = local.gke_principals[name].gateway, secret = u.slack_secret_ids.bot_token }
+      "${name}/gateway/${u.slack_secret_ids.app_token}" = { member = local.gke_principals[name].gateway, secret = u.slack_secret_ids.app_token }
+      "${name}/control/${u.slack_secret_ids.bot_token}" = { member = local.gke_principals[name].control, secret = u.slack_secret_ids.bot_token }
     }
   ]...)
+}
+
+moved {
+  from = google_project_iam_member.gke_sandbox_service_firestore
+  to   = google_project_iam_member.gke_role["silk-agent/sandbox-service/roles/datastore.user"]
+}
+
+moved {
+  from = google_project_iam_member.gke_role["worker/roles/aiplatform.user"]
+  to   = google_project_iam_member.gke_role["silk-agent/worker/roles/aiplatform.user"]
+}
+
+moved {
+  from = google_project_iam_member.gke_role["worker/roles/modelarmor.user"]
+  to   = google_project_iam_member.gke_role["silk-agent/worker/roles/modelarmor.user"]
+}
+
+moved {
+  from = google_project_iam_member.gke_role["worker/roles/datastore.user"]
+  to   = google_project_iam_member.gke_role["silk-agent/worker/roles/datastore.user"]
+}
+
+moved {
+  from = google_project_iam_member.gke_role["gateway/roles/datastore.user"]
+  to   = google_project_iam_member.gke_role["silk-agent/gateway/roles/datastore.user"]
+}
+
+moved {
+  from = google_project_iam_member.gke_role["control/roles/datastore.user"]
+  to   = google_project_iam_member.gke_role["silk-agent/control/roles/datastore.user"]
+}
+
+moved {
+  from = google_secret_manager_secret_iam_member.gke_role_slack["gateway/silk-agent-slack-bot-token"]
+  to   = google_secret_manager_secret_iam_member.gke_role_slack["silk-agent/gateway/silk-agent-slack-bot-token"]
+}
+
+moved {
+  from = google_secret_manager_secret_iam_member.gke_role_slack["gateway/silk-agent-slack-app-token"]
+  to   = google_secret_manager_secret_iam_member.gke_role_slack["silk-agent/gateway/silk-agent-slack-app-token"]
+}
+
+moved {
+  from = google_secret_manager_secret_iam_member.gke_role_slack["control/silk-agent-slack-bot-token"]
+  to   = google_secret_manager_secret_iam_member.gke_role_slack["silk-agent/control/silk-agent-slack-bot-token"]
 }
 
 resource "google_project_iam_member" "gke_role" {
@@ -462,31 +590,47 @@ resource "google_project_iam_member" "gke_role" {
 }
 
 resource "google_secret_manager_secret_iam_member" "gke_role_slack" {
-  for_each  = { for key, item in local.gke_role_slack_bindings : key => item if contains(var.slack_secret_ids, item.secret) }
+  for_each  = local.gke_role_slack_bindings
   project   = var.project_id
   secret_id = google_secret_manager_secret.slack[each.value.secret].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = each.value.member
 }
 
-# The Worker reads archived command output (the Sandbox Service writes it) and Skills.
-resource "google_storage_bucket_iam_member" "gke_worker_output_reader" {
-  bucket = google_storage_bucket.command_output.name
-  role   = "roles/storage.objectViewer"
-  member = "${local.gke_principal_prefix}/silk-agent-worker"
+moved {
+  from = google_storage_bucket_iam_member.gke_worker_output_reader
+  to   = google_storage_bucket_iam_member.gke_worker_output_reader["silk-agent"]
 }
 
-# The Sandbox Service's command monitor archives terminal command output.
+resource "google_storage_bucket_iam_member" "gke_worker_output_reader" {
+  for_each = local.gke_principals
+  bucket   = google_storage_bucket.command_output.name
+  role     = "roles/storage.objectViewer"
+  member   = each.value["worker"]
+}
+
+moved {
+  from = google_storage_bucket_iam_member.gke_sandbox_service_output
+  to   = google_storage_bucket_iam_member.gke_sandbox_service_output["silk-agent"]
+}
+
 resource "google_storage_bucket_iam_member" "gke_sandbox_service_output" {
-  bucket = google_storage_bucket.command_output.name
-  role   = "roles/storage.objectAdmin"
-  member = "${local.gke_principal_prefix}/silk-agent-sandbox-service"
+  for_each = local.gke_principals
+  bucket   = google_storage_bucket.command_output.name
+  role     = "roles/storage.objectAdmin"
+  member   = each.value["sandbox-service"]
+}
+
+moved {
+  from = google_storage_bucket_iam_member.gke_worker_skills_reader
+  to   = google_storage_bucket_iam_member.gke_worker_skills_reader["silk-agent"]
 }
 
 resource "google_storage_bucket_iam_member" "gke_worker_skills_reader" {
-  bucket = google_storage_bucket.skills.name
-  role   = "roles/storage.objectViewer"
-  member = "${local.gke_principal_prefix}/silk-agent-worker"
+  for_each = local.gke_principals
+  bucket   = google_storage_bucket.skills.name
+  role     = "roles/storage.objectViewer"
+  member   = each.value["worker"]
 }
 
 resource "google_storage_bucket_iam_member" "skills_reader" {
@@ -495,16 +639,26 @@ resource "google_storage_bucket_iam_member" "skills_reader" {
   member = local.bot_member
 }
 
-resource "google_storage_bucket_iam_member" "gke_worker_command_output" {
-  bucket = google_storage_bucket.command_output.name
-  role   = "roles/storage.objectAdmin"
-  member = "principal://iam.googleapis.com/projects/${data.google_project.current.number}/locations/global/workloadIdentityPools/${var.project_id}.svc.id.goog/subject/ns/session-sandbox-system/sa/silk-agent"
+moved {
+  from = google_storage_bucket_iam_member.gke_worker_command_output
+  to   = google_storage_bucket_iam_member.gke_legacy_bot_command_output["silk-agent"]
 }
 
+resource "google_storage_bucket_iam_member" "gke_legacy_bot_command_output" {
+  for_each = local.legacy_bot_principals
+  bucket   = google_storage_bucket.command_output.name
+  role     = "roles/storage.objectAdmin"
+  member   = each.value
+}
+
+# The single-process Bot's service account only reads the secrets of use cases that opt in.
 resource "google_secret_manager_secret_iam_member" "slack_accessor" {
-  for_each  = google_secret_manager_secret.slack
+  for_each = toset(flatten([
+    for u in values(var.usecases) :
+    u.legacy_bot_access ? [u.slack_secret_ids.bot_token, u.slack_secret_ids.app_token] : []
+  ]))
   project   = var.project_id
-  secret_id = each.value.secret_id
+  secret_id = google_secret_manager_secret.slack[each.value].secret_id
   role      = "roles/secretmanager.secretAccessor"
   member    = local.bot_member
 }

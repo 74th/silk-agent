@@ -1,7 +1,8 @@
+# Applied separately with envsubst (OPERATIONS.md): the GSA email is not known to kustomize.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: bigquery-analysis
-  namespace: session-sandboxes
+  namespace: bigquery-analysis-sandboxes
   annotations:
     iam.gke.io/gcp-service-account: "${GSA_EMAIL}"

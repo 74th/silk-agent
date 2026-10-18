@@ -328,6 +328,7 @@ async def run_worker(config: Config) -> None:
     if config.execution_mode != "distributed":
         raise ConfigError("worker requires execution_mode: distributed")
     config.validate_required()
+    config.validate_namespace("worker")
     if config.session_store.provider != "agent_platform":
         raise ConfigError("worker requires session_store.provider: agent_platform")
     from silk_agent.app import build_skill_source
