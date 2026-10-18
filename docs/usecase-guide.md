@@ -208,7 +208,7 @@ Sandboxのイメージを変えても、すでにある会話のSandboxは、次
 
 ### 4.2 手順
 
-1. **クラウド資源（Terraform）**: リポジトリ直下の`terraform/`の`usecases`にユースケースを1件追加する（namespace、`firestore_prefix`、Slackのシークレット名。例は`usecases/bigquery-analysis/OPERATIONS.md`）。`terraform plan`で、追加したユースケースの資源の作成だけが出て既存の資源に変更・削除がないことを確認してからapplyする。役割の権限、Slackの Secret、Firestoreの索引とTTLが作られる。`terraform output usecases`で各役割の権限の主体を確認できる。ユースケース固有の資源（BigQueryのサービスアカウントなど）は`usecases/<名前>/terraform/`に置く。Slackのトークンの値は`gcloud secrets versions add`で登録する。
+1. **クラウド資源（Terraform）**: リポジトリ直下の`terraform/`の`usecases`にユースケースを1件追加する（namespace、`firestore_prefix`、Slackのシークレット名。例は`usecases/bigquery-analysis/OPERATIONS.md`）。namespace（system / sandbox）とSlackのSecret IDは、全ユースケースを通して重複できない（重複するとplanで拒否される）。`terraform plan`で、追加したユースケースの資源の作成だけが出て既存の資源に変更・削除がないことを確認してからapplyする。役割の権限、Slackの Secret、Firestoreの索引とTTLが作られる。`terraform output usecases`で各役割の権限の主体を確認できる。ユースケース固有の資源（BigQueryのサービスアカウントなど）は`usecases/<名前>/terraform/`に置く。Slackのトークンの値は`gcloud secrets versions add`で登録する。
 2. **テンプレートをコピーする**: `usecases/template/`を`usecases/<名前>/`にコピーし、2.1〜2.5（名前、Sandboxイメージ、Skills・プロンプト、フック、Slackの応答範囲）を行う。
 3. **イメージ**: 2.6の1と2のとおりBot（4役割で共通）とSandboxのイメージをビルドしてpushする。
 4. **設定と配置の定義**: `k8s/distributed/steady/`の次を書き換える（`your-...`を実際の値に）。
@@ -230,7 +230,7 @@ DISTRIBUTED_DIR=usecases/<名前>/k8s/distributed/steady    SYSTEM_NAMESPACE=<�
 
 - **Workerの確認**: `silk-agent worker status-all`（稼働中のWorkerの一覧）、`drain-all` / `undrain-all`（受付の停止・再開）。コマンドの詳細は[運用runbook](distributed-operations-runbook.md)。ユースケースごとに設定ファイル（`--config`）が違うので、対象のユースケースの設定で実行する。
 - **リリースと切り戻し**: ユースケースのイメージ（Bot、Sandbox）のdigestを`steady/kustomization.yaml`と`sandbox-service-config.yaml`に書いて適用する。戻すときは前のdigestに戻して再適用する。Workerは`maxUnavailable: 0`のローリング更新で、処理中の会話は引き継がれる。
-- **削除**: namespaceを削除すれば4役割とSandboxが消える。その後`usecases`から外してTerraformをapplyする（Firestoreの記録はTTLで消える）。
+- **削除**: namespaceを削除すれば4役割とSandboxが消える。`kubectl delete -k`で消えるクラスタ共通のリソースはユースケースごとのClusterRoleBindingだけで、TokenReview用のClusterRole（`silk-agent-sandbox-service-token-review`）は全ユースケース共通で`k8s/platform`に置くので、他のユースケースには影響しない（クラスタの初回構築では`kubectl kustomize k8s/platform | kubectl apply -f -`を先に適用する）。その後`usecases`から外してTerraformをapplyする（Firestoreの記録はTTLで消える）。
 
 ### 4.4 分離の限界
 

@@ -1,5 +1,15 @@
 # Cluster-wide, environment-independent platform resources. The namespaces and the
-# `sandbox-management` Role are per environment / use case: k8s/distributed/platform.
+# `sandbox-management` Role are per environment / use case: k8s/distributed/platform. The
+# ClusterRole is shared by all use cases (each has its own ClusterRoleBinding).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: silk-agent-sandbox-service-token-review
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:

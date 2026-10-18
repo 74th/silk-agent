@@ -122,15 +122,23 @@ variable "usecases" {
     error_message = "firestore_prefix はユースケースごとに異なる値にしてください。"
   }
 
+  # Every namespace (system and sandbox of all use cases) is used by exactly one use case: a shared
+  # Sandbox namespace would overwrite another use case's RoleBindings.
   validation {
-    condition     = length(distinct([for u in values(var.usecases) : u.system_namespace])) == length(var.usecases)
-    error_message = "system_namespace はユースケースごとに異なる値にしてください。"
+    condition = (
+      length(distinct(flatten([for u in values(var.usecases) : [u.system_namespace, u.sandbox_namespace]])))
+      == 2 * length(var.usecases)
+    )
+    error_message = "system_namespace と sandbox_namespace は、全ユースケースを通して重複しない値にしてください（同じ namespace を複数のユースケースや用途で共有できません）。"
   }
 
+  # Every Slack Secret is used by exactly one role pair of one use case: a shared Secret would let
+  # another use case's Gateway / Control read it.
   validation {
-    condition = alltrue([
-      for u in values(var.usecases) : u.system_namespace != u.sandbox_namespace
-    ])
-    error_message = "system_namespace と sandbox_namespace は別の値にしてください。"
+    condition = (
+      length(distinct(flatten([for u in values(var.usecases) : [u.slack_secret_ids.bot_token, u.slack_secret_ids.app_token]])))
+      == 2 * length(var.usecases)
+    )
+    error_message = "slack_secret_ids の bot_token / app_token は、全ユースケースを通して重複しない値にしてください（別のユースケースの Slack の認証情報を読めてしまいます）。"
   }
 }

@@ -146,7 +146,7 @@ Bot の hook ログに鍵の値がなく、Echo サーバの通常ログにも�
 ユースケースは専用の namespace に閉じているので、namespace ごと削除すれば Bot（4 役割）、Sandbox、Echo、KSA、Secret が消える。その後専用 Terraform root のリソースを destroy し、リポジトリ直下の `usecases` から bigquery-analysis を外して apply する（索引・権限・Slack の Secret が消える。Firestore の記録は TTL で消える）。
 
 ```bash
-kubectl delete -k usecases/bigquery-analysis/k8s/distributed/steady
+kubectl delete -k usecases/bigquery-analysis/k8s/distributed/steady   # 共通のClusterRole（k8s/platform）は消えない
 kubectl delete namespace bigquery-analysis-system bigquery-analysis-sandboxes
 terraform -chdir=usecases/bigquery-analysis/terraform destroy -var-file=terraform.tfvars
 ```

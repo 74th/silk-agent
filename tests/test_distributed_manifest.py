@@ -241,12 +241,14 @@ def _comparable(documents: list[dict]) -> dict:
 
     The platform component now also renders the Namespaces and the `sandbox-management` Role
     (they used to live in k8s/platform/base.yaml), labels the resources, and the roles read
-    POD_NAMESPACE. Everything else must equal the output before the split.
+    POD_NAMESPACE, and the shared ClusterRole moved to k8s/platform. Everything else must equal
+    the output before the split.
     """
     out = {}
     for item in documents:
         name = item["metadata"]["name"]
-        if item["kind"] == "Namespace" or name == "sandbox-management":
+        # The ClusterRole moved to k8s/platform/base.yaml (shared by every use case).
+        if item["kind"] in ("Namespace", "ClusterRole") or name == "sandbox-management":
             continue
         labels = item["metadata"].get("labels", {})
         for key in ("app.kubernetes.io/part-of", "silk-agent.dev/in-sandbox-namespace"):
@@ -285,3 +287,30 @@ def test_dev_platform_renders_the_namespaces_and_the_sandbox_management_role():
     }
     role = rendered[("Role", "sandbox-management")]
     assert role["metadata"]["namespace"] == "session-sandboxes"
+
+
+def test_the_shared_token_review_cluster_role_is_in_the_platform_not_in_any_use_case():
+    name = "silk-agent-sandbox-service-token-review"
+    platform = [i for i in _resources("k8s/platform/base.yaml") if i["kind"] == "ClusterRole"]
+    assert [i["metadata"]["name"] for i in platform] == [name]
+    for path in Path("k8s/distributed/base").glob("*.yaml"):
+        assert "ClusterRole" not in {i["kind"] for i in _resources(str(path))}, path
+
+
+@needs_kubectl
+def test_deleting_one_use_case_leaves_the_cluster_scoped_resources_of_the_other():
+    """Cluster-scoped resources rendered by two use cases never share a name, so
+    `kubectl delete -k <use case>` cannot remove what another use case needs."""
+
+    def cluster_scoped(path: str) -> set[tuple[str, str]]:
+        return {
+            (i["kind"], i["metadata"]["name"])
+            for i in kustomize(path)
+            if i["kind"] in ("Namespace", "ClusterRole", "ClusterRoleBinding")
+        }
+
+    dev = cluster_scoped("k8s/distributed/overlays/dev")
+    bigquery = cluster_scoped("usecases/bigquery-analysis/k8s/distributed/steady")
+    assert dev and bigquery
+    assert not dev & bigquery
+    assert not {kind for kind, _ in dev | bigquery} & {"ClusterRole"}
