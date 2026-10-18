@@ -77,7 +77,10 @@ def build_skill_source(config: Config, cache_dir: Path) -> SkillSource | None:
         return None
     if source.startswith("gs://"):
         return GcsSkillSource(source, cache_dir)  # type: ignore[return-value]
-    return LocalDirSkillSource(source, cache_dir)  # type: ignore[return-value]
+    path = config.resolve(source)
+    if not path.is_dir():
+        raise ValueError(f"skills.source is not a directory: {path}")
+    return LocalDirSkillSource(path, cache_dir)  # type: ignore[return-value]
 
 
 # HMAC key the library needs when `ensure` receives env (AGENT_USER_EMAIL). It must stay the

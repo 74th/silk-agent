@@ -308,7 +308,7 @@ SILK_AGENT_TEST_RUNTIME=projects/<project>/locations/us-central1/reasoningEngine
 
 ## 7. 既知の制限と今後の候補
 
-分散配置は、実Slackと接続する手前まで実装・検証済みです。`silk-agent gateway|worker run|control|sandbox-service` の4役割と `k8s/distributed`（Worker/Gateway/Control は `replicas: 0` で配置）があります。実 Slack・2台の本番 Worker・実負荷での受け入れは未実施のため、実環境の切替手順としてはまだ使用しないでください。[運用手順](docs/distributed-operations-runbook.md)に構築・増設・drain・回復を記載しています。移行 export/import は停止した旧系を対象とし、新系の入力受付後に古い SQLite snapshot へ戻す自動逆移行は提供しません。[移行・ロールバック手順](docs/distributed-migration-runbook.md)を参照してください。
+分散配置は、本番の推奨構成です（[ユースケースガイド](docs/usecase-guide.md)の4章）。`silk-agent gateway|worker run|control|sandbox-service` の4役割と `k8s/distributed` があり、base の replicas は Gateway 1 / Worker 2 / Control 1 です（`dev-bootstrap` の overlay だけが `0` で、Slack に接続せず SDK も起動しません）。なお、このREADMEの「1インスタンス」「SQLite」「再起動するとバックグラウンドの通知が届かない」などの制限は、単一Pod構成（`k8s/overlays/dev`）のものです。[運用手順](docs/distributed-operations-runbook.md)に構築・増設・drain・回復を記載しています。移行 export/import は停止した旧系を対象とし、新系の入力受付後に古い SQLite snapshot へ戻す自動逆移行は提供しません。[移行・ロールバック手順](docs/distributed-migration-runbook.md)を参照してください。
 
 - **再起動とバックグラウンド実行**: Botを再起動すると、それまで実行中だったバックグラウンドのコマンドの終了通知は届かない（コマンドはSandboxで動き続ける）。
 - **外部への通信**: Sandboxからは外部へ通信できないため、`pip install`や`git clone`は使えない。必要なら許可するFQDNを設定する。
@@ -319,7 +319,7 @@ SILK_AGENT_TEST_RUNTIME=projects/<project>/locations/us-central1/reasoningEngine
   - 入力へのModel Armorの適用
   - 危険な操作の承認（Slackのボタン）
   - 予算や同時実行数の上限
-  - `!reset` / `!status`などの会話コマンド
+  - `!status`などの会話コマンド（`!reset`は分散構成の`reset_words`でだけ使え、単一Pod構成にはSlackからリセットする手段がない）
   - Slackの添付ファイルとSandboxの間のファイルの受け渡し
   - トレース（監査用のフックは実装済み。§3.5）
   - Botの死活監視

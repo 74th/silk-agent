@@ -347,6 +347,17 @@ async def test_reset_starts_new_session(clock, tmp_path):
     assert second.options.resume is None and second.options.session_id
 
 
+async def test_history_after_a_reset_survives_a_dropped_client(clock, tmp_path):
+    eng = make(clock, tmp_path, lambda n: [("msg", result())])
+    await run_resume(eng, "old")
+    await eng.reset()
+    await run(eng, "after reset", "t2")
+    started = eng.session_id
+    await eng._drop_client()  # skills update, failed turn, cancel
+    await run(eng, "next", "t3")
+    assert FakeSDKClient.instances[-1].options.resume == started
+
+
 async def test_session_id_is_reported(clock, tmp_path):
     seen = []
     eng = make(

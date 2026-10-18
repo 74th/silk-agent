@@ -379,3 +379,18 @@ def test_distributed_config_files_state_firestore_prefix_explicitly():
     for path in files:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert data["distributed"].get("firestore_prefix"), path
+
+
+def test_a_relative_skills_source_is_resolved_against_the_config_file(tmp_path, monkeypatch):
+    from silk_agent.app import build_skill_source
+
+    (tmp_path / "skills").mkdir()
+    config = Config()
+    config._base_dir = tmp_path
+    config.skills.source = "skills"
+    monkeypatch.chdir(tmp_path.parent)  # not the config directory
+    assert build_skill_source(config, tmp_path / "cache") is not None
+
+    config.skills.source = "missing"
+    with pytest.raises(ValueError, match="skills.source"):
+        build_skill_source(config, tmp_path / "cache")

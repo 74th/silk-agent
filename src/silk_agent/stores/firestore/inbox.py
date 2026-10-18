@@ -768,6 +768,10 @@ class FirestoreInboxStore:
                 .limit(limit)
             )
             async for snapshot in query.stream():
+                if not snapshot.reference.path.startswith(
+                    f"{self.collection_prefix}_conversations/"
+                ):
+                    continue  # another use case's input in the same database: not ours to update
                 data = snapshot.to_dict() or {}
                 if data.get("sender_lookup_state") == "pending":
                     records.append({**data, "record_collection": "inputs"})

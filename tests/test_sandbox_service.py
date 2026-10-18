@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from aiohttp.test_utils import TestClient, TestServer
 
+from gke_session_sandbox.errors import FileOperationError
 from gke_session_sandbox.types import EventType, SessionState
 from silk_agent.core.distributed_models import OwnershipToken
 from silk_agent.sandbox.service import create_app
@@ -608,7 +609,7 @@ async def test_file_and_skills_routes_are_conversation_scoped_and_generation_fen
             try:
                 return self.storage[path]
             except KeyError as exc:
-                raise FileNotFoundError(path) from exc
+                raise FileOperationError("missing", path=path, status=404) from exc
 
         async def write(self, path, content):
             if path == ".skills/fail.md":

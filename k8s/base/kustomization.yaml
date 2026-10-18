@@ -2,7 +2,7 @@
 # RBAC, PVC, StorageClass). A deployment (k8s/overlays/dev, usecases/template/k8s) references
 # this and adds its ConfigMap (silk-agent-config) and the image names.
 #
-# Prerequisites (provided by gke-session-sandbox: k8s/platform/base.yaml):
+# Prerequisites (provided by the platform base: k8s/distributed/overlays/dev-platform):
 #   - namespaces session-sandbox-system / session-sandboxes
 #   - Role session-sandboxes/sandbox-management
 apiVersion: kustomize.config.k8s.io/v1beta1

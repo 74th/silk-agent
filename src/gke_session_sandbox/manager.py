@@ -217,9 +217,8 @@ class SandboxManager:
         from kubernetes_asyncio.stream import WsApiClient
 
         exec_api_client = WsApiClient()
-        backend = CoreSandboxBackend(
-            custom_api, core_api, networking_api, exec_api=client.CoreV1Api(exec_api_client)
-        )
+        exec_api: Any = client.CoreV1Api(exec_api_client)
+        backend = CoreSandboxBackend(custom_api, core_api, networking_api, exec_api=exec_api)
         template_path = Path(settings.template_file)
         if not template_path.is_absolute():
             template_path = (

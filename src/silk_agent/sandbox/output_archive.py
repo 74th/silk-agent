@@ -23,6 +23,8 @@ class OutputPage:
     data: bytes
     next_cursor: int
     complete: bool
+    # The stream ended, but some of its output was never stored by the Sandbox.
+    truncated: bool = False
 
 
 @runtime_checkable
@@ -123,6 +125,7 @@ class CommandOutputArchiver:
         size_bytes = 0
         digest = hashlib.sha256()
         tail = bytearray()
+        truncated = False
         with tempfile.SpooledTemporaryFile(max_size=1024 * 1024, mode="w+b") as output:
             while True:
                 page = await reader.read_output_page(
@@ -147,6 +150,7 @@ class CommandOutputArchiver:
                         del tail[: len(tail) - self._tail_bytes]
                 cursor = page.next_cursor
                 if page.complete:
+                    truncated = page.truncated
                     break
             output.seek(0)
             uri = await self._objects.put(
@@ -164,6 +168,8 @@ class CommandOutputArchiver:
             "sha256": digest.hexdigest(),
             "expires_at": expires_at.isoformat(),
             "tail": bytes(tail).decode("utf-8", errors="replace"),
+            # Only what the Sandbox kept is archived; never retry for bytes that do not exist.
+            **({"truncated": True} if truncated else {}),
         }
 
 

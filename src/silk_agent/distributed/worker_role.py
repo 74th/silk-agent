@@ -40,7 +40,12 @@ from silk_agent.distributed.worker_heartbeat import WorkerHeartbeat, WorkerIdent
 from silk_agent.distributed.worker_runtime import WorkerProcessRuntime
 from silk_agent.hooks import HookDispatcher
 from silk_agent.sandbox.monitor import CommandMonitor
-from silk_agent.wiring import build_engine_factory, build_input_guard, build_output_sanitizer
+from silk_agent.wiring import (
+    build_engine_factory,
+    build_input_guard,
+    build_output_sanitizer,
+    build_system_prompt,
+)
 
 log = logging.getLogger(__name__)
 EngineFactoryBuilder = Callable[..., Any]
@@ -331,6 +336,7 @@ async def run_worker(config: Config) -> None:
     config.validate_namespace("worker")
     if config.session_store.provider != "agent_platform":
         raise ConfigError("worker requires session_store.provider: agent_platform")
+    from silk_agent.agent.mcp_config import load_mcp_servers
     from silk_agent.app import build_skill_source
     from silk_agent.sandbox.output_archive import GCSCommandOutputStore
     from silk_agent.sandbox.remote import RemoteSandboxRuntime, RemoteSandboxSessions
@@ -350,6 +356,13 @@ async def run_worker(config: Config) -> None:
     from silk_agent.stores.firestore.retention import RetentionPolicy
     from silk_agent.stores.firestore.watch import worker_reservation_watch
     from silk_agent.stores.firestore.workers import FirestoreWorkerDirectory
+
+    # Actors are built when a conversation is assigned. A missing prompt, guard policy or
+    # `${ENV}` in mcp.json must stop the start-up here, as it does for a single Pod.
+    build_system_prompt(config)
+    build_input_guard(config)
+    build_output_sanitizer(config)
+    load_mcp_servers(config.resolve(config.mcp.config_file) if config.mcp.config_file else None)
 
     dist = config.distributed
     identity = WorkerIdentity.from_environment()
