@@ -519,3 +519,69 @@ async def test_stop_while_sandbox_is_preparing_skips_engine_query(clock, channel
     finally:
         ensure_release.set()
         await registry.aclose()
+
+
+class _Released:
+    def __init__(self):
+        self.keys = []
+
+    def __call__(self, key):
+        self.keys.append(key)
+
+
+def _release_env(clock, channel, **kw):
+    released = _Released()
+    store = InMemoryStateStore()
+
+    def factory(key):
+        return FakeAgentEngine(clock, lambda req: [Text("ok")])
+
+    registry = AgentSessionRegistry(
+        factory,
+        channel.send,
+        clock,
+        SessionSettings(idle_timeout_seconds=300),
+        state_store=store,
+        release_idle_sessions=kw.get("release", True),
+        on_session_released=released,
+    )
+    return registry, released
+
+
+async def test_an_idle_session_is_released_and_the_next_input_gets_a_fresh_one(clock, channel):
+    registry, released = _release_env(clock, channel)
+    first = await registry.get_or_create("k")
+    await first.submit(UserMessage("k", "u", "hello"))
+    await channel.wait_for(TurnFinished)
+    await clock.advance(301)  # past the idle timeout
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert registry.get("k") is None and released.keys == ["k"]
+    second = await registry.get_or_create("k")
+    assert second is not first
+    await second.submit(UserMessage("k", "u", "again"))
+    await channel.wait_for(TurnFinished, count=2)
+
+
+async def test_a_session_is_kept_while_it_holds_something(clock, channel):
+    registry, released = _release_env(clock, channel)
+    session = await registry.get_or_create("k")
+    session._held_notices.append("a result nobody has seen")  # waits for the next turn
+    await session.submit(UserMessage("k", "u", "hello"))
+    await channel.wait_for(TurnFinished)
+    session._held_notices.append("held again")
+    await clock.advance(301)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert registry.get("k") is session and released.keys == []
+
+
+async def test_sessions_are_never_released_unless_the_registry_opts_in(clock, channel):
+    registry, released = _release_env(clock, channel, release=False)
+    session = await registry.get_or_create("k")
+    await session.submit(UserMessage("k", "u", "hello"))
+    await channel.wait_for(TurnFinished)
+    await clock.advance(301)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert registry.get("k") is session and released.keys == []

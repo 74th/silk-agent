@@ -673,3 +673,47 @@ async def test_history_created_after_a_reset_is_still_extended(clock, tmp_path):
     assert eng.session_id == "sid-1"
     assert store.extended[-1] == ("conv", "sid-1")
     assert all(sid != "old" for _, sid in store.extended[1:])
+
+
+async def test_an_interrupt_before_the_query_stops_the_turn_without_sending_it(clock, tmp_path):
+    # The stop arrives while the client is connecting: there is no query yet for the SDK's
+    # interrupt to reach, so the turn must not start.
+    gate = asyncio.Event()
+    eng = make(clock, tmp_path, lambda n: [("msg", text("never")), ("msg", result())])
+    original = FakeSDKClient.connect
+
+    async def slow_connect(self):
+        await gate.wait()
+        await original(self)
+
+    FakeSDKClient.connect = slow_connect  # type: ignore[method-assign]
+    try:
+        turn = asyncio.create_task(run(eng))
+        await asyncio.sleep(0.05)
+        await eng.interrupt()  # no client yet
+        gate.set()
+        events = await asyncio.wait_for(turn, 2)
+    finally:
+        FakeSDKClient.connect = original  # type: ignore[method-assign]
+    assert events == []
+    assert FakeSDKClient.instances[0].queries == []  # nothing was sent
+
+
+async def test_a_failed_append_is_not_counted_so_the_turn_can_still_end(clock, tmp_path):
+    eng = make(
+        clock,
+        tmp_path,
+        lambda n: [("block",), ("msg", text("done")), ("msg", result())],
+    )
+    turn = asyncio.create_task(run(eng))
+    await asyncio.sleep(0.05)
+    client = FakeSDKClient.instances[0]
+
+    async def broken_query(prompt):
+        raise ConnectionError("pipe closed")
+
+    client.query = broken_query  # type: ignore[method-assign]
+    assert await eng.append("one more thing") is False  # the caller queues it instead
+    await eng.interrupt()
+    events = await asyncio.wait_for(turn, 2)  # still ends: _sent was rolled back
+    assert not any(isinstance(e, TurnFailed) for e in events)

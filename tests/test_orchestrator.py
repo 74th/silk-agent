@@ -517,3 +517,55 @@ async def test_a_reserved_arrival_that_is_never_handled_does_not_block_later_inp
     await task
     await channel.wait_for(TurnFinished)
     assert [r.text for r in engines["k"].requests] == ["B"]
+
+
+async def test_a_failed_turn_shows_users_the_kind_of_failure_never_its_text(clock, channel):
+    from silk_agent.core.events import TurnFailed
+    from silk_agent.core.orchestrator import public_failure
+
+    orch, _ = make(clock, channel, [Text("unused")])
+    await orch.emit(TurnFailed("k", "t1", "ValueError: token xoxb-123 is invalid at /home/app"))
+    await orch.emit(TurnFailed("k", "t1", "the SDK said: customer taro@example.com"))
+    shown = [e.error for e in channel.of(TurnFailed)]
+    assert shown == [
+        "ValueError（詳細は表示しません）",
+        "処理に失敗しました（詳細は表示しません）",
+    ]
+    assert all("xoxb" not in e and "taro" not in e for e in shown)
+    assert public_failure("TimeoutError") == "処理に失敗しました（詳細は表示しません）"
+
+
+async def test_the_owners_email_is_filled_in_later_when_the_first_lookup_failed(clock, channel):
+    from silk_agent.core.events import SenderInfo
+    from silk_agent.testing.fakes import InMemoryStateStore
+
+    store = InMemoryStateStore()
+    orch, _ = make(clock, channel, [Text("ok")], state_store=store)
+
+    def from_user(user, email):
+        return UserMessage("k", user, "hi", sender=SenderInfo(email=email))
+
+    await orch.handle(from_user("U1", ""))  # users.info failed: no e-mail
+    state = await store.get("k")
+    assert (state.owner_user, state.owner_email) == ("U1", "")
+    await orch.handle(from_user("U2", "other@example.com"))  # somebody else: not the owner
+    assert (await store.get("k")).owner_email == ""
+    await orch.handle(from_user("U1", "owner@example.com"))  # the owner again, e-mail known
+    state = await store.get("k")
+    assert (state.owner_user, state.owner_email) == ("U1", "owner@example.com")
+    await orch.handle(from_user("U1", "changed@example.com"))  # a recorded e-mail is kept
+    assert (await store.get("k")).owner_email == "owner@example.com"
+
+
+async def test_the_bookkeeping_of_a_released_conversation_goes_with_it(clock, channel):
+    orch, _ = make(clock, channel, [Text("ok")])
+    orch.reserve("k")
+    orch.release("k", 1)
+    orch._owner_locks["k"]  # noqa: B018 - creates the lock like a first message does
+    orch._forget_conversation("k")
+    assert "k" not in orch._owner_locks and "k" not in orch._arrivals
+    # An input still being checked keeps its counters: a reset would let a later input take an
+    # earlier place than a stop that is already recorded.
+    arrival = orch.reserve("busy")
+    orch._forget_conversation("busy")
+    assert orch._arrivals["busy"] == arrival

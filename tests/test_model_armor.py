@@ -8,10 +8,12 @@ MATCH = ma.FilterMatchState.MATCH_FOUND
 NO_MATCH = ma.FilterMatchState.NO_MATCH_FOUND
 
 
-def result(**filters):
-    """Build a SanitizationResult from {name: FilterResult}."""
+def result(invocation=ma.InvocationResult.SUCCESS, **filters):
+    """Build a SanitizationResult from {name: FilterResult} (the API reports SUCCESS)."""
     state = MATCH if any(_matched(f) for f in filters.values()) else NO_MATCH
-    return ma.SanitizationResult(filter_match_state=state, filter_results=filters)
+    return ma.SanitizationResult(
+        filter_match_state=state, filter_results=filters, invocation_result=invocation
+    )
 
 
 def _matched(fr):
@@ -169,3 +171,24 @@ def test_split_oversized_single_line():
     text = "x" * 1000
     parts = split_text(text, 300)
     assert "".join(parts) == text and all(len(p) <= 300 for p in parts)
+
+
+def test_no_match_from_an_incomplete_invocation_is_not_a_pass():
+    # Some filters may not have run: "nothing matched" proves nothing.
+    for invocation in (
+        ma.InvocationResult.PARTIAL,
+        ma.InvocationResult.FAILURE,
+        ma.InvocationResult.INVOCATION_RESULT_UNSPECIFIED,
+    ):
+        out = ModelArmorSanitizer.interpret(
+            result(invocation, pi_and_jailbreak=pi(NO_MATCH)), "text"
+        )
+        assert out.status == "error", invocation
+        assert out.text == ""
+
+
+def test_a_match_is_still_acted_on_when_the_invocation_was_partial():
+    out = ModelArmorSanitizer.interpret(
+        result(ma.InvocationResult.PARTIAL, sdp=sdp("MASKED")), "secret"
+    )
+    assert (out.status, out.text) == ("masked", "MASKED")

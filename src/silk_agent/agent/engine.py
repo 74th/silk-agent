@@ -372,6 +372,10 @@ class ClaudeAgentEngine:
             if notice is not None:
                 yield Notice(self._key, notice)
             client = await self._ensure_client(resume_session_id)
+            if self._interrupted:
+                # A stop arrived while the skills were copied or the client connected: there
+                # was no query yet for the SDK's interrupt to reach, so nothing is sent.
+                return
             if self._session_id is not None and self._s.on_query_start is not None:
                 await self._s.on_query_start(
                     self._key,
@@ -510,7 +514,17 @@ class ClaudeAgentEngine:
         if self._queue is None or self._client is None or self._interrupted or self._closing:
             return False
         self._sent += 1  # before the await: the pump must keep reading for this prompt
-        await self._client.query(text)
+        try:
+            await self._client.query(text)
+        except asyncio.CancelledError:
+            self._sent -= 1
+            raise
+        except Exception:
+            # Nothing was sent: counting it would keep the turn waiting for an echo that never
+            # comes. The caller queues the text as a turn of its own.
+            self._sent -= 1
+            log.exception("could not append a message to the running turn of %s", self._key)
+            return False
         return True
 
     async def reset(self) -> None:

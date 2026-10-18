@@ -203,6 +203,7 @@ async def build_services(
         notice_ack=runtime.ack_notices,
         sandbox_ready=runtime.is_ready,
         hooks=dispatcher,
+        release_idle_sessions=True,  # one process serves every conversation: let idle ones go
     )
     # A backgrounded command reports its completion to its conversation.
     background.on_finished = orchestrator.notify
