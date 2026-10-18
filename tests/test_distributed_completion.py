@@ -160,3 +160,46 @@ async def test_user_resume_releases_held_results_back_to_the_queue_once():
     queued = inbox.inputs[key]
     assert await CompletionInputDelivery(inbox, owner, resumed).dispatch(queued) == "appended"
     assert "cmd-1" in resumed.text
+
+
+@pytest.mark.asyncio
+async def test_queued_completion_is_not_appended_after_a_stop_or_an_owner_change():
+    from dataclasses import replace
+
+    now = datetime.now(UTC)
+
+    async def setup():
+        inbox = FakeInboxStore()
+        owner = OwnershipToken("conversation", "w-b", "i-b", 2, 1, now + timedelta(minutes=1))
+        inbox.owners[owner.conversation_key] = owner
+        envelope = await inbox.accept_input(
+            conversation_key=owner.conversation_key,
+            input_id="completion-queued",
+            conversation_generation=1,
+            kind="command_finished",
+            payload={"command_id": "cmd-1", "state": "finished"},
+            created_at=now,
+        )
+        queued = replace(envelope, delivery_state=InputDeliveryState.QUEUED)
+        inbox.inputs[(owner.conversation_key, envelope.input_id)] = queued
+        return inbox, owner, queued
+
+    # The record was read as queued, then an authorized STOP cancelled it before this ran.
+    inbox, owner, queued = await setup()
+    inbox.inputs[(owner.conversation_key, queued.input_id)] = replace(
+        queued, delivery_state=InputDeliveryState.CANCELLED
+    )
+    session = Session("appended")
+    result = await CompletionInputDelivery(inbox, owner, session).dispatch(queued)
+    assert result == "claimed_elsewhere" and session.input_id is None
+
+    # Ownership moved to another Worker/epoch after the read.
+    inbox, owner, queued = await setup()
+    inbox.owners[owner.conversation_key] = OwnershipToken(
+        owner.conversation_key, "w-c", "i-c", 3, 1, now + timedelta(minutes=1)
+    )
+    session = Session("appended")
+    assert await CompletionInputDelivery(inbox, owner, session).dispatch(queued) == (
+        "claimed_elsewhere"
+    )
+    assert session.input_id is None

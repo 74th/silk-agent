@@ -147,7 +147,9 @@ class FirestoreInboxStore:
         collection_name = "controls" if sender_id is not None else "inputs"
         record_id = document_id(input_id, prefix="input")
         record_ref = conversation_ref.collection(collection_name).document(record_id)
-        transaction = self.client.transaction()
+        # Concurrent receipts of one conversation (mention + message events, two Gateways)
+        # contend on its document; allow more retries than the default 5 before giving up.
+        transaction = self.client.transaction(max_attempts=15)
 
         @async_transactional
         async def write(transaction: firestore.AsyncTransaction) -> tuple[dict[str, Any], bool]:
@@ -173,9 +175,11 @@ class FirestoreInboxStore:
                         else value
                     )
 
+                # The generation is not compared: a redelivery that crosses a reset carries the
+                # new generation, but it is the same Slack post (same input id / receipts) and
+                # must be deduplicated, not rejected and left unacknowledged.
                 expected_data = {
                     "conversation_key": conversation_key,
-                    "conversation_generation": conversation_generation,
                     "kind": kind,
                     "payload": without_sender(dict(payload)),
                 }

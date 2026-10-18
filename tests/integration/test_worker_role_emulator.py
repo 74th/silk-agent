@@ -382,3 +382,59 @@ async def test_redelivery_of_an_enriched_message_is_deduplicated_not_a_conflict(
         assert len(await inbox.list_unfinished(key)) == 1
     finally:
         client.close()
+
+
+@pytest.mark.asyncio
+async def test_redelivery_after_a_reset_is_deduplicated_not_a_conflict():
+    emulator_host = os.environ.get("SILK_AGENT_FIRESTORE_EMULATOR_HOST")
+    if not emulator_host:
+        pytest.skip("set SILK_AGENT_FIRESTORE_EMULATOR_HOST to run the Firestore emulator test")
+    prefix = f"test-{uuid.uuid4().hex[:12]}"
+    dist = DistributedExecutionConfig(firestore_project=f"silk-agent-test-{uuid.uuid4().hex[:12]}")
+    client = create_firestore_client(dist, emulator_host=emulator_host)
+    inbox = FirestoreInboxStore(client, collection_prefix=prefix)
+    key = f"slack:T:C:{uuid.uuid4().hex}"
+    args = dict(
+        conversation_key=key,
+        input_id="C:100.2",
+        conversation_generation=1,
+        kind="message",
+        payload={"text": "hello", "user": "U1"},
+        created_at=datetime.now(UTC),
+        workspace="W",
+        team="T",
+        channel="C",
+        message_ts="100.2",
+        event_id="Ev1",
+    )
+    control = dict(
+        conversation_key=key,
+        input_id="C:100.3",
+        conversation_generation=1,
+        kind="reset_candidate",
+        payload={"text": "リセット", "user": "U1"},
+        created_at=datetime.now(UTC),
+        workspace="W",
+        team="T",
+        channel="C",
+        message_ts="100.3",
+        event_id="Ev3",
+        sender_id="U1",
+    )
+    try:
+        first = await inbox.accept_received(**args)
+        reset = await inbox.accept_received(**control)
+        # The conversation moves to generation 2 (a reset), then Slack redelivers both posts
+        # because an ACK was lost. The Normalizer now stamps generation 2 on them.
+        await (
+            client.collection(f"{prefix}_conversations")
+            .document(inbox._conversation_id(key))
+            .update({"conversation_generation": 2})
+        )
+        again = await inbox.accept_received(**{**args, "conversation_generation": 2})
+        reset_again = await inbox.accept_received(**{**control, "conversation_generation": 2})
+        assert again.input_id == first.input_id and reset_again.input_id == reset.input_id
+        assert again.conversation_generation == 1  # the original record is returned unchanged
+        assert len(await inbox.list_unfinished(key)) == 1  # no extra input was created
+    finally:
+        client.close()

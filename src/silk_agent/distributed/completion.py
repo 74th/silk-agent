@@ -35,32 +35,31 @@ class CompletionInputDelivery:
             return "ignored"
         if envelope.conversation_generation != self._owner.conversation_generation:
             return "stale"
-        if envelope.delivery_state is InputDeliveryState.QUEUED:
-            # Saved as queued but never handed to a session (the previous Worker stopped, or a
-            # held result was released by the user's resume): nothing reached an SDK, so it is
-            # safe to hand it over now. accepted/uncertain are never re-sent.
-            pass
-        elif envelope.delivery_state is not InputDeliveryState.PENDING:
+        if envelope.delivery_state not in {InputDeliveryState.PENDING, InputDeliveryState.QUEUED}:
+            return "claimed_elsewhere"  # accepted/uncertain/held results are never re-sent
+        # Both a fresh result (PENDING) and one left QUEUED by a previous Worker (or released
+        # from HELD by the user's resume) are claimed through the fenced CAS. It re-checks the
+        # current owner, generation, stop barrier and state; if any changed since this record was
+        # read (a STOP, a reset, another Worker), nothing is appended to the SDK.
+        expected = envelope.delivery_state
+        attempt_id = uuid.uuid4().hex
+        if not await self._inbox.advance_input(
+            conversation_key=envelope.conversation_key,
+            input_id=envelope.input_id,
+            owner=self._owner,
+            expected=expected,
+            new_state=InputDeliveryState.DISPATCHING,
+            dispatch_attempt_id=attempt_id,
+        ):
             return "claimed_elsewhere"
-        else:
-            attempt_id = uuid.uuid4().hex
-            if not await self._inbox.advance_input(
-                conversation_key=envelope.conversation_key,
-                input_id=envelope.input_id,
-                owner=self._owner,
-                expected=InputDeliveryState.PENDING,
-                new_state=InputDeliveryState.DISPATCHING,
-                dispatch_attempt_id=attempt_id,
-            ):
-                return "claimed_elsewhere"
-            if not await self._inbox.advance_input(
-                conversation_key=envelope.conversation_key,
-                input_id=envelope.input_id,
-                owner=self._owner,
-                expected=InputDeliveryState.DISPATCHING,
-                new_state=InputDeliveryState.QUEUED,
-            ):
-                return "fenced"
+        if not await self._inbox.advance_input(
+            conversation_key=envelope.conversation_key,
+            input_id=envelope.input_id,
+            owner=self._owner,
+            expected=InputDeliveryState.DISPATCHING,
+            new_state=InputDeliveryState.QUEUED,
+        ):
+            return "fenced"
         try:
             outcome = await self._session.notify(
                 _completion_text(envelope), input_id=envelope.input_id

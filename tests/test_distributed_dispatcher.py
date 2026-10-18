@@ -274,3 +274,54 @@ async def test_a_refused_hand_off_is_retried_without_repeating_preparation():
     assert attempts == [1, 1, 1] and prepared == [1]  # guard/history ran once
     dispatcher.stop()
     await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("still_unfinished", "expect_unblocked"), [(False, True), (True, False)])
+async def test_full_page_cancellation_is_verified_per_waiting_input(
+    still_unfinished, expect_unblocked
+):
+    first_entered = asyncio.Event()
+    never = asyncio.Event()
+    dispatched = []
+    full_page = [input_envelope(seq) for seq in range(3, 6)]
+    records = [input_envelope(1), *full_page[:2]]
+
+    async def prepare(record):
+        if record.seq == 1:
+            first_entered.set()
+            await never.wait()
+        return record.seq
+
+    async def run_turns(stop):
+        await stop.wait()
+
+    async def dispatch(envelope, _prepared):
+        dispatched.append(envelope.seq)
+
+    asked = []
+
+    async def verify(seq):
+        asked.append(seq)
+        return still_unfinished
+
+    dispatcher = ConversationDispatcher(
+        read_inputs=lambda: _resolved(tuple(records)),
+        read_controls=lambda: _resolved(()),
+        prepare_input=prepare,
+        dispatch_input=dispatch,
+        handle_control=lambda _control: _resolved(None),
+        run_turns=run_turns,
+        poll_seconds=0.01,
+        read_limit=3,
+        still_unfinished=verify,
+    )
+    task = asyncio.create_task(dispatcher.run())
+    await first_entered.wait()
+    # STOP cancelled input 1; the next page is full (3 entries), so input 1 is merely absent.
+    records[:] = full_page
+    await asyncio.sleep(0.15)
+    assert 1 in asked
+    assert bool(dispatched) is expect_unblocked
+    dispatcher.stop()
+    await task

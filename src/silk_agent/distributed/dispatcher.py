@@ -45,11 +45,14 @@ class ConversationDispatcher[Control, Prepared]:
         control_key: Callable[[Control], str] = _default_control_key,
         poll_seconds: float = 1.0,
         read_limit: int | None = None,
+        still_unfinished: Callable[[int], Awaitable[bool]] | None = None,
     ) -> None:
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
         # A full page may hide later records; absence from it is then not a cancellation.
         self._read_limit = read_limit
+        # Asked only when the page is full: is the input with this seq still unfinished?
+        self._still_unfinished = still_unfinished
         self._read_inputs = read_inputs
         self._read_controls = read_controls
         self._prepare_input = prepare_input
@@ -109,6 +112,11 @@ class ConversationDispatcher[Control, Prepared]:
                 if complete:
                     await self._drop_vanished(active_keys)
                 else:
+                    # A full page can hide valid inputs: absence alone proves nothing. Ask the
+                    # store about each waiting input that is missing before cancelling it.
+                    await self._drop_vanished(
+                        active_keys, verify=self._still_unfinished, verified_only=True
+                    )
                     self._seen_inputs.intersection_update(active_keys | set(self._input_tasks))
                 for record in records:
                     if record.delivery_state not in {
@@ -131,12 +139,27 @@ class ConversationDispatcher[Control, Prepared]:
                 log.warning("conversation input scan failed (%s)", type(exc).__name__)
             await self._wait(self._input_wake)
 
-    async def _drop_vanished(self, active_keys: set[str]) -> None:
+    async def _drop_vanished(
+        self,
+        active_keys: set[str],
+        *,
+        verify: Callable[[int], Awaitable[bool]] | None = None,
+        verified_only: bool = False,
+    ) -> None:
         """A waiting input that left the unfinished set was cancelled (stop barrier) or
         finished elsewhere: stop its task and release the sequence it was holding."""
         for key, (task, seq) in tuple(self._input_tasks.items()):
             if key in active_keys or task.done():
                 continue
+            if verified_only or verify is not None:
+                if verify is None:
+                    continue  # a full page and no way to check: keep waiting
+                try:
+                    if await verify(seq):
+                        continue  # still unfinished, merely beyond this page
+                except Exception as exc:
+                    log.warning("could not verify a waiting input (%s)", type(exc).__name__)
+                    continue
             task.cancel()
             async with self._sequence_changed:
                 self._pending_sequences.discard(seq)

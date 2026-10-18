@@ -64,6 +64,7 @@ class DistributedConversationActor:
         self._task: asyncio.Task[None] | None = None
         self._closed = False
         self._origin_seq = 0
+        self._background: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
         if self._task is not None:
@@ -94,6 +95,7 @@ class DistributedConversationActor:
             run_turns=self._wait_for_stop,
             poll_seconds=self._poll_seconds,
             read_limit=INPUT_PAGE,
+            still_unfinished=self._still_unfinished,
         )
         self._task = asyncio.create_task(self._dispatcher.run(), name="distributed-conversation")
         await asyncio.sleep(0)
@@ -180,6 +182,9 @@ class DistributedConversationActor:
         if self._task is not None:
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
+        for task in tuple(self._background):
+            task.cancel()
+        await asyncio.gather(*self._background, return_exceptions=True)
         await self._orchestrator.registry.aclose()
 
     async def _read_inputs(self) -> Sequence[InputEnvelope]:
@@ -236,16 +241,39 @@ class DistributedConversationActor:
             # input stranded behind a dispatcher that considers it handled.
             log.warning("input dispatch was rejected; will retry")
             raise DispatchRetryable()
-        if outcome != "rejected" and envelope.kind == "message":
+        if envelope.kind == "message":
             # The user is back: hand over command results kept while the turn was interrupted.
+            # Run it on the actor's own task, not this input's: once the reply completes, the
+            # input leaves the unfinished set and its dispatcher task is cancelled.
+            self._spawn(self._release_held())
+
+    def _spawn(self, coroutine) -> None:
+        task = asyncio.create_task(coroutine, name="distributed-actor-background")
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def _release_held(self) -> None:
+        try:
             released = await release_held_completions(
                 self._inbox,
                 self._owner,
                 command_monitor=self._command_monitor,
                 now=datetime.now(UTC),
             )
-            if released and self._dispatcher is not None:
-                self._dispatcher.wake_inputs()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Each result stays held (idempotent) and is released by the next user message.
+            log.warning("could not release held results (%s)", type(exc).__name__)
+            return
+        if released and self._dispatcher is not None:
+            self._dispatcher.wake_inputs()
+
+    async def _still_unfinished(self, seq: int) -> bool:
+        records = await self._inbox.list_unfinished(
+            self._owner.conversation_key, after_seq=seq - 1, limit=1
+        )
+        return bool(records) and records[0].seq == seq
 
     async def _dispatch_completion(self, envelope: InputEnvelope) -> None:
         if self._completion is None:

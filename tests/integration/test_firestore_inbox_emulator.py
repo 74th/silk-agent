@@ -682,7 +682,11 @@ async def test_stop_control_progresses_while_firestore_input_guard_is_waiting():
         await asyncio.wait_for(after_dispatched.wait(), timeout=2)
         dispatcher.stop()
         await running
-        assert attempts == {before.input_id: False, after.input_id: True}
+        # A was cancelled by the stop barrier: it never dispatches successfully. Depending on
+        # whether the reader dropped its task before the guard returned, it either never tries
+        # or tries late and is fenced (False). B proceeds without waiting for A's guard.
+        assert attempts.get(before.input_id) in (None, False)
+        assert attempts[after.input_id] is True
         saved = await conversations.get_conversation(key)
         assert saved is not None and saved["stop_seq"] == control.seq
     finally:
