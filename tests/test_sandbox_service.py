@@ -799,7 +799,7 @@ async def test_command_status_output_and_cancel_use_the_recorded_sandbox_generat
 
         async def read_output(self, _command_id, *, stream, cursor, limit):
             assert stream == "stdout" and cursor == 0 and limit == 128
-            return SimpleNamespace(data=b"hello", cursor=5, complete=True, output_complete=True)
+            return SimpleNamespace(data=b"hello", cursor=5, complete=True, output_complete=False)
 
         async def cancel(self, command_id):
             canceled.append(command_id)
@@ -855,7 +855,10 @@ async def test_command_status_output_and_cancel_use_the_recorded_sandbox_generat
             },
             headers=headers,
         )
-        assert (await response.json())["data_base64"] == "aGVsbG8="
+        output = await response.json()
+        assert output["data_base64"] == "aGVsbG8="
+        # The stream ended, but part of it was never stored: complete, and marked truncated.
+        assert output["complete"] is True and output["truncated"] is True
 
         response = await client.post(
             "/v1/commands/cmd-1/cancel",
@@ -1070,3 +1073,16 @@ async def test_repeat_cancel_of_an_already_finished_command_reports_cancelled_no
         assert (await response.json())["state"] == "cancelled"
     finally:
         await client.close()
+
+
+async def test_the_service_returns_from_its_wait_on_sigterm():
+    import os
+    import signal
+
+    from silk_agent.sandbox.service_runtime import wait_for_termination
+
+    waiting = asyncio.create_task(wait_for_termination())
+    await asyncio.sleep(0.05)  # the handler is installed
+    assert not waiting.done()
+    os.kill(os.getpid(), signal.SIGTERM)
+    await asyncio.wait_for(waiting, 2)

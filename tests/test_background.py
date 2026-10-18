@@ -334,5 +334,152 @@ async def test_stop_word_stops_background_commands_while_idle(clock):
     ]
 
 
+class RemoteRuntime(SlowRuntime):
+    """Like the GKE runtime: cancelling the asyncio wait does not stop the process; only
+    `cancel_command` does, and it may fail to confirm."""
+
+    def __init__(self, outcome="confirmed"):
+        super().__init__()
+        self.outcome = outcome
+        self.cancel_requests: list[str] = []
+
+    async def run_command(self, key, command, *, cwd=None, timeout_seconds=None, on_started=None):
+        cid = f"cmd-{len(self.sent_commands) + 1}"
+        self.sent_commands.append((key, command))
+        if on_started is not None:
+            await on_started(cid)
+        await self.gates.setdefault(command, asyncio.Event()).wait()
+        return CommandResult(cid, "completed", 0)
+
+    async def cancel_command(self, key, command_id, request_id=None):
+        self.cancel_requests.append(command_id)
+        return self.outcome
+
+
+class SequencedRuntime(RemoteRuntime):
+    """Each cancel answers with the next outcome of the list."""
+
+    def __init__(self, outcomes):
+        super().__init__()
+        self.outcomes = list(outcomes)
+
+    async def cancel_command(self, key, command_id, request_id=None):
+        self.cancel_requests.append(command_id)
+        return self.outcomes.pop(0)
+
+
+class RecordingTracker:
+    def __init__(self):
+        self.live: set[str] = set()
+
+    async def started(self, key, command_id):
+        self.live.add(command_id)
+
+    async def finished(self, key, command_id):
+        self.live.discard(command_id)
+
+
+async def test_stop_with_only_a_background_command_cancels_it_on_the_runtime(clock):
+    rt = RemoteRuntime()
+    channel = ScriptedChannel()
+    bg = BackgroundCommands(rt)
+    orch = ConversationOrchestrator(
+        lambda key: FakeAgentEngine(clock, [Text("ok")]),
+        channel,
+        clock,
+        guard=AllowAllGuard(),
+        sanitizer=NoopSanitizer(),
+        stop_words=StopWords(["停止"]),
+        settings=SessionSettings(),
+        cancel_background=bg.cancel_all,
+    )
+    bg.detach(await bg.start("K", "sleep 300"))
+    await orch.handle(UserMessage("K", "u", "停止"))
+    assert rt.cancel_requests == ["cmd-1"]
+    assert [n.text for n in channel.of(Notice)] == [
+        "バックグラウンドで実行中のコマンド1件を停止しました。"
+    ]
+
+
+async def test_cancel_all_reaches_the_runtime_with_a_command_monitor_too():
+    class Monitor:
+        async def orphan(self, _command_id):
+            pass
+
+    rt = RemoteRuntime()
+    bg = BackgroundCommands(rt, command_monitor=Monitor())
+    bg.detach(await bg.start("K", "sleep 300"))
+    report = await bg.cancel_all("K")
+    assert (report.requested, report.confirmed) == (1, 1)
+    assert rt.cancel_requests == ["cmd-1"]
+
+
+async def test_unconfirmed_cancel_is_not_reported_as_stopped_and_keeps_the_id(clock):
+    rt = RemoteRuntime(outcome="unknown")
+    tracker = RecordingTracker()
+    bg = BackgroundCommands(rt, tracker)
+    channel = ScriptedChannel()
+    orch = ConversationOrchestrator(
+        lambda key: FakeAgentEngine(clock, [Text("ok")]),
+        channel,
+        clock,
+        guard=AllowAllGuard(),
+        sanitizer=NoopSanitizer(),
+        stop_words=StopWords(["停止"]),
+        settings=SessionSettings(),
+        cancel_background=bg.cancel_all,
+    )
+    bg.detach(await bg.start("K", "sleep 300"))
+    await orch.handle(UserMessage("K", "u", "停止"))
+    texts = [n.text for n in channel.of(Notice)]
+    assert len(texts) == 1 and "停止を確認できませんでした" in texts[0]
+    assert tracker.live == {"cmd-1"}  # restart notices can still find it
+
+
+async def test_mixed_stop_reports_both_the_stopped_and_the_unconfirmed_commands(clock):
+    rt = SequencedRuntime(["confirmed", "unknown"])
+    tracker = RecordingTracker()
+    bg = BackgroundCommands(rt, tracker)
+    channel = ScriptedChannel()
+    orch = ConversationOrchestrator(
+        lambda key: FakeAgentEngine(clock, [Text("ok")]),
+        channel,
+        clock,
+        guard=AllowAllGuard(),
+        sanitizer=NoopSanitizer(),
+        stop_words=StopWords(["停止"]),
+        settings=SessionSettings(),
+        cancel_background=bg.cancel_all,
+    )
+    bg.detach(await bg.start("K", "first"))
+    bg.detach(await bg.start("K", "second"))
+    await orch.handle(UserMessage("K", "u", "停止"))
+    texts = [n.text for n in channel.of(Notice)]
+    assert texts == [
+        "バックグラウンドで実行中のコマンド1件を停止しました。",
+        "バックグラウンドコマンド1件の停止を確認できませんでした。まだ動いている可能性があります。",
+    ]
+    assert tracker.live == {"cmd-2"}  # only the unconfirmed one is still tracked
+
+
+async def test_an_accepted_but_unfinished_stop_keeps_the_id_and_is_reported_as_requested(clock):
+    rt = SequencedRuntime(["accepted"])
+    tracker = RecordingTracker()
+    bg = BackgroundCommands(rt, tracker)
+    bg.detach(await bg.start("K", "sleep 300"))
+    report = await bg.cancel_all("K")
+    assert (report.confirmed, report.accepted) == (0, 1)
+    assert tracker.live == {"cmd-1"}
+
+
+async def test_cancel_command_tool_does_not_report_an_unconfirmed_stop_as_success():
+    rt = RemoteRuntime(outcome="unknown")
+    bg = BackgroundCommands(rt)
+    tools = {t.name: t.handler for t in build_sandbox_tools("K", rt, None, bg, 0.01)}
+    await tools["bash"]({"command": "sleep 300"})
+    res = await tools["cancel_command"]({"command_id": "cmd-1"})
+    assert "止めました" not in body(res) and "確認できません" in body(res)
+
+
 def test_system_user_name():
     assert SYSTEM_USER == "system"

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -34,6 +35,7 @@ class BackgroundCommand:
     result: CommandResult | None = None
     backgrounded: bool = False  # the tool call returned before the command finished
     cancelled: bool = False  # stopped on request: no completion notice
+    cancel_unconfirmed: bool = False  # the runtime could not confirm the stop: it may still run
     started: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -166,8 +168,8 @@ class BackgroundCommands:
             return outcome
         if entry is None or entry.result is not None:
             return False
-        await self._cancel(entry)
-        return True
+        outcome = await self._cancel(entry)
+        return True if outcome == "confirmed" else outcome
 
     async def status(self, key: str, command_id: str) -> CommandResult:
         entry = self.find(key, command_id)
@@ -189,12 +191,14 @@ class BackgroundCommands:
                 return archived
         return await self._runtime.command_output(key, command_id, cursor)
 
-    async def cancel_all(self, key: str) -> int:
+    async def cancel_all(self, key: str) -> CommandCancelReport:
         """Stop every running command of the conversation (no completion notices)."""
         entries = self.running(key)
+        counts = {"confirmed": 0, "accepted": 0, "unknown": 0}
         for entry in entries:
-            await self._cancel(entry)
-        return len(entries)
+            outcome = await self._cancel(entry)
+            counts[outcome if outcome in counts else "unknown"] += 1
+        return CommandCancelReport(requested=len(entries), **counts)
 
     async def orphan_all(self, key: str) -> int:
         """Leave remote commands running while detaching this actor's foreground waits."""
@@ -214,8 +218,7 @@ class BackgroundCommands:
         if page_size < 1:
             raise ValueError("page_size must be positive")
         if self._command_monitor is None:
-            count = await self.cancel_all(key)
-            return CommandCancelReport(requested=count, confirmed=count)
+            return await self.cancel_all(key)
         counts = {
             "requested": 0,
             "confirmed": 0,
@@ -249,12 +252,30 @@ class BackgroundCommands:
                 break
         return CommandCancelReport(**counts)
 
-    async def _cancel(self, entry: BackgroundCommand) -> None:
+    async def _cancel(self, entry: BackgroundCommand) -> str:
+        """Stop one command; "confirmed", or "accepted" / "unknown" when the stop is not proven.
+
+        A runtime with `cancel_command` (a remote Sandbox) is asked to stop the process by its
+        id: cancelling the asyncio wait alone leaves it running there. Without one, cancelling
+        the wait stops the process (LocalProcess)."""
         entry.cancelled = True
+        outcome = "confirmed"
+        if self._cancel_sender is not None and entry.command_id and entry.result is None:
+            try:
+                sent = await self._cancel_sender(
+                    entry.conversation_key, entry.command_id, uuid.uuid4().hex
+                )
+                outcome = sent if isinstance(sent, str) else "unknown"
+            except Exception:
+                log.exception("cancelling command %s failed", entry.command_id)
+                outcome = "unknown"
+        # Keep the id (and report "unknown") for a command that may still be running.
+        entry.cancel_unconfirmed = outcome != "confirmed"
         if entry.task is not None and not entry.task.done():
-            entry.task.cancel()  # the runtime stops the process when its wait is cancelled
+            entry.task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await entry.task
+        return outcome
 
     # ------------------------------------------------------------ internals
 
@@ -276,7 +297,9 @@ class BackgroundCommands:
                 on_started=on_started,
             )
         except asyncio.CancelledError:
-            result = CommandResult(entry.command_id, "cancelled")
+            result = CommandResult(
+                entry.command_id, "unknown" if entry.cancel_unconfirmed else "cancelled"
+            )
             raise
         finally:
             entry.result = result or CommandResult(entry.command_id, "unknown")

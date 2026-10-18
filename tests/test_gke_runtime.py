@@ -37,6 +37,7 @@ class FakeCommands:
         self.mode = "ok"
         self.gate = asyncio.Event()
         self.cancelled = []
+        self.ignores_cancel = False  # accepts the cancel (HTTP 202) but the process keeps running
 
     async def start(self, argv, *, command_id, cwd="", timeout_seconds=0):
         self.runs.append((argv, cwd, timeout_seconds, command_id))
@@ -60,10 +61,11 @@ class FakeCommands:
 
     async def cancel(self, command_id):
         self.cancelled.append(command_id)
-        self.gate.set()
+        if not self.ignores_cancel:
+            self.gate.set()
 
     async def get(self, command_id):
-        cancelled = command_id in self.cancelled
+        cancelled = command_id in self.cancelled and not self.ignores_cancel
         return {
             "command_id": command_id,
             "state": "finished" if cancelled else "running",
@@ -120,14 +122,14 @@ class FakeManager:
         pass
 
 
-def make(env=None):
+def make(env=None, **runtime_options):
     mgr = FakeManager()
 
     async def env_provider(key):
         return env or {}
 
     rt = GkeSessionSandboxRuntime(
-        mgr, env_provider=env_provider, session_key_factory=lambda t, s: (t, s)
+        mgr, env_provider=env_provider, session_key_factory=lambda t, s: (t, s), **runtime_options
     )
     return rt, mgr
 
@@ -239,6 +241,62 @@ async def test_cancelling_the_waiting_tool_leaves_the_sandbox_command_running():
     await rt.cancel_commands(key)
     assert cmds.cancelled == [command_id]
     assert (await rt.command_status(key, command_id)).outcome == "cancelled"
+
+
+async def test_cancel_command_sends_the_cancel_to_the_tracker_by_id():
+    rt, mgr = make()
+    key = "slack:T1:C1:1.0"
+    await rt.run_command(key, "warm")
+    cmds = mgr.handles[("T1", "C1:1.0")].commands
+    cmds.mode = "block"
+    task = asyncio.create_task(rt.run_command(key, "sleep 300"))
+    await asyncio.sleep(0.05)
+    command_id = cmds.runs[-1][3]
+    assert await rt.cancel_command(key, command_id) == "confirmed"
+    assert cmds.cancelled == [command_id]
+    assert (await asyncio.wait_for(task, 2)).outcome == "cancelled"
+
+
+async def test_an_accepted_cancel_is_not_a_confirmed_stop_while_the_process_runs():
+    # The tracker's cancel returns at once; only a finished record proves the stop.
+    rt, mgr = make(cancel_confirm_seconds=0.3)
+    key = "slack:T1:C1:1.0"
+    await rt.run_command(key, "warm")
+    cmds = mgr.handles[("T1", "C1:1.0")].commands
+    cmds.mode = "block"
+    cmds.ignores_cancel = True
+    task = asyncio.create_task(rt.run_command(key, "trap '' TERM; sleep 300"))
+    await asyncio.sleep(0.05)
+    command_id = cmds.runs[-1][3]
+    assert await rt.cancel_command(key, command_id) == "accepted"
+    assert cmds.cancelled == [command_id]
+    assert command_id in rt._running[key]  # the handle stays: it can still be cancelled
+    assert (await rt.command_status(key, command_id)).outcome == "running"
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_cancel_command_is_unknown_when_the_tracker_cannot_be_reached():
+    rt, mgr = make()
+    key = "slack:T1:C1:1.0"
+    await rt.run_command(key, "warm")
+    cmds = mgr.handles[("T1", "C1:1.0")].commands
+
+    async def broken(command_id):
+        raise ConnectionError("tracker down")
+
+    cmds.cancel = broken
+    assert await rt.cancel_command(key, "cmd-x") == "unknown"
+
+
+async def test_cancel_command_after_a_restart_goes_through_the_session():
+    # No local handle (the Bot restarted): the cancel still reaches the tracker by id.
+    rt, mgr = make()
+    key = "slack:T1:C1:1.0"
+    await rt.run_command(key, "warm")
+    cmds = mgr.handles[("T1", "C1:1.0")].commands
+    assert await rt.cancel_command(key, "cmd-from-before") == "confirmed"
+    assert cmds.cancelled == ["cmd-from-before"]
 
 
 async def test_status_and_output():

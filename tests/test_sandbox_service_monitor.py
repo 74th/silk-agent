@@ -66,6 +66,16 @@ async def test_output_page_requires_an_existing_sandbox_and_reports_completeness
         "slack:T:C:1", "c", stream="stdout", cursor=0, limit_bytes=9
     )
     assert (page.data, page.next_cursor, page.complete) == (b"out", 3, True)
+    truncated = Commands({})
+
+    async def lossy(_command_id, *, stream, cursor, limit):
+        return SimpleNamespace(data=b"out", cursor=3, complete=True, output_complete=False)
+
+    truncated.read_output = lossy
+    page = await ServiceCommandRuntime(Manager(truncated)).read_output_page(
+        "slack:T:C:1", "c", stream="stdout", cursor=0, limit_bytes=9
+    )
+    assert page.complete and page.truncated
     with pytest.raises(RuntimeError):
         await ServiceCommandRuntime(Manager(None)).read_output_page(
             "slack:T:C:1", "c", stream="stdout", cursor=0, limit_bytes=9

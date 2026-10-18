@@ -668,7 +668,7 @@ class Tracker:
                 return
         current = await self.journal.get(command_id)
         if current and current.get("state") not in {"finished", "unknown"}:
-            await self._mark_unknown(
+            await self._mark_failed_or_unknown(
                 command_id, "sandboxd Start stream ended without an exit event"
             )
 

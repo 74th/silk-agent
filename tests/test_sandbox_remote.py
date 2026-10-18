@@ -1,6 +1,7 @@
 import asyncio
 import base64
 
+import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
@@ -54,7 +55,8 @@ async def test_remote_file_methods_send_conversation_and_owner_identity(tmp_path
     assert all(body["owner_epoch"] == 4 for _path, body in seen)
 
 
-async def test_remote_runtime_reads_paged_output_for_archive(tmp_path):
+@pytest.mark.parametrize("truncated", [False, True])
+async def test_remote_runtime_reads_paged_output_for_archive(tmp_path, truncated):
     seen = []
 
     async def output(request):
@@ -65,6 +67,7 @@ async def test_remote_runtime_reads_paged_output_for_archive(tmp_path):
                 "data_base64": base64.b64encode(b"large-output").decode(),
                 "next_cursor": len(b"large-output"),
                 "complete": True,
+                "truncated": truncated,
             }
         )
 
@@ -89,7 +92,7 @@ async def test_remote_runtime_reads_paged_output_for_archive(tmp_path):
         page = await runtime.read_output_page(
             "conversation-a", "cmd-1", stream="stderr", cursor=0, limit_bytes=128
         )
-    assert page.data == b"large-output" and page.complete
+    assert page.data == b"large-output" and page.complete and page.truncated is truncated
     assert seen[0]["stream"] == "stderr" and seen[0]["cursor"] == 0
 
 

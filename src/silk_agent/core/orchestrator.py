@@ -274,18 +274,20 @@ class ConversationOrchestrator:
     ) -> None:
         """Tell the user what a stop request cancelled (shared with the distributed path)."""
         if isinstance(background, CommandCancelReport) and background.requested:
+            # Each outcome is reported with its own count: a stop that worked for one command
+            # must not hide another whose stop is unconfirmed.
+            unconfirmed = background.unknown + background.rejected
+            notices = []
             if background.confirmed:
-                await self._channel.send(
-                    Notice(key, BACKGROUND_STOPPED.format(n=background.confirmed))
+                notices.append(BACKGROUND_STOPPED.format(n=background.confirmed))
+            if unconfirmed:
+                notices.append(BACKGROUND_STOP_UNKNOWN.format(n=unconfirmed))
+            if background.accepted or not notices:
+                notices.append(
+                    BACKGROUND_STOP_ACCEPTED.format(n=background.accepted or background.requested)
                 )
-            elif background.unknown or background.rejected:
-                await self._channel.send(
-                    Notice(key, BACKGROUND_STOP_UNKNOWN.format(n=background.requested))
-                )
-            else:
-                await self._channel.send(
-                    Notice(key, BACKGROUND_STOP_ACCEPTED.format(n=background.requested))
-                )
+            for text in notices:
+                await self._channel.send(Notice(key, text))
         elif isinstance(background, int) and background:
             await self._channel.send(Notice(key, BACKGROUND_STOPPED.format(n=background)))
         elif not stopped:

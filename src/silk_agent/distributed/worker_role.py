@@ -328,6 +328,20 @@ def _state_store(conversations: Any, owner_for: Callable[[str], OwnershipToken |
     return store
 
 
+def validate_actor_inputs(config: Config) -> None:
+    """Read what every actor needs, once, at start-up.
+
+    Actors are built when a conversation is assigned. A missing prompt, guard policy or
+    `${ENV}` in mcp.json must stop the Worker here, as it stops a single Pod, instead of
+    failing the first conversation that is assigned to it."""
+    from silk_agent.agent.mcp_config import load_mcp_servers
+
+    build_system_prompt(config)
+    build_input_guard(config)
+    build_output_sanitizer(config)
+    load_mcp_servers(config.resolve(config.mcp.config_file) if config.mcp.config_file else None)
+
+
 async def run_worker(config: Config) -> None:
     """Run the Worker role. It never receives Slack credentials."""
     if config.execution_mode != "distributed":
@@ -336,7 +350,6 @@ async def run_worker(config: Config) -> None:
     config.validate_namespace("worker")
     if config.session_store.provider != "agent_platform":
         raise ConfigError("worker requires session_store.provider: agent_platform")
-    from silk_agent.agent.mcp_config import load_mcp_servers
     from silk_agent.app import build_skill_source
     from silk_agent.sandbox.output_archive import GCSCommandOutputStore
     from silk_agent.sandbox.remote import RemoteSandboxRuntime, RemoteSandboxSessions
@@ -357,12 +370,7 @@ async def run_worker(config: Config) -> None:
     from silk_agent.stores.firestore.watch import worker_reservation_watch
     from silk_agent.stores.firestore.workers import FirestoreWorkerDirectory
 
-    # Actors are built when a conversation is assigned. A missing prompt, guard policy or
-    # `${ENV}` in mcp.json must stop the start-up here, as it does for a single Pod.
-    build_system_prompt(config)
-    build_input_guard(config)
-    build_output_sanitizer(config)
-    load_mcp_servers(config.resolve(config.mcp.config_file) if config.mcp.config_file else None)
+    validate_actor_inputs(config)
 
     dist = config.distributed
     identity = WorkerIdentity.from_environment()

@@ -2817,3 +2817,41 @@ async def test_ownership_activation_renewal_and_release_are_fenced():
         assert (await conversation_ref.get()).get("allocation_state") == "idle"
     finally:
         client.close()
+
+
+@pytest.mark.asyncio
+async def test_sender_enrichment_ignores_inputs_of_another_prefix():
+    emulator_host = os.environ.get("SILK_AGENT_FIRESTORE_EMULATOR_HOST")
+    if not emulator_host:
+        pytest.skip("set SILK_AGENT_FIRESTORE_EMULATOR_HOST to run the Firestore emulator test")
+    project = f"silk-agent-test-{uuid.uuid4().hex[:12]}"
+    client = create_firestore_client(
+        DistributedExecutionConfig(firestore_project=project), emulator_host=emulator_host
+    )
+    mine = FirestoreInboxStore(client, collection_prefix=f"mine-{uuid.uuid4().hex[:8]}")
+    other = FirestoreInboxStore(client, collection_prefix=f"other-{uuid.uuid4().hex[:8]}")
+    now = datetime.now(UTC)
+    try:
+        for store, key in ((mine, "mine-conversation"), (other, "other-conversation")):
+            await store.accept_received(
+                conversation_key=key,
+                input_id="C1:100.1",
+                conversation_generation=1,
+                kind="message",
+                payload={"text": "hello", "user": "U1"},
+                created_at=now,
+                workspace="T1",
+                team="T1",
+                channel="C1",
+                message_ts="100.1",
+                event_id=f"event-{key}",
+            )
+        # The collection group spans every prefix; each store sees only its own inputs.
+        assert [r["conversation_key"] for r in await mine.list_sender_enrichment_due(now=now)] == [
+            "mine-conversation"
+        ]
+        assert [r["conversation_key"] for r in await other.list_sender_enrichment_due(now=now)] == [
+            "other-conversation"
+        ]
+    finally:
+        client.close()
