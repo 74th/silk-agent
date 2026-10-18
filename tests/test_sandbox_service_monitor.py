@@ -79,6 +79,33 @@ async def test_a_suspended_sandbox_is_not_resumed_and_the_command_stays_unknown(
 
 
 @pytest.mark.asyncio
+async def test_the_unavailable_status_log_carries_no_response_body(caplog):
+    import json
+    import logging
+
+    from gke_session_sandbox.errors import RuntimeConnectionError, SandboxNotReadyError
+    from silk_agent.distributed.logging import RoleLogFormatter
+
+    secret = "PRIVATE_RESPONSE_BODY_12345"
+    commands = Commands(
+        {
+            "boom": RuntimeConnectionError(f"tracker returned 500: {secret}"),
+            "asleep": SandboxNotReadyError(f"Sandbox is suspended {secret}"),
+        }
+    )
+    runtime = ServiceCommandRuntime(Manager(commands))
+    with caplog.at_level(logging.WARNING, logger="silk_agent.sandbox.service_monitor"):
+        for command_id in ("boom", "asleep"):
+            result = await runtime.command_status("slack:T:C:1", command_id)
+            assert result.outcome == "unknown"
+    lines = [json.loads(RoleLogFormatter().format(record)) for record in caplog.records]
+    assert len(lines) == 2
+    assert all(secret not in line["message"] for line in lines)
+    assert "sandbox_not_ready" in lines[1]["message"]
+    assert "RuntimeConnectionError" in lines[0]["message"]  # the class is enough to tell
+
+
+@pytest.mark.asyncio
 async def test_a_lost_or_replaced_sandbox_ends_the_command():
     from gke_session_sandbox.errors import SandboxLostError, StaleGenerationError
 

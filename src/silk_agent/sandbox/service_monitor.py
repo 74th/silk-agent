@@ -11,7 +11,11 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from gke_session_sandbox.errors import SandboxLostError, StaleGenerationError
+from gke_session_sandbox.errors import (
+    SandboxLostError,
+    SandboxNotReadyError,
+    StaleGenerationError,
+)
 from silk_agent.core.ports import CommandResult
 from silk_agent.sandbox.output_archive import OutputPage
 from silk_agent.sandbox.service import _call_and_close, _session_key
@@ -50,12 +54,14 @@ class ServiceCommandRuntime:
             return CommandResult(command_id, "lost")
         except Exception as exc:
             # Not ready (suspended) or unreachable: nothing is known, and nothing is started.
-            log.warning(
-                "command status of %s unavailable (%s: %s)",
-                command_id,
-                type(exc).__name__,
-                exc,
+            # Only a fixed class is logged: the text of the exception can carry the body of the
+            # tracker's response.
+            reason = (
+                "sandbox_not_ready"
+                if isinstance(exc, SandboxNotReadyError)
+                else f"error:{type(exc).__name__}"
             )
+            log.warning("command status of %s unavailable (%s)", command_id, reason)
             return CommandResult(command_id, "unknown")
         state = record.get("state") if hasattr(record, "get") else None
         if state == "running":
