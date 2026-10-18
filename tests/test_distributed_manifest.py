@@ -89,21 +89,29 @@ def test_three_roles_have_probes_limits_and_the_released_replica_counts():
         assert deployment["spec"]["template"]["spec"]["automountServiceAccountToken"] is expected
 
 
-def test_slack_secrets_reach_only_the_roles_that_need_them_and_never_the_worker():
-    deployments = _deployments()
-    assert _secret_names(deployments["silk-agent-worker"]) == set()
-    worker_env = {env["name"] for env in _container(deployments["silk-agent-worker"])["env"]}
-    assert not {name for name in worker_env if name.startswith("SLACK_")}
-    gateway = _container(deployments["silk-agent-gateway"])
-    assert gateway["envFrom"] == [{"secretRef": {"name": "silk-agent-slack"}}]
-    control = _container(deployments["silk-agent-control"])
-    assert "envFrom" not in control
-    keys = [
-        env["valueFrom"]["secretKeyRef"]["key"]
-        for env in control["env"]
-        if "secretKeyRef" in env.get("valueFrom", {})
-    ]
-    assert keys == ["SLACK_BOT_TOKEN"]  # never the Socket Mode app token
+def test_no_role_gets_a_slack_token_through_the_environment_or_a_kubernetes_secret():
+    for name, deployment in _deployments().items():
+        container = _container(deployment)
+        env_names = {env["name"] for env in container.get("env", [])}
+        assert not {item for item in env_names if item.startswith("SLACK_")}, name
+        assert _secret_names(deployment) == set(), name
+
+
+def test_the_slack_tokens_are_read_from_secret_manager_by_the_config():
+    config = yaml.safe_load(
+        Path("k8s/distributed/overlays/dev/config/silk-agent-distributed.yaml").read_text()
+    )
+    assert config["slack"]["bot_token_secret"].startswith("projects/nnyn-dev/secrets/")
+    assert config["slack"]["app_token_secret"].startswith("projects/nnyn-dev/secrets/")
+    assert config["slack"]["bot_token_secret"] != config["slack"]["app_token_secret"]
+
+
+def test_the_distributed_deploy_path_reads_no_env_file():
+    script = Path("k8s/deploy.sh").read_text()
+    distributed = script[script.index('if [[ -n "${distributed_dir}" ]]; then') :]
+    distributed = distributed[: distributed.index("\n  exit 0\nfi")]
+    assert "env_file" not in distributed
+    assert "create secret generic silk-agent-slack" not in distributed
 
 
 def test_no_distributed_role_mounts_sqlite_or_persistent_state():

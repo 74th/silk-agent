@@ -92,11 +92,10 @@ rm -f "$secret_file"
 unset ECHO_MCP_API_KEY secret_file
 ```
 
-配備は silk-agent のチェックアウトから `deploy.sh` の分散構成のモードで行う。bigquery-analysis 用の Slack アプリのトークンを入れた `.env`（`SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN`）を `SILK_AGENT_ENV_FILE` に指定する。1回目は bootstrap（replicas 0）、起動は運用 runbook（`docs/distributed-operations-runbook.md` §2）の順序に従い、確認後に steady を適用する。
+配備は silk-agent のチェックアウトから `deploy.sh` の分散構成のモードで行う。Slack のトークンは、Secret Manager の `bigquery-analysis-slack-bot-token` / `bigquery-analysis-slack-app-token` に登録する（`.env` も k8s の Secret も使わない。Gateway と Control が Workload Identity で読む）。1回目は bootstrap（replicas 0）、起動は運用 runbook（`docs/distributed-operations-runbook.md` §2）の順序に従い、確認後に steady を適用する。
 
 ```bash
 kubectl kustomize usecases/bigquery-analysis/k8s/distributed/steady
-export SILK_AGENT_ENV_FILE=/path/to/bigquery-analysis.env
 DISTRIBUTED_DIR=usecases/bigquery-analysis/k8s/distributed/bootstrap \
   SYSTEM_NAMESPACE=bigquery-analysis-system k8s/deploy.sh
 DISTRIBUTED_DIR=usecases/bigquery-analysis/k8s/distributed/steady \

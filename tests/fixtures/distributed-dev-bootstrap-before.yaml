@@ -1,7 +1,19 @@
 apiVersion: v1
+kind: Namespace
+metadata:
+  name: session-sandbox-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: session-sandboxes
+---
+apiVersion: v1
 automountServiceAccountToken: true
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-control
   namespace: session-sandbox-system
 ---
@@ -9,6 +21,8 @@ apiVersion: v1
 automountServiceAccountToken: false
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-gateway
   namespace: session-sandbox-system
 ---
@@ -16,6 +30,8 @@ apiVersion: v1
 automountServiceAccountToken: true
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-sandbox-service
   namespace: session-sandbox-system
 ---
@@ -23,12 +39,16 @@ apiVersion: v1
 automountServiceAccountToken: false
 kind: ServiceAccount
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-worker
   namespace: session-sandbox-system
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-control-pod-reader
   namespace: session-sandbox-system
 rules:
@@ -42,6 +62,8 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
+  labels:
+    silk-agent.dev/in-sandbox-namespace: "true"
   name: sandbox-diagnostics
   namespace: session-sandboxes
 rules:
@@ -54,20 +76,69 @@ rules:
   - create
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
-  name: silk-agent-sandbox-service-token-review
+  labels:
+    silk-agent.dev/in-sandbox-namespace: "true"
+  name: sandbox-management
+  namespace: session-sandboxes
 rules:
 - apiGroups:
-  - authentication.k8s.io
+  - agents.x-k8s.io
   resources:
-  - tokenreviews
+  - sandboxes
   verbs:
+  - get
+  - list
+  - watch
   - create
+  - patch
+  - update
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - persistentvolumeclaims
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - patch
+  - update
+  - delete
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - patch
+  - update
+  - delete
+- apiGroups:
+  - networking.gke.io
+  resources:
+  - fqdnnetworkpolicies
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - patch
+  - update
+  - delete
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-control-pod-reader
   namespace: session-sandbox-system
 roleRef:
@@ -82,6 +153,8 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
+  labels:
+    silk-agent.dev/in-sandbox-namespace: "true"
   name: silk-agent-sandbox-service-diagnostics
   namespace: session-sandboxes
 roleRef:
@@ -96,6 +169,8 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
+  labels:
+    silk-agent.dev/in-sandbox-namespace: "true"
   name: silk-agent-sandbox-service-management
   namespace: session-sandboxes
 roleRef:
@@ -110,6 +185,8 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-sandbox-service-token-review
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -162,6 +239,10 @@ data:
       max_active_sdks_per_worker: 4
       auto_recover_missing_pods: true
       idle_close_seconds: 180
+    slack:
+      # Read with each role's Workload Identity (Gateway: both, Control: the bot token only).
+      app_token_secret: projects/nnyn-dev/secrets/silk-agent-slack-app-token
+      bot_token_secret: projects/nnyn-dev/secrets/silk-agent-slack-bot-token
     input_guard:
       provider: gemini
       model: gemini-3.8-flash
@@ -200,12 +281,16 @@ data:
       run_reconciler: true  # idle suspend + retention delete of Sandboxes (run by the Service)
 kind: ConfigMap
 metadata:
-  name: silk-agent-sandbox-service-config-kk4f68bckg
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
+  name: silk-agent-sandbox-service-config-7fk2ht4d55
   namespace: session-sandbox-system
 ---
 apiVersion: v1
 kind: Service
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-sandbox-service
   namespace: session-sandbox-system
 spec:
@@ -219,6 +304,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-control
   namespace: session-sandbox-system
 spec:
@@ -248,11 +335,10 @@ spec:
           value: /config/silk-agent-distributed.yaml
         - name: HOME
           value: /home/app
-        - name: SLACK_BOT_TOKEN
+        - name: POD_NAMESPACE
           valueFrom:
-            secretKeyRef:
-              key: SLACK_BOT_TOKEN
-              name: silk-agent-slack
+            fieldRef:
+              fieldPath: metadata.namespace
         image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:3f0bbb61aa4db278dc3e5012216bccf3a39018e874beac11992fa963f4c1cb6d
         livenessProbe:
           failureThreshold: 3
@@ -305,7 +391,7 @@ spec:
       terminationGracePeriodSeconds: 45
       volumes:
       - configMap:
-          name: silk-agent-sandbox-service-config-kk4f68bckg
+          name: silk-agent-sandbox-service-config-7fk2ht4d55
         name: config
       - emptyDir: {}
         name: tmp
@@ -315,6 +401,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-gateway
   namespace: session-sandbox-system
 spec:
@@ -344,9 +432,10 @@ spec:
           value: /config/silk-agent-distributed.yaml
         - name: HOME
           value: /home/app
-        envFrom:
-        - secretRef:
-            name: silk-agent-slack
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:3f0bbb61aa4db278dc3e5012216bccf3a39018e874beac11992fa963f4c1cb6d
         livenessProbe:
           failureThreshold: 3
@@ -399,7 +488,7 @@ spec:
       terminationGracePeriodSeconds: 45
       volumes:
       - configMap:
-          name: silk-agent-sandbox-service-config-kk4f68bckg
+          name: silk-agent-sandbox-service-config-7fk2ht4d55
         name: config
       - emptyDir: {}
         name: tmp
@@ -409,6 +498,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-sandbox-service
   namespace: session-sandbox-system
 spec:
@@ -432,6 +523,10 @@ spec:
           value: INFO
         - name: SILK_AGENT_CONFIG
           value: /config/silk-agent-distributed.yaml
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         - name: SILK_AGENT_SANDBOX_FINGERPRINT_KEY
           valueFrom:
             secretKeyRef:
@@ -479,7 +574,7 @@ spec:
       terminationGracePeriodSeconds: 35
       volumes:
       - configMap:
-          name: silk-agent-sandbox-service-config-kk4f68bckg
+          name: silk-agent-sandbox-service-config-7fk2ht4d55
         name: config
       - emptyDir: {}
         name: tmp
@@ -487,6 +582,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-worker
   namespace: session-sandbox-system
 spec:
@@ -517,6 +614,10 @@ spec:
           value: /config/silk-agent-distributed.yaml
         - name: HOME
           value: /home/app
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         - name: POD_NAME
           valueFrom:
             fieldRef:
@@ -582,7 +683,7 @@ spec:
       terminationGracePeriodSeconds: 60
       volumes:
       - configMap:
-          name: silk-agent-sandbox-service-config-kk4f68bckg
+          name: silk-agent-sandbox-service-config-7fk2ht4d55
         name: config
       - emptyDir: {}
         name: tmp
@@ -601,6 +702,8 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-control
   namespace: session-sandbox-system
 spec:
@@ -632,6 +735,8 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-gateway
   namespace: session-sandbox-system
 spec:
@@ -663,6 +768,8 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-sandbox-service
   namespace: session-sandbox-system
 spec:
@@ -713,6 +820,8 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
   name: silk-agent-worker
   namespace: session-sandbox-system
 spec:

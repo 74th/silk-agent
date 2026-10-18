@@ -16,6 +16,10 @@ distributed:
   max_active_sdks_per_worker: 4
   auto_recover_missing_pods: true
   idle_close_seconds: 180
+slack:
+  # Read with each role's Workload Identity (Gateway: both, Control: the bot token only).
+  app_token_secret: projects/nnyn-dev/secrets/silk-agent-slack-app-token
+  bot_token_secret: projects/nnyn-dev/secrets/silk-agent-slack-bot-token
 input_guard:
   provider: gemini
   model: gemini-3.8-flash

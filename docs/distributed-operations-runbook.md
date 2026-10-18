@@ -22,7 +22,7 @@ Gateway / Worker / Control / Sandbox Service からなる分散構成の構築�
 
 1. Terraform で Firestore・index・IAM・KSA 用 principal を作る。`terraform -chdir=terraform plan -var-file=terraform.tfvars` の差分に replace / delete が無いことを確認してから apply する。役割別の GKE principal は `silk-agent-gateway` / `silk-agent-worker` / `silk-agent-control` / `silk-agent-sandbox-service`。
 2. イメージを作って push する: `k8s/build-image.sh`（出力される digest を `k8s/distributed/overlays/dev/kustomization.yaml` の `images[].digest`（ユースケースは `usecases/<name>/k8s/distributed/steady/kustomization.yaml`） に入れる）。**digest は役割追加前のイメージのままだと Worker/Control/Gateway が起動しない。**
-3. Slack Secret `silk-agent-slack` を作る（`k8s/deploy.sh` が `.env` から作る）。Gateway は両方、Control は `SLACK_BOT_TOKEN` だけを参照する。Worker には Secret を渡さない。
+3. Slack のトークンを Secret Manager（`<名前>-slack-bot-token` / `<名前>-slack-app-token`、Terraform が作成）に登録する（`gcloud secrets versions add ... --data-file=-`）。k8s の Secret も `.env` も使わない。Gateway は両方、Control は bot token だけを、設定の `slack.bot_token_secret` / `app_token_secret` から Workload Identity で読む。Worker と Sandbox Service は読めない。ローテーションは、新しいバージョンを登録して Gateway と Control を再起動する。
 4. `kubectl kustomize k8s/distributed/overlays/dev-bootstrap` を確認し、`kubectl apply -k k8s/distributed/overlays/dev-bootstrap` で適用する。bootstrap は `k8s/distributed/overlays/dev` と同じ resource で、Gateway / Worker / Control の replicas を `0` にしたもの。この時点では Slack に接続せず、SDK も起動しない。**`k8s/distributed/overlays/dev` を直接 apply すると、Gateway が Slack に接続し Worker が起動する**（定常状態の構成: Gateway 1 / Worker 2 / Control 1）ので、移行（§2）の前には使わない。
 5. Sandbox Service の `rollout status` を確認する: `kubectl -n session-sandbox-system rollout status deployment/silk-agent-sandbox-service`。
 
