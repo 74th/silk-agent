@@ -505,3 +505,35 @@ async def test_a_start_failure_before_init_finishes_the_command(tmp_path):
     assert saved["state"] == "finished"
     assert "failed to start" in saved["error"]
     assert await tracker.journal.set_gate(True) == 0  # nothing keeps the Sandbox busy
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_ends_before_init_finishes_the_command(tmp_path):
+    journal = CommandJournal(tmp_path / "commands.json")
+    record, _ = await journal.reserve({"command_id": "no-init", "command": ["ls"]})
+
+    class Stream:
+        async def __aiter__(self):
+            return
+            yield  # pragma: no cover
+
+    tracker = Tracker(journal, object(), generation=1)
+    await tracker._consume(record["command_id"], Stream(), "marker")
+    saved = await journal.get(record["command_id"])
+    assert saved["state"] == "finished" and "failed to start" in saved["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_ends_after_init_without_exit_stays_unknown(tmp_path):
+    journal = CommandJournal(tmp_path / "commands.json")
+    record, _ = await journal.reserve({"command_id": "lost", "command": ["sleep", "9"]})
+    await journal.update(record["command_id"], state="running", process_id=7)
+
+    class Stream:
+        async def __aiter__(self):
+            return
+            yield  # pragma: no cover
+
+    tracker = Tracker(journal, object(), generation=1)
+    await tracker._consume(record["command_id"], Stream(), "marker")
+    assert (await journal.get(record["command_id"]))["state"] == "unknown"

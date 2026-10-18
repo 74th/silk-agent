@@ -19,6 +19,21 @@ from silk_agent.sandbox.service import create_app
 log = logging.getLogger(__name__)
 
 
+async def wait_for_termination() -> None:
+    """Return on SIGTERM / SIGINT.
+
+    PID 1 ignores SIGTERM unless it has a handler; without one every rollout waits for the
+    grace period and ends in SIGKILL with no cleanup."""
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:  # pragma: no cover - non-unix
+            pass
+    await stop.wait()
+
+
 async def _create_manager(config: Config, firestore_client: Any):
     """Build the Firestore-backed SandboxManager; returns it with its temp config directory."""
     from gke_session_sandbox import SandboxManager
@@ -219,16 +234,7 @@ async def run_sandbox_service(config: Config) -> None:
             "sandbox service listening",
             extra={"port": config.distributed.sandbox_service_port},
         )
-        # PID 1 ignores SIGTERM unless it has a handler; without one every rollout waits for
-        # the grace period and ends in SIGKILL with no cleanup.
-        stop = asyncio.Event()
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
-                loop.add_signal_handler(sig, stop.set)
-            except NotImplementedError:  # pragma: no cover - non-unix
-                pass
-        await stop.wait()
+        await wait_for_termination()
     finally:
         await runner.cleanup()
         temp_config_dir.cleanup()

@@ -1073,3 +1073,16 @@ async def test_repeat_cancel_of_an_already_finished_command_reports_cancelled_no
         assert (await response.json())["state"] == "cancelled"
     finally:
         await client.close()
+
+
+async def test_the_service_returns_from_its_wait_on_sigterm():
+    import os
+    import signal
+
+    from silk_agent.sandbox.service_runtime import wait_for_termination
+
+    waiting = asyncio.create_task(wait_for_termination())
+    await asyncio.sleep(0.05)  # the handler is installed
+    assert not waiting.done()
+    os.kill(os.getpid(), signal.SIGTERM)
+    await asyncio.wait_for(waiting, 2)
