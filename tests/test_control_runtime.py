@@ -110,3 +110,25 @@ async def test_sender_loop_drains_each_conversation_in_order_and_isolates_failur
     loop = OutboxSenderLoop(Outbox(), sender)
     assert await loop.run_once() == 4  # room-1 x3 + room-3 x1; room-2's error stays local
     assert sender.calls.count("room-1") == 4 and sender.calls.count("room-2") == 1
+
+
+@pytest.mark.asyncio
+async def test_sender_loop_resumes_after_the_last_page_and_starts_over_at_the_end():
+    from silk_agent.distributed.control_runtime import OutboxSenderLoop
+
+    pages = {None: (("stuck",), "p1"), "p1": (("stuck", "healthy"), "p2"), "p2": (("later",), None)}
+    asked = []
+
+    class Outbox:
+        async def list_pending_page(self, *, limit, after):
+            asked.append(after)
+            return pages[after]
+
+    class Sender:
+        async def run_once(self, key):
+            return False
+
+    loop = OutboxSenderLoop(Outbox(), Sender())
+    for _ in range(4):
+        await loop.run_once()
+    assert asked == [None, "p1", "p2", None]

@@ -16,7 +16,7 @@ and edition are confirmed. No index or TTL policy is deployed by this document.
 | `FirestoreCommandMonitorStore.list_for_stop` | One conversation and generation, active command states, and `origin_seq <= stop_seq`, ordered by `origin_seq` | Collection-scope composite index: `conversation_key ASC`, `conversation_generation ASC`, `state ASC`, `origin_seq ASC`; Firestore adds document name as the final component. |
 | `FirestoreOutboxStore.claim_next` | One conversation's pending/dispatching/uncertain output records, ordered by `sequence` | Collection-scope composite index: `conversation_key ASC`, `status ASC`, `sequence ASC`; Firestore adds document name as the final component. |
 | `FirestoreInboxStore.list_authorized_controls` | One conversation's `controls` where `authorization_state == authorized` (sorted by `seq` in memory; a conversation has few open controls) | Single-field equality; no composite index. |
-| `FirestoreOutboxStore.list_conversations_with_pending` | `outbox` where `status in (pending, dispatching)`, bounded by `limit` | Single-field `in`; no composite index. |
+| `FirestoreOutboxStore.list_pending_page` (`list_conversations_with_pending` is its first page) | `outbox` where `status in (pending, dispatching)`, ordered by document name, `start_after` the previous page's last document, bounded by `limit` | Single-field `in` ordered by document name; no composite index. The Sender keeps the cursor and starts over at the end, so a conversation with a stuck head output cannot fill every page. |
 | `FirestoreOwnershipStore.list_expired` | `ownership` where `phase in (assigned, active, recovering)`; lease expiry is filtered in memory. Released documents are never read, and the set is bounded by Worker capacity | Single-field `in`; no composite index. |
 | `FirestoreQuiesceMailbox.list_requested` | `quiesce_requests` where `worker_incarnation == X` and `state == requested` | Equality-only on two fields; served by single-field index merging. |
 | `FirestoreInboxStore.list_sender_enrichment_due` | Collection-group `inputs` where `next_sender_lookup_at <= now`; pending state is checked in the bounded result page | Firestore's collection-group single-field index on `next_sender_lookup_at`. |
@@ -50,7 +50,7 @@ and never has a TTL policy.
 |---|---|---|---|
 | `inputs` (group) | `completed`, `blocked`, `cancelled`, `suppressed` | that time (`completed_at` is written too) | `terminal_days` (30) |
 | `controls` (group), `control_queue` | `handled`, `filtered`, `stale` | that time | `terminal_days` |
-| `outbox` | `delivered`, `suppressed` | that time | `terminal_days` |
+| `outbox` | `delivered`, `suppressed`, `failed` | that time | `terminal_days` |
 | `commands`, `sandbox_operations` | terminal command whose notice is `none`, `delivered` or `suppressed`; the operation gets the same value in the same transaction | the later of the end and the notice | `terminal_days` |
 | `quiesce_requests` | `answered` | answer time | `terminal_days` |
 | `slack_receipts` | created (`received_at` is written too) | reception | `receipt_days` (7) |
@@ -85,7 +85,7 @@ needs a terminal record. None does; the reads that can see a deleted record degr
 |---|---|---|
 | `inputs` | `list_unfinished`, `list_held`, `has_waiting_input`, ownership recovery queries: only non-terminal states. `advance_input` / `record_query_start` / `recover_dispatching`: by ID, expect a non-terminal state. `accept_*`: by ID for idempotent redelivery. `list_sender_enrichment_due`: `next_sender_lookup_at`, pending only | No. A redelivery after the record was deleted needs the Slack receipt (7 days) to be gone too, so it creates a new input only after the replay window |
 | `controls`, `control_queue` | `list_pending_controls`, `list_authorized_controls`, `list_sender_enrichment_due`: pending / authorized only | No |
-| `outbox` | `list_conversations_with_pending`, `claim_next`: pending / dispatching / uncertain only. `mark_delivery` and `revalidate_claim`: by ID on a dispatching record | No |
+| `outbox` | `list_pending_page`, `claim_next`: pending / dispatching / uncertain only (`failed` is in neither). `mark_delivery` and `revalidate_claim`: by ID on a dispatching record | No |
 | `commands` | `list_due`, `list_for_stop`, `claim`: non-terminal only. `get_command` (Monitor, `BackgroundCommands.status`, `command_output`): by command ID | A status or output request for a command older than the retention returns `unknown` (the archived output in GCS has the same 30-day retention) |
 | `sandbox_operations` | `list_for_stop`: `accepted` only, and `is_dispatch_allowed` (new operations). `get_operation` (Sandbox Service): idempotency check by request ID, and command status / cancel / output | A request ID is unique per turn; a status request for an operation older than the retention returns 404 `unknown_command` |
 | `quiesce_requests` | `list_requested`: `requested` only. `get`: polled by the requester until `answered` (seconds) | No |

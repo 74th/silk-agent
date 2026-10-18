@@ -104,7 +104,8 @@ silk-agent recovery confirm-stopped CONVERSATION_KEY --evidence "node gke-xxx de
 | 出力 | `PREFIX_outbox` の `status == uncertain` | `output_id`, `attempt_count`, Slack ref。Slack のスレッドで同じ投稿があるか確認する |
 | コマンド | `PREFIX_commands` | `state`, `delivery_mode`, `command_id`。`command_status` で同じ ID を照会し、確認前に同じコマンドを再実行しない |
 
-- 出力が `uncertain` の会話は、その後の出力の送信が止まる（順序を守るため）。投稿の有無を確認した上で、該当 document の `status` を `delivered`（投稿済み）または `pending`（未投稿）に手動で更新する。更新前に `output_id` と Slack のスレッドを突き合わせる。
+- 出力の送信が失敗したときの分類: Slack が `ok: false` で拒否した（投稿されていないことが確定）場合、一時的なコード（`internal_error`、`service_unavailable`、`fatal_error`、`request_timeout`）は待ちを置いて最大10回まで再試行し、それ以外（`channel_not_found`、`is_archived`、`msg_too_long` など）と、送信前の検証の失敗は、その出力だけを `failed`（終端）にして、後続の出力は送る。`failed` は `outputs_total{result="failed"}` とログ（`not posted and is given up`）で観測でき、保持期間の後に削除される。接続断やタイムアウトなど、投稿されたかどうか分からない場合は、従来どおり `uncertain` になる。
+- 出力が `uncertain` の会話は、その会話の後続の出力の送信が止まる（順序を守るため）。他の会話の送信は止まらない。投稿の有無を確認した上で、該当 document の `status` を `delivered`（投稿済み）または `pending`（未投稿）に手動で更新する。更新前に `output_id` と Slack のスレッドを突き合わせる。
 - 入力が `uncertain` の会話は、ユーザが次の入力を送ると通常どおり処理される。必要なら Slack で再依頼を案内する。
 
 **入力の終端状態（会話が詰まらないための取り決め）**

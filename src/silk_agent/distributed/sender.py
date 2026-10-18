@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
 from silk_agent.core.distributed_models import OutputDeliveryState
 from silk_agent.core.distributed_ports import OutboxStore
 from silk_agent.core.ports import Clock
 from silk_agent.distributed.metrics import METRICS
+
+log = logging.getLogger(__name__)
 
 SlackDelivery = Callable[[Mapping[str, Any]], Awaitable[Mapping[str, str] | None]]
 
@@ -61,6 +64,23 @@ class OutboxSender:
             slack_ref = await self._deliver(record)
         except Exception as exc:
             retry_after = _retry_after(exc)
+            if retry_after is None:
+                kind, retry_after = _classify_failure(exc, int(record.get("attempt_count") or 1))
+                if kind == "failed":
+                    METRICS.inc("outputs_total", result="failed")
+                    log.warning(
+                        "output %s was not posted and is given up (%s)",
+                        output_id,
+                        type(exc).__name__,
+                    )
+                    await self._outbox.mark_delivery(
+                        output_id=output_id,
+                        expected=OutputDeliveryState.DISPATCHING,
+                        new_state=OutputDeliveryState.FAILED,
+                        attempt_id=attempt_id,
+                        updated_at=self._clock.now(),
+                    )
+                    return True
             if retry_after is not None:
                 METRICS.inc("outputs_total", result="retry")
                 now = self._clock.now()
@@ -103,6 +123,43 @@ class OutboxSender:
             updated_at=self._clock.now(),
         )
         return True
+
+
+# Slack answered `ok: false`, so nothing was posted. These codes are worth another try; any
+# other code (channel_not_found, is_archived, msg_too_long, ...) will not change.
+_TRANSIENT_SLACK_ERRORS = frozenset(
+    {"internal_error", "service_unavailable", "fatal_error", "request_timeout"}
+)
+MAX_DELIVERY_ATTEMPTS = 10
+_BACKOFF_CAP_SECONDS = 60.0
+
+
+def _classify_failure(
+    error: BaseException, attempt: int
+) -> tuple[Literal["retry", "failed", "uncertain"], float | None]:
+    """What a failed send means for the output.
+
+    "failed": known not to have been posted (Slack rejected it, or it was never sent because
+    the payload is malformed) and not worth retrying. "retry": the same, but transient: try
+    again after the returned delay (until MAX_DELIVERY_ATTEMPTS). "uncertain": the request may
+    have reached Slack (a lost response); resending could post twice.
+    """
+    if isinstance(error, ValueError | TypeError | KeyError):
+        return "failed", None  # raised while building the message, before anything was sent
+    response = getattr(error, "response", None)
+    if response is not None and _is_not_ok(response):
+        code = str(response["error"])
+        if code in _TRANSIENT_SLACK_ERRORS and attempt < MAX_DELIVERY_ATTEMPTS:
+            return "retry", min(2.0 ** max(0, attempt - 1), _BACKOFF_CAP_SECONDS)
+        return "failed", None
+    return "uncertain", None
+
+
+def _is_not_ok(response: Any) -> bool:
+    try:
+        return response["ok"] is False and isinstance(response["error"], str)
+    except (KeyError, TypeError, IndexError):
+        return False
 
 
 def _retry_after(error: BaseException) -> float | None:

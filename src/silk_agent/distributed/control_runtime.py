@@ -209,9 +209,15 @@ class OutboxSenderLoop:
         self._poll_seconds = poll_seconds
         self._batch_size = batch_size
         self._slots = asyncio.Semaphore(concurrency)
+        self._cursor: Any | None = None
 
     async def run_once(self) -> int:
-        keys = await self._outbox.list_conversations_with_pending(limit=self._batch_size)
+        paged = getattr(self._outbox, "list_pending_page", None)
+        if paged is not None:
+            # Resume after the last page: a stuck conversation must not fill every page.
+            keys, self._cursor = await paged(limit=self._batch_size, after=self._cursor)
+        else:
+            keys = await self._outbox.list_conversations_with_pending(limit=self._batch_size)
         delivered = 0
 
         async def drain(key: str) -> int:

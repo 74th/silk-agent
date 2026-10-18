@@ -106,6 +106,8 @@ class OutputDeliveryState(StrEnum):
     DELIVERED = "delivered"
     SUPPRESSED = "suppressed"
     UNCERTAIN = "uncertain"
+    # Known not to have been posted, and not retryable: only this output is given up.
+    FAILED = "failed"
 
 
 _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
@@ -207,9 +209,11 @@ _TRANSITIONS: dict[type[StrEnum], dict[StrEnum, frozenset[StrEnum]]] = {
                 OutputDeliveryState.DELIVERED,
                 OutputDeliveryState.UNCERTAIN,
                 OutputDeliveryState.SUPPRESSED,
+                OutputDeliveryState.FAILED,
             }
         ),
         OutputDeliveryState.UNCERTAIN: frozenset(),
+        OutputDeliveryState.FAILED: frozenset(),
         OutputDeliveryState.DELIVERED: frozenset(),
         OutputDeliveryState.SUPPRESSED: frozenset(),
     },
