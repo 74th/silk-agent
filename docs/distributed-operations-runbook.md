@@ -170,7 +170,7 @@ Firestore の操作数は Cloud Monitoring の `firestore.googleapis.com/api/req
 
 「確認済み」と「未実施」を分けて記録する。時刻は UTC（JST は +9 時間）。Slack の操作は人間（74th）が実施し、結果を報告した。API 経由は、実 Firestore へ入力と制御を直接投入した検証（Slack を使わない）。
 
-**環境**: GKE `gke_nnyn-dev_us-central1-a_silk-agent-gke`、namespace `session-sandbox-system`（Sandbox は `session-sandboxes`）、Firestore `nnyn-dev` / `silk-agent`、Slack ワークスペース `T8W42FC4U` のチャンネル `C0C8ETHFKS8`（#test-agent）。Gateway 1 / Control 1 / Worker 2 / Sandbox Service 1。commit `f988f3c`、イメージ `sha256:ae932f60023d6098b5c5b9d04ebe9abaa729d4d0b0319c354b47d62f511a51fb`（2026-10-18 時点）。
+**環境**: GKE `gke_nnyn-dev_us-central1-a_silk-agent-gke`、namespace `session-sandbox-system`（Sandbox は `session-sandboxes`）、Firestore `nnyn-dev` / `silk-agent`、Slack ワークスペース `T8W42FC4U` のチャンネル `C0C8ETHFKS8`（#test-agent）。Gateway 1 / Control 1 / Worker 2 / Sandbox Service 1。commit `f988f3c`、イメージ `sha256:ae932f60023d6098b5c5b9d04ebe9abaa729d4d0b0319c354b47d62f511a51fb`（2026-10-18 時点）。下記「query 前の記録」の再確認だけは commit `d1e307e`、イメージ `sha256:bfb6d7e125cad25c95efabd5b66544aa58f3debcef243d35c9efe2815281a6e2` で実施した。
 
 | 確認項目 | 方法 | 結果 | 記録 |
 | --- | --- | --- | --- |
@@ -183,6 +183,7 @@ Firestore の操作数は Cloud Monitoring の `firestore.googleapis.com/api/req
 | 再デプロイをまたぐ追加指示 | Slack、API | 確認済み | Worker 入替え後の追加指示に文脈つきで返答（API は約12秒） |
 | Pod の強制削除からの回復 | Slack、API | 確認済み | 強制削除の約1分後に回復待ちの通知が1回、約2分後に別 Worker へ引継ぎ（2026-10-17 16:53〜16:56 JST）。旧 turn の入力は uncertain で再実行されない |
 | drain | Slack + CLI | 確認済み | 下記 |
+| query 前の記録（tasks 8.5）と STOP、再デプロイ | API（`scripts/acceptance_stop.py`、`acceptance_rollout.py`） | 確認済み | 2026-10-18 05:22〜05:25 UTC、commit `d1e307e`。STOP した入力は `cancelled`、直後と後続の入力は `completed`、未終端なし（停止後9秒）。すべての入力に `sdk_session_id` と `query_started_at` が保存された。Worker の rollout（28秒）をまたいで同じ `sdk_session_id` で再開し、追加指示に文脈つきで12秒で返答した。Worker のログに `refused` / ERROR なし |
 | 許可外ユーザの STOP | — | **未実施** | 許可外のユーザがいないため。単体テストでの確認のみ |
 
 **drain（2026-10-18 00:49〜00:58 UTC、会話 `…1792284522.078759`）**: 8 回の `sleep 8` の実行中（00:49:20 開始）に、`silk-agent worker drain-all` を 00:49:42 に実行（担当 Worker は `draining=true`、全体の割当停止も有効）。turn は中断されず最後まで完了し（command_id `264149e69a384fbfa1245c55e10d1ca9` から `d2ed4545d12d4f13ba026425a64ff6b3` までの8件がすべて finished / foreground）、「完了」の返信が出て、00:50:47 に担当が解放された（`reserved=0`）。drain 中の 00:56 に送った追加メッセージは pending のまま待機し（会話は waiting、担当なし）、`undrain-all` の 00:57:22 以降に処理されて 00:58:00 に完了した（command_id `fe19bcabea1e40788ea09c4c1ef5c781`）。

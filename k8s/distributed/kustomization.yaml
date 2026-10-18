@@ -13,4 +13,4 @@ configMapGenerator:
 images:
   - name: silk-agent
     newName: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent
-    digest: sha256:38700bb0edbdcb557559cd96b2cc07502a47cb8d8c51758af35310c93c3acc9e
+    digest: sha256:bfb6d7e125cad25c95efabd5b66544aa58f3debcef243d35c9efe2815281a6e2
