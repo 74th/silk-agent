@@ -16,8 +16,12 @@ _NAMESPACE_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 
 def pod_uid_of(token: OwnershipToken) -> str | None:
     """The Pod UID inside ``worker_incarnation`` (``[pod_uid, startup_uuid]``)."""
+    return pod_uid_of_incarnation(token.worker_incarnation)
+
+
+def pod_uid_of_incarnation(incarnation: str) -> str | None:
     try:
-        value = json.loads(token.worker_incarnation)
+        value = json.loads(incarnation)
     except ValueError:
         return None
     if isinstance(value, list) and value and isinstance(value[0], str) and value[0]:

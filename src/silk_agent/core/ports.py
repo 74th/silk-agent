@@ -76,7 +76,9 @@ AgentEngineFactory = Callable[[str], AgentEngine]
 
 # ---------------------------------------------------------------- SandboxRuntime
 
-CommandOutcome = Literal["completed", "running", "unknown", "cancelled"]
+# "lost": the Sandbox that ran the command no longer exists, so the command is gone and its
+# result can never be read (unlike "unknown", which may still resolve).
+CommandOutcome = Literal["completed", "running", "unknown", "cancelled", "lost"]
 
 
 @dataclass(frozen=True)

@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -110,3 +111,75 @@ async def test_sender_loop_drains_each_conversation_in_order_and_isolates_failur
     loop = OutboxSenderLoop(Outbox(), sender)
     assert await loop.run_once() == 4  # room-1 x3 + room-3 x1; room-2's error stays local
     assert sender.calls.count("room-1") == 4 and sender.calls.count("room-2") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_conversation_that_always_has_output_does_not_hold_back_the_next_page():
+    from silk_agent.distributed.control_runtime import OutboxSenderLoop
+
+    pages = {None: (("busy",), "p1"), "p1": (("calm",), None)}
+    sent = []
+
+    class Outbox:
+        async def list_pending_page(self, *, limit, after):
+            return pages[after]
+
+    class Sender:
+        async def run_once(self, key):
+            sent.append(key)
+            return key == "busy"  # never runs dry
+
+    loop = OutboxSenderLoop(Outbox(), Sender(), max_per_conversation=5)
+    await asyncio.wait_for(loop.run_once(), 1)  # returns although "busy" never empties
+    assert sent.count("busy") == 5 and loop.backlog
+    await asyncio.wait_for(loop.run_once(), 1)
+    assert "calm" in sent  # the next page was reached
+
+
+@pytest.mark.asyncio
+async def test_a_failing_listing_after_a_busy_pass_waits_for_the_poll_interval():
+    from silk_agent.distributed.control_runtime import OutboxSenderLoop
+
+    listings = []
+
+    class Outbox:
+        async def list_pending_page(self, *, limit, after):
+            listings.append(1)
+            if len(listings) == 1:
+                return ("busy",), None
+            raise ConnectionError("store down")
+
+    class Sender:
+        async def run_once(self, key):
+            return True  # always has output: the first pass ends with a backlog
+
+    stop = asyncio.Event()
+    loop = OutboxSenderLoop(Outbox(), Sender(), poll_seconds=0.05, max_per_conversation=3)
+    task = asyncio.create_task(loop.run(stop))
+    await asyncio.sleep(0.2)
+    stop.set()
+    await asyncio.wait_for(task, 1)
+    # Without the wait, the failing listing is retried thousands of times in 0.2 s.
+    assert len(listings) <= 10
+
+
+@pytest.mark.asyncio
+async def test_sender_loop_resumes_after_the_last_page_and_starts_over_at_the_end():
+    from silk_agent.distributed.control_runtime import OutboxSenderLoop
+
+    pages = {None: (("stuck",), "p1"), "p1": (("stuck", "healthy"), "p2"), "p2": (("later",), None)}
+    asked = []
+
+    class Outbox:
+        async def list_pending_page(self, *, limit, after):
+            asked.append(after)
+            return pages[after]
+
+    class Sender:
+        async def run_once(self, key):
+            return False
+
+    loop = OutboxSenderLoop(Outbox(), Sender())
+    for _ in range(4):
+        await loop.run_once()
+    assert asked == [None, "p1", "p2", None]

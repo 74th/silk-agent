@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -33,6 +34,8 @@ from silk_agent.stores.firestore.retention import (
     receipt_expiry,
     terminal_expiry,
 )
+
+log = logging.getLogger(__name__)
 
 
 class FirestoreInboxStore:
@@ -577,6 +580,9 @@ class FirestoreInboxStore:
         while True:
             page = await self.list_unfinished(conversation_key, after_seq=cursor, limit=100)
             if not page:
+                await self._finish_rebind(
+                    conversation_ref, owner_ref, owner, previous_generation, reset_seq
+                )
                 return rebound
             cursor = page[-1].seq
             for envelope in page:
@@ -591,30 +597,26 @@ class FirestoreInboxStore:
                 async def rebind(
                     transaction: firestore.AsyncTransaction,
                     input_ref: firestore.AsyncDocumentReference = input_ref,
-                ) -> bool:
+                ) -> str:
                     owner_snapshot = await owner_ref.get(transaction=transaction)
                     conversation_snapshot = await conversation_ref.get(transaction=transaction)
                     input_snapshot = await input_ref.get(transaction=transaction)
-                    if (
-                        not owner_snapshot.exists
-                        or not conversation_snapshot.exists
-                        or not input_snapshot.exists
-                    ):
-                        return False
+                    if not owner_snapshot.exists or not conversation_snapshot.exists:
+                        return "lost"
                     conversation = conversation_snapshot.to_dict() or {}
+                    if conversation.get("reset_pending") or not _still_holds(
+                        owner_snapshot.to_dict() or {}, conversation, owner, datetime.now(UTC)
+                    ):
+                        # Not "nothing to move": this owner can no longer move anything.
+                        return "lost"
+                    if not input_snapshot.exists:
+                        return "skipped"
                     data = input_snapshot.to_dict() or {}
                     if (
-                        not ownership_matches(
-                            owner_snapshot.to_dict() or {},
-                            conversation,
-                            owner,
-                            now=datetime.now(UTC),
-                        )
-                        or conversation.get("reset_pending")
-                        or data.get("seq", 0) <= reset_seq
+                        data.get("seq", 0) <= reset_seq
                         or data.get("conversation_generation") != previous_generation
                     ):
-                        return False
+                        return "skipped"
                     state = data.get("delivery_state")
                     if state in {InputDeliveryState.PENDING.value, InputDeliveryState.QUEUED.value}:
                         if data.get("kind") == "message":
@@ -622,7 +624,7 @@ class FirestoreInboxStore:
                                 input_ref,
                                 {"conversation_generation": owner.conversation_generation},
                             )
-                            return True
+                            return "moved"
                         now = datetime.now(UTC)
                         settle = await self._plan_command_notice(
                             transaction, data, InputDeliveryState.SUPPRESSED, now
@@ -638,7 +640,7 @@ class FirestoreInboxStore:
                         )
                         if settle is not None:
                             settle()
-                        return False
+                        return "skipped"
                     if state in {
                         InputDeliveryState.DISPATCHING.value,
                         InputDeliveryState.ACCEPTED.value,
@@ -646,13 +648,75 @@ class FirestoreInboxStore:
                         transaction.update(
                             input_ref, {"delivery_state": InputDeliveryState.UNCERTAIN.value}
                         )
-                    return False
+                    return "skipped"
 
                 try:
-                    if await rebind(transaction):
-                        rebound += 1
+                    outcome = await rebind(transaction)
                 except Exception as exc:
                     raise convert_firestore_error("rebind_after_reset", exc) from None
+                if outcome == "moved":
+                    rebound += 1
+                elif outcome == "lost":
+                    # Leave the marker: whoever owns the conversation now finishes the rebind.
+                    log.warning(
+                        "rebind after reset stopped: ownership of %s changed", conversation_key
+                    )
+                    return rebound
+
+    async def pending_rebind(self, conversation_key: str) -> tuple[int, int] | None:
+        """(previous generation, reset_seq) of a reset whose rebind did not finish, if any."""
+        snapshot = await (
+            self._collection("conversations")
+            .document(self._conversation_id(conversation_key))
+            .get()
+        )
+        marker = (snapshot.to_dict() or {}).get("rebind_pending") if snapshot.exists else None
+        if not isinstance(marker, dict):
+            return None
+        previous, seq = marker.get("previous_generation"), marker.get("reset_seq")
+        if isinstance(previous, int) and isinstance(seq, int):
+            return previous, seq
+        return None
+
+    async def _finish_rebind(
+        self,
+        conversation_ref: firestore.AsyncDocumentReference,
+        owner_ref: firestore.AsyncDocumentReference,
+        owner: OwnershipToken,
+        previous_generation: int,
+        reset_seq: int,
+    ) -> None:
+        """Drop the marker, but only when it is ours to drop and nothing is left to move.
+
+        The marker is the only record that a rebind is owed, so it stays while the owner
+        changed under us or an input of the old generation is still waiting.
+        """
+        leftovers = await self.list_unfinished(
+            owner.conversation_key, after_seq=reset_seq, limit=100
+        )
+        if any(item.conversation_generation == previous_generation for item in leftovers):
+            return
+        transaction = self.client.transaction()
+
+        @async_transactional
+        async def finish(transaction: firestore.AsyncTransaction) -> None:
+            owner_snapshot = await owner_ref.get(transaction=transaction)
+            snapshot = await conversation_ref.get(transaction=transaction)
+            if not owner_snapshot.exists or not snapshot.exists:
+                return
+            conversation = snapshot.to_dict() or {}
+            if not _still_holds(
+                owner_snapshot.to_dict() or {}, conversation, owner, datetime.now(UTC)
+            ):
+                return
+            marker = conversation.get("rebind_pending")
+            if marker == {"previous_generation": previous_generation, "reset_seq": reset_seq}:
+                transaction.update(conversation_ref, {"rebind_pending": firestore.DELETE_FIELD})
+
+        try:
+            await finish(transaction)
+        except Exception as exc:
+            raise convert_firestore_error("finish_rebind", exc) from None
 
     async def recover_dispatching(
         self,
@@ -1166,6 +1230,28 @@ class FirestoreInboxStore:
         return self._collection("control_queue").document(
             document_id(conversation_key, input_id, prefix="control")
         )
+
+
+def _still_holds(
+    owner_data: dict[str, Any], conversation: dict[str, Any], owner: OwnershipToken, now: datetime
+) -> bool:
+    """Is the stored ownership still `owner`'s? A lease renewal changes only the expiry, so
+    this compares who holds it (epoch, incarnation, generation) and that the stored lease is
+    live, rather than the whole token."""
+    try:
+        saved = decode_record(owner_data, OwnershipToken)
+    except (TypeError, ValueError):
+        return False
+    return (
+        owner_data.get("phase") == "active"
+        and saved.conversation_key == owner.conversation_key
+        and saved.worker_id == owner.worker_id
+        and saved.worker_incarnation == owner.worker_incarnation
+        and saved.epoch == owner.epoch
+        and saved.conversation_generation == owner.conversation_generation
+        and saved.expires_at > now
+        and conversation.get("conversation_generation") == owner.conversation_generation
+    )
 
 
 def _validate_time(value: datetime, field_name: str) -> None:

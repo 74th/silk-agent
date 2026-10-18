@@ -452,6 +452,42 @@ async def test_monitor_archives_both_streams_before_terminal_commit():
     assert len(store.inputs) == 1
 
 
+async def test_a_command_whose_sandbox_is_lost_is_ended_once_and_not_polled_again():
+    now = datetime(2026, 10, 14, tzinfo=UTC)
+    clock = MutableClock(now)
+    store = FakeSharedStore()
+    owner = OwnershipToken(
+        "conversation", "worker", "incarnation", 1, 1, now + timedelta(minutes=1)
+    )
+    store.owners["conversation"] = owner
+    store.ownership_phases["conversation"] = "active"
+    await store.create_intent(
+        command_id="lost-command",
+        request_hash="hash",
+        conversation_key="conversation",
+        conversation_generation=1,
+        sandbox_generation=1,
+        origin_turn="turn-1",
+        origin_epoch=1,
+        origin_seq=1,
+        owner=owner,
+        created_at=now,
+    )
+    store.commands["lost-command"]["state"] = CommandExecutionState.RUNNING
+    await store.detach("lost-command", now=now)
+    runtime = StatusRuntime("lost")
+    monitor = CommandMonitor(store, runtime, clock, monitor_id="monitor")
+
+    assert await monitor.poll_once() == 1
+    record = store.commands["lost-command"]
+    assert record["state"] is CommandExecutionState.UNKNOWN
+    assert record["result"]["sandbox_lost"] is True
+    assert len(store.inputs) == 1  # the conversation is told once
+    clock.value += timedelta(minutes=5)
+    assert await monitor.poll_once() == 0  # terminal: never read again
+    assert len(runtime.status_calls) == 1
+
+
 async def test_monitor_reads_archived_output_with_a_combined_cursor():
     now = datetime(2026, 10, 14, tzinfo=UTC)
     clock = MutableClock(now)
@@ -494,6 +530,47 @@ async def test_monitor_reads_archived_output_with_a_combined_cursor():
     assert await monitor.command_output("archived-command", cursor=0, limit_bytes=2) == ("ab", 2)
     assert await monitor.command_output("archived-command", cursor=2, limit_bytes=2) == ("c", 3)
     assert await monitor.command_output("archived-command", cursor=3, limit_bytes=2) == ("DE", 5)
+
+
+async def test_archived_output_with_an_empty_stdout_reads_stderr_from_the_start():
+    now = datetime(2026, 10, 14, tzinfo=UTC)
+    store = FakeSharedStore()
+    owner = OwnershipToken(
+        "conversation", "worker", "incarnation", 1, 1, now + timedelta(minutes=1)
+    )
+    store.owners["conversation"] = owner
+    store.ownership_phases["conversation"] = "active"
+    await store.create_intent(
+        command_id="stderr-only",
+        request_hash="hash",
+        conversation_key="conversation",
+        conversation_generation=1,
+        sandbox_generation=4,
+        origin_turn="turn-1",
+        origin_epoch=1,
+        origin_seq=1,
+        owner=owner,
+        created_at=now,
+    )
+    store.commands["stderr-only"].update(
+        state=CommandExecutionState.FINISHED,
+        result={
+            "exit_code": 1,
+            "output": {
+                "stdout": {"uri": "gs://test/stdout", "size_bytes": 0},
+                "stderr": {"uri": "gs://test/stderr", "size_bytes": 3},
+            },
+        },
+    )
+    monitor = CommandMonitor(
+        store,
+        StatusRuntime(),
+        MutableClock(now),
+        monitor_id="monitor",
+        output_reader=MemoryOutputReader({"gs://test/stdout": b"", "gs://test/stderr": b"err"}),
+    )
+    assert await monitor.command_output("stderr-only", cursor=0, limit_bytes=2) == ("er", 2)
+    assert await monitor.command_output("stderr-only", cursor=2, limit_bytes=2) == ("r", 3)
 
 
 async def test_monitor_does_not_finish_command_when_output_archive_fails():

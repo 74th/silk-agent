@@ -74,7 +74,7 @@ Worker のイメージ更新も同じ手順を使う（RollingUpdate は新 Pod 
 
 **回復は需要駆動。** Control は、失効した所有権について、その会話に未処理の入力（`pending` / `queued`）があるときだけ回復を試みる。誰も待っていない会話は 30 秒ごとに入力の有無を確認するだけで、旧 Worker への停止要求も Pod の確認も行わない。回復に失敗した（`recovery_blocked` のままの）場合は、5 秒から 5 分まで指数的に待ち間隔を延ばして再試行する（無限に高頻度で回り続けない）。実 GKE で、Pod を強制削除して 240 秒メッセージを送らない間は試行が 0 回で、メッセージを送ると 1 回の回復で引き継がれることを確認した。
 
-**自動回復（`distributed.auto_recover_missing_pods: true`、開発環境の設定で有効）。** Control は、`recovery_blocked` の担当について Kubernetes API で旧 Worker の Pod を引き、その UID の Pod が存在しない（404、または同名で UID が異なる）ことを確認できれば、lease 失効から `auto_recover_after_seconds`（既定は lease の 2 倍＝120 秒。通信断で生きている旧 Worker が lease を失って自分で SDK を閉じるのに十分な時間）が過ぎた後に、証拠 `auto:pod-absent:<Pod 名>` を記録して自動で解放する。API エラーなど判断できない場合は解放しない。実 GKE で、Pod の強制削除から約 174 秒で別 Worker へ引き継がれることを確認した。既定は無効で、無効の間と、Pod が存在する場合は以下の手動手順になる。残るリスクは、強制削除された Pod がノードの分断で実際には動き続けている場合で、状態・Outbox・Sandbox 操作は epoch で拒否されるが、外部 MCP の副作用と履歴への書込みは防げない。Control には `pods` の `get` 権限だけを与えている。自動回復を待つ間、会話には「担当の処理が途中で止まりました…」という通知を epoch ごとに 1 回だけ出す。
+**自動回復。** Control は、次の2つのうち、どちらかを確認できたとき、lease 失効から `auto_recover_after_seconds`（既定は lease の 2 倍＝120 秒。通信断で生きている旧 Worker が lease を失って自分で SDK を閉じるのに十分な時間）が過ぎた後に、自動で解放する。(1) **コンテナの再起動**: 同じ Worker 名（同じ Pod UID）で、より新しい incarnation が登録されている（OOM などでコンテナだけが再起動した場合。Pod は存在するが旧プロセスはない）。証拠は `auto:incarnation-replaced:<Pod 名>`。この判定は設定に依らず常に有効。(2) **Pod の不在**（`distributed.auto_recover_missing_pods: true`、開発環境の設定で有効）: `recovery_blocked` の担当について Kubernetes API で旧 Worker の Pod を引き、その UID の Pod が存在しない（404、または同名で UID が異なる）ことを確認できたとき。証拠は `auto:pod-absent:<Pod 名>`。API エラーなど判断できない場合は解放しない。実 GKE で、Pod の強制削除から約 174 秒で別 Worker へ引き継がれることを確認した。(2) は既定で無効で、無効の間と、Pod が存在して (1) にも当たらない場合は以下の手動手順になる。手動で解除しても、解除する旧 incarnation の予約だけを戻し、新しい incarnation の予約数は変えない。Worker の記録（`workers/{id}`、7 日で TTL 削除）がすでにない場合も、解放できる。残るリスクは、強制削除された Pod がノードの分断で実際には動き続けている場合で、状態・Outbox・Sandbox 操作は epoch で拒否されるが、外部 MCP の副作用と履歴への書込みは防げない。Control には `pods` の `get` 権限だけを与えている。自動回復を待つ間、会話には「担当の処理が途中で止まりました…」という通知を epoch ごとに 1 回だけ出す。
 
 Worker が lease を失った会話は、旧 Worker の SDK 停止が確認できるまで新しい Worker に渡さない。Control は期限切れの所有権を検出し、旧 incarnation に停止要求を出して証拠を待つ。応答がなければ `recovery_blocked` のままになり、`silk_agent_control_recovery_pending` が 0 でなくなる。
 
@@ -104,7 +104,8 @@ silk-agent recovery confirm-stopped CONVERSATION_KEY --evidence "node gke-xxx de
 | 出力 | `PREFIX_outbox` の `status == uncertain` | `output_id`, `attempt_count`, Slack ref。Slack のスレッドで同じ投稿があるか確認する |
 | コマンド | `PREFIX_commands` | `state`, `delivery_mode`, `command_id`。`command_status` で同じ ID を照会し、確認前に同じコマンドを再実行しない |
 
-- 出力が `uncertain` の会話は、その後の出力の送信が止まる（順序を守るため）。投稿の有無を確認した上で、該当 document の `status` を `delivered`（投稿済み）または `pending`（未投稿）に手動で更新する。更新前に `output_id` と Slack のスレッドを突き合わせる。
+- 出力の送信が失敗したときの分類: Slack が `ok: false` で拒否した（投稿されていないことが確定）場合、一時的なコード（`internal_error`、`service_unavailable`、`fatal_error`、`request_timeout`）は待ちを置いて最大10回まで再試行し、それ以外（`channel_not_found`、`is_archived`、`msg_too_long` など）と、送信前の検証の失敗は、その出力だけを `failed`（終端）にして、後続の出力は送る。`failed` は `outputs_total{result="failed"}` とログ（`not posted and is given up`）で観測でき、保持期間の後に削除される。接続断やタイムアウトなど、投稿されたかどうか分からない場合は、従来どおり `uncertain` になる。
+- 出力が `uncertain` の会話は、その会話の後続の出力の送信が止まる（順序を守るため）。他の会話の送信は止まらない。投稿の有無を確認した上で、該当 document の `status` を `delivered`（投稿済み）または `pending`（未投稿）に手動で更新する。更新前に `output_id` と Slack のスレッドを突き合わせる。
 - 入力が `uncertain` の会話は、ユーザが次の入力を送ると通常どおり処理される。必要なら Slack で再依頼を案内する。
 
 **入力の終端状態（会話が詰まらないための取り決め）**
@@ -144,6 +145,8 @@ silk-agent recovery confirm-stopped CONVERSATION_KEY --evidence "node gke-xxx de
 Firestore の操作数は Cloud Monitoring の `firestore.googleapis.com/api/request_count` を使う（アプリ内では数えない）。外部から scrape するには、NetworkPolicy に scraper からの ingress を追加する（既定は ingress なし）。
 
 ## 8. 既知の制限
+
+- **`AGENT_USER_EMAIL` は新しく作る Sandbox から適用される。** Sandbox Service は、会話の所有者のメールアドレスを、Sandbox を作る `ensure` に渡す（`new_generation_env`）。このメールアドレスを渡す前に作られた世代（作成時の環境がない）は、そのまま動き続けるが、メールアドレスは入らない（稼働中のコンテナの環境変数は後から変えられない）。保持期限などで次の世代が作られるときに、初めて入る。すぐに入れたい会話は、その Sandbox を終了（terminate）して、次の入力で作り直す（作業領域は失われる）。
 
 - 旧 Worker が応答不能な間の扱いは設定で変わる。`distributed.auto_recover_missing_pods` が無効なら、旧 Worker の停止証拠が得られるまで復旧しない（可用性より単一実行を優先する厳密なモード）。**開発環境の配置では有効**で、旧 Worker の Pod が Kubernetes API 上で存在しない（404、または同名で UID が異なる）ことを確認でき、lease 失効から120秒が経過すると、旧 Worker の停止証拠なしに自動で解放する（§5）。この場合、強制削除された Pod が分断されたノードで動き続けていると、外部 MCP の副作用と Agent Platform 履歴への書込みは防げない。厳密さを優先する運用では、この設定を無効にする。
 - 出力の origin 判定は、その会話で最後に渡した入力の番号を使う。STOP 直後の旧 turn が、次の入力が既に渡された後に出した遅延イベントは配送され得る。

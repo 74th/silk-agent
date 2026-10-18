@@ -109,3 +109,51 @@ async def test_sender_does_not_send_after_generation_revalidation_fails():
         "conversation"
     )
     assert sent == []
+
+
+class SlackRejected(Exception):
+    """Like slack_sdk's SlackApiError: the response says `ok: false` and why."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.response = {"ok": False, "error": code}
+
+
+async def _outcome(failure, attempt_count=1):
+    outbox = Outbox()
+    outbox.record["attempt_count"] = attempt_count
+
+    async def deliver(_record):
+        raise failure
+
+    sender = OutboxSender(outbox, Clock(), deliver, sender_id="sender-a")
+    assert await sender.run_once("conversation")
+    return outbox.marked[0]
+
+
+@pytest.mark.asyncio
+async def test_a_permanent_slack_rejection_fails_only_that_output():
+    marked = await _outcome(SlackRejected("channel_not_found"))
+    assert marked["new_state"] is OutputDeliveryState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_payload_that_was_never_sent_fails_instead_of_blocking():
+    marked = await _outcome(ValueError("Outbox event kind is unsupported"))
+    assert marked["new_state"] is OutputDeliveryState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_a_transient_slack_error_is_retried_with_a_growing_delay_then_given_up():
+    first = await _outcome(SlackRejected("internal_error"), attempt_count=1)
+    assert first["new_state"] is OutputDeliveryState.PENDING
+    third = await _outcome(SlackRejected("internal_error"), attempt_count=3)
+    assert third["next_attempt_at"] - Clock().current == timedelta(seconds=4)
+    last = await _outcome(SlackRejected("internal_error"), attempt_count=10)
+    assert last["new_state"] is OutputDeliveryState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_a_lost_response_stays_uncertain_and_is_never_marked_failed():
+    for failure in (OSError("connection reset"), TimeoutError()):
+        assert (await _outcome(failure))["new_state"] is OutputDeliveryState.UNCERTAIN

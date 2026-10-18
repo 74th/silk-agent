@@ -33,7 +33,7 @@ _TTL_ELIGIBLE_INPUT_STATES = frozenset(
 )
 _TTL_ELIGIBLE_CONTROL_STATES = frozenset({"handled", "filtered", "stale"})
 _TTL_ELIGIBLE_OUTPUT_STATES = frozenset(
-    {OutputDeliveryState.DELIVERED, OutputDeliveryState.SUPPRESSED}
+    {OutputDeliveryState.DELIVERED, OutputDeliveryState.SUPPRESSED, OutputDeliveryState.FAILED}
 )
 _TERMINAL_COMMAND_STATES = frozenset(
     {
@@ -112,7 +112,7 @@ def output_expiry(
     *,
     retention: timedelta = DEFAULT_TERMINAL_RETENTION,
 ) -> datetime | None:
-    """Outbox records expire once delivered or suppressed; an uncertain one stays."""
+    """Outbox records expire once delivered, suppressed or failed; an uncertain one stays."""
     if state not in _TTL_ELIGIBLE_OUTPUT_STATES:
         return None
     return _expiry(at, "at", retention)

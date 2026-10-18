@@ -166,7 +166,9 @@ class CommandMonitor:
             raise ValueError("stored output metadata is invalid")
         stream_record: Mapping[str, object]
         stream_cursor: int
-        if cursor < stdout_size or (stdout_size == 0 and cursor == 0):
+        # One cursor runs over stdout then stderr. An empty stdout has nothing at cursor 0, so
+        # the cursor already points into stderr.
+        if cursor < stdout_size:
             stream_record = stdout
             stream_cursor = cursor
             offset = 0
@@ -191,8 +193,16 @@ class CommandMonitor:
         conversation_key = _required(claim, "conversation_key")
         claim_token = _required(claim, "monitor_lease_token")
         current = CommandExecutionState(_required(claim, "state"))
+        generation = claim.get("sandbox_generation")
+        status_args: dict[str, int] = (
+            {"sandbox_generation": generation}
+            if getattr(self._runtime, "reads_by_generation", False)
+            and isinstance(generation, int)
+            and not isinstance(generation, bool)
+            else {}
+        )
         try:
-            result = await self._runtime.command_status(conversation_key, command_id)
+            result = await self._runtime.command_status(conversation_key, command_id, **status_args)
         except Exception:
             # The claim expires naturally; the next monitor retries the read, never start.
             return
@@ -200,9 +210,12 @@ class CommandMonitor:
         if observed in {
             CommandExecutionState.FINISHED,
             CommandExecutionState.CANCELLED,
+            CommandExecutionState.UNKNOWN,
         }:
             result_data: dict[str, object] = {"exit_code": result.exit_code}
-            if self._output_archiver is not None:
+            if observed is CommandExecutionState.UNKNOWN:
+                result_data["sandbox_lost"] = True  # nothing left to archive
+            elif self._output_archiver is not None:
                 if not isinstance(self._runtime, OutputPageReader):
                     raise TypeError("command runtime does not support paged output reads")
                 generation = claim.get("sandbox_generation")
@@ -253,6 +266,9 @@ def _observed_state(
         return CommandExecutionState.FINISHED
     if result.outcome == "cancelled":
         return CommandExecutionState.CANCELLED
+    if result.outcome == "lost":
+        # The Sandbox that ran it is gone for good: end it, stop polling, tell the user once.
+        return CommandExecutionState.UNKNOWN
     # A missing/ambiguous tracker record is not evidence of completion or permission to
     # submit another start. Preserve the ledger state and try a later status read.
     return None

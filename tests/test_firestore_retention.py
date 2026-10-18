@@ -74,7 +74,10 @@ def test_unresolved_controls_have_no_ttl(state: str) -> None:
     assert control_expiry(state, AT) is None
 
 
-@pytest.mark.parametrize("state", [OutputDeliveryState.DELIVERED, OutputDeliveryState.SUPPRESSED])
+@pytest.mark.parametrize(
+    "state",
+    [OutputDeliveryState.DELIVERED, OutputDeliveryState.SUPPRESSED, OutputDeliveryState.FAILED],
+)
 def test_settled_outputs_expire(state: OutputDeliveryState) -> None:
     assert output_expiry(state, AT) == AT + 30 * DAY
 

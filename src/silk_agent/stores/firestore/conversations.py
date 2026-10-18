@@ -305,9 +305,23 @@ class FirestoreConversationStore:
                 owner.conversation_generation + 1,
                 owner.expires_at,
             )
+            reset_seq = conversation.get("reset_seq")
             transaction.update(
                 conversation_ref,
                 {
+                    # The rebind of the inputs that arrived after the reset is a separate step.
+                    # This marker (written with the new generation) lets whoever owns the
+                    # conversation next finish it if this one stops half way.
+                    **(
+                        {
+                            "rebind_pending": {
+                                "previous_generation": owner.conversation_generation,
+                                "reset_seq": reset_seq,
+                            }
+                        }
+                        if isinstance(reset_seq, int) and not isinstance(reset_seq, bool)
+                        else {}
+                    ),
                     "conversation_generation": new_token.conversation_generation,
                     "sdk_session_id": None,
                     "turn_id": None,

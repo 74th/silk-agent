@@ -715,6 +715,119 @@ async def test_ensure_from_resuming_applies_policies_first_and_stays_resuming_on
         await manager.close()
 
 
+OWNER_ENV = {"AGENT_USER_EMAIL": "owner@example.com"}
+
+
+async def _suspend_expired(repository, key):
+    token = await repository.acquire_lease(key, "expire-setup")
+    stored = await repository.get(key)
+    expired = stored.record.model_copy(
+        update={"state": SessionState.SUSPENDED, "expires_at": datetime(2020, 1, 1, tzinfo=UTC)}
+    )
+    await repository.compare_and_swap(
+        token, expired, expected_resource_version=stored.resource_version
+    )
+    await repository.release_lease(token)
+
+
+@pytest.mark.asyncio
+async def test_new_generation_env_does_not_conflict_with_a_generation_created_without_env() -> None:
+    # A Sandbox from before the owner's e-mail was passed: created with no env at all.
+    async def gate(request):
+        body = await request.json()
+        return web.json_response({"accepting": body["accepting"], "active_commands": 0})
+
+    app = web.Application()
+    app.router.add_put("/v1/commands/gate", gate)
+    server = TestServer(app)
+    await server.start_server()
+    backend = FakeBackend()
+    backend.endpoint = str(server.make_url("/")).rstrip("/")
+    manager, repository, backend = await _ready_manager(backend)
+    key = SessionKey(tenant_id="tenant", session_id="legacy")
+    legacy = await manager.ensure(key)
+    assert legacy.record.creation_env_fingerprint is None
+
+    same = await manager.ensure(key, new_generation_env=OWNER_ENV)  # READY: no conflict
+    assert same.generation == legacy.generation
+    assert same.record.creation_env_fingerprint is None  # it keeps running as it was
+
+    await manager.suspend(key)
+    resumed = await manager.ensure(key, new_generation_env=OWNER_ENV)  # SUSPENDED: resumes
+    assert resumed.generation == legacy.generation
+
+    # The strict `env` still refuses it, as before.
+    with pytest.raises(SessionConfigurationConflictError):
+        await manager.ensure(key, env=OWNER_ENV)
+    await manager.close()
+    await server.close()
+
+
+@pytest.mark.asyncio
+async def test_new_generation_env_applies_to_a_new_session_and_to_the_next_generation() -> None:
+    manager, repository, backend = await _ready_manager()
+    fresh = SessionKey(tenant_id="tenant", session_id="fresh")
+    created = await manager.ensure(fresh, new_generation_env=OWNER_ENV)
+    assert created.record.creation_env_fingerprint is not None
+    again = await manager.ensure(fresh, new_generation_env=OWNER_ENV)
+    assert again.generation == created.generation  # idempotent
+
+    legacy = SessionKey(tenant_id="tenant", session_id="legacy-expired")
+    old = await manager.ensure(legacy)
+    await _suspend_expired(repository, legacy)
+    new = await manager.ensure(legacy, new_generation_env=OWNER_ENV)
+    assert (old.generation, new.generation) == (1, 2)
+    assert new.record.creation_env_fingerprint is not None  # the e-mail starts here
+
+
+@pytest.mark.asyncio
+async def test_env_and_new_generation_env_are_mutually_exclusive() -> None:
+    manager, _repository, _backend = await _ready_manager()
+    with pytest.raises(ValueError):
+        await manager.ensure(
+            SessionKey(tenant_id="tenant", session_id="both"),
+            env=OWNER_ENV,
+            new_generation_env=OWNER_ENV,
+        )
+
+
+@pytest.mark.asyncio
+async def test_observe_commands_never_resumes_or_creates_a_sandbox() -> None:
+    from gke_session_sandbox.errors import SandboxLostError, SandboxNotReadyError
+
+    manager, repository, backend = await _ready_manager()
+    key = SessionKey(tenant_id="tenant", session_id="observed")
+    handle = await manager.ensure(key)
+    started_before = list(backend.started)
+    generation_before = handle.generation
+
+    await _set_state(repository, key, state=SessionState.SUSPENDED)
+    with pytest.raises(SandboxNotReadyError):
+        await handle.observe_commands.get("any-command")
+
+    await _set_state(repository, key, state=SessionState.LOST)
+    with pytest.raises(SandboxLostError):
+        await handle.observe_commands.get("any-command")
+
+    await _set_state(repository, key, state=SessionState.TERMINATED)
+    with pytest.raises(SandboxLostError):
+        await handle.observe_commands.get("any-command")
+
+    # Nothing was resumed, created or started, and the stored generation did not move.
+    assert backend.started == started_before and backend.endpoint_refs == []
+    assert repository.records[key.stable_hash()].record.generation == generation_before
+
+
+@pytest.mark.asyncio
+async def test_observe_commands_of_an_older_generation_is_stale() -> None:
+    manager, repository, _backend = await _ready_manager()
+    key = SessionKey(tenant_id="tenant", session_id="replaced")
+    handle = await manager.ensure(key)
+    await _set_state(repository, key, generation=handle.generation + 1)
+    with pytest.raises(StaleGenerationError):
+        await handle.observe_commands.get("any-command")
+
+
 @pytest.mark.asyncio
 async def test_diagnostic_command_refuses_a_suspended_session_and_changes_nothing() -> None:
     manager, repository, backend = await _ready_manager()

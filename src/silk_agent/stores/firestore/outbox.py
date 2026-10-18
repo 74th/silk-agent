@@ -149,6 +149,19 @@ class FirestoreOutboxStore(FirestoreOutboxWriter):
 
     async def list_conversations_with_pending(self, *, limit: int = 100) -> tuple[str, ...]:
         """Bounded page of conversations that have output waiting for a Sender."""
+        keys, _next = await self.list_pending_page(limit=limit)
+        return keys
+
+    async def list_pending_page(
+        self, *, limit: int = 100, after: Any | None = None
+    ) -> tuple[tuple[str, ...], Any | None]:
+        """One page of conversations with output waiting, in document order after `after`.
+
+        Returns (conversation keys, cursor for the next page). The cursor is None at the end of
+        the data: the caller starts over from the beginning. Without a moving cursor, a
+        conversation whose head output is stuck (and whose later outputs pile up) would fill
+        every page and starve all the others.
+        """
         if limit < 1:
             raise ValueError("limit must be positive")
         query = (
@@ -160,15 +173,22 @@ class FirestoreOutboxStore(FirestoreOutboxWriter):
                     [OutputDeliveryState.PENDING.value, OutputDeliveryState.DISPATCHING.value],
                 )
             )
+            .order_by("__name__")
             .limit(limit)
         )
+        if after is not None:
+            query = query.start_after(after)
         try:
             keys: dict[str, None] = {}
+            last = None
+            count = 0
             async for snapshot in query.stream():
+                count += 1
+                last = snapshot
                 key = (snapshot.to_dict() or {}).get("conversation_key")
                 if isinstance(key, str) and key:
                     keys[key] = None
-            return tuple(keys)
+            return tuple(keys), (last if count >= limit else None)
         except Exception as exc:
             raise convert_firestore_error("list_outbox_conversations", exc) from None
 

@@ -21,6 +21,7 @@ async def _client(
     authorizer=None,
     owner_provider=None,
     operation_store=None,
+    env_provider=None,
     clock=None,
 ):
     app = create_app(
@@ -32,6 +33,7 @@ async def _client(
         conversation_authorizer=authorizer,
         owner_provider=owner_provider,
         operation_store=operation_store,
+        env_provider=env_provider,
         clock=clock or (lambda: datetime.now(UTC)),
     )
     client = TestClient(TestServer(app))
@@ -1086,3 +1088,61 @@ async def test_the_service_returns_from_its_wait_on_sigterm():
     assert not waiting.done()
     os.kill(os.getpid(), signal.SIGTERM)
     await asyncio.wait_for(waiting, 2)
+
+
+async def test_ensure_passes_the_conversation_owners_email_to_the_sandbox():
+    ensured = []
+
+    class Manager:
+        async def ensure(self, key, new_generation_env=None):
+            ensured.append(new_generation_env)
+            return SimpleNamespace(
+                generation=1,
+                state=SimpleNamespace(value="ready"),
+                record=SimpleNamespace(generation=1),
+            )
+
+    async def review(_token, audience):
+        return {
+            "authenticated": True,
+            "audiences": [audience],
+            "user": {"username": "system:serviceaccount:silk:worker"},
+        }
+
+    async def authorize(_ksa, _key):
+        return True
+
+    async def env_for(conversation_key):
+        assert conversation_key == "slack:T:C:123"
+        return {"AGENT_USER_EMAIL": "owner@example.com"}
+
+    client = await _client(review, manager=Manager(), authorizer=authorize, env_provider=env_for)
+    try:
+        for _ in range(2):  # every ensure (create, then resume) gets the same value
+            response = await client.post(
+                "/v1/sessions/ensure",
+                json={"conversation_key": "slack:T:C:123"},
+                headers={"Authorization": "Bearer token"},
+            )
+            assert response.status == 200
+        assert ensured == [{"AGENT_USER_EMAIL": "owner@example.com"}] * 2
+    finally:
+        await client.close()
+
+
+async def test_ensure_without_an_owner_email_passes_no_environment():
+    from silk_agent.sandbox.service import ENV_PROVIDER_KEY, MANAGER_KEY, _ensure_handle
+
+    ensured = []
+
+    class Manager:
+        async def ensure(self, key, **kwargs):
+            ensured.append(kwargs)
+            return "handle"
+
+    async def no_email(_key):
+        return {}
+
+    request = SimpleNamespace(app={MANAGER_KEY: Manager(), ENV_PROVIDER_KEY: no_email})
+    assert await _ensure_handle(request, "slack:T:C:123") == "handle"
+    assert ensured == [{}]  # no `env`: a conversation without an owner e-mail stays as before

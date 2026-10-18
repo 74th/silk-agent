@@ -163,7 +163,15 @@ class SlackOutput:
         conv = _Conv(event.conversation_key, channel, thread, view, event.turn_id)
         self._convs[event.conversation_key] = conv
         text = view.render(self._clock.now())
-        conv.ts = await self._post(channel, thread, text)
+        try:
+            conv.ts = await self._post(channel, thread, text)
+        except BaseException:
+            # Nothing was posted. Keeping the entry would make the retry of this event (the
+            # Outbox sends it again after a rejection) look like a repeat of a turn that is
+            # already shown, and "deliver" it without ever calling Slack.
+            if self._convs.get(event.conversation_key) is conv:
+                del self._convs[event.conversation_key]
+            raise
         conv.last_text, conv.last_flush = text, self._clock.now()
         await self._save_ref(conv)
         await self._save_snapshot(conv)

@@ -111,7 +111,10 @@ def test_worker_record_validates_drain_deadline_timezone():
             {"intent", "running", "finished", "cancel_requested", "cancelled", "unknown"},
         ),
         (NotificationState, {"none", "pending", "delivered", "suppressed", "held"}),
-        (OutputDeliveryState, {"pending", "dispatching", "delivered", "suppressed", "uncertain"}),
+        (
+            OutputDeliveryState,
+            {"pending", "dispatching", "delivered", "suppressed", "uncertain", "failed"},
+        ),
         (CommandDeliveryMode, {"foreground", "background", "orphaned"}),
     ],
 )
@@ -132,6 +135,7 @@ def test_input_accepted_and_completed_are_distinct_states():
         (CommandExecutionState.FINISHED, CommandExecutionState.RUNNING),
         (NotificationState.DELIVERED, NotificationState.PENDING),
         (OutputDeliveryState.DELIVERED, OutputDeliveryState.PENDING),
+        (OutputDeliveryState.FAILED, OutputDeliveryState.PENDING),
     ],
 )
 def test_terminal_states_cannot_be_reopened(current, new):

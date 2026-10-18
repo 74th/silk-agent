@@ -369,6 +369,10 @@ class FakeInboxStore:
         )
         return True
 
+    async def pending_rebind(self, conversation_key: str):
+        """(previous generation, reset_seq) of a reset whose rebind did not finish."""
+        return getattr(self, "rebind_markers", {}).get(conversation_key)
+
     async def rebind_after_reset(
         self,
         *,
@@ -405,6 +409,7 @@ class FakeInboxStore:
                 InputDeliveryState.ACCEPTED,
             }:
                 self.inputs[key] = replace(current, delivery_state=InputDeliveryState.UNCERTAIN)
+        getattr(self, "rebind_markers", {}).pop(conversation_key, None)
         return count
 
     async def recover_dispatching(

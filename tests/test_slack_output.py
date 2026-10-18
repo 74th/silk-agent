@@ -1,6 +1,8 @@
 import re
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from silk_agent.channels.slack import SlackChannel
 from silk_agent.channels.slack_output import SlackOutput, rewrite_as_crashed
 from silk_agent.channels.slack_progress import ProgressView, format_duration
@@ -189,6 +191,29 @@ async def test_turn_start_posts_progress_message_in_thread(clock):
     assert post["channel"] == "C1" and post["thread_ts"] == "100.1"
     assert post["text"].startswith("⏳ 実行中") and "最終更新 2026-10-10 18:00" in post["text"]
     assert "停止するには『停止』と書き込んでください" in post["text"]
+
+
+async def test_a_rejected_turn_start_is_posted_again_when_the_event_is_retried(clock):
+    out, client = make_output(clock)
+    real_post = client.chat_postMessage
+    failures = [RuntimeError("service_unavailable")]
+
+    async def flaky(**kw):
+        if failures:
+            raise failures.pop()
+        return await real_post(**kw)
+
+    client.chat_postMessage = flaky
+    event = TurnStarted(KEY, "t1", clock.now())
+    with pytest.raises(RuntimeError):
+        await out.send_durable(event)
+    assert client.posts == []
+    # The Outbox sends the same event again: it must reach Slack this time, not be skipped
+    # as a turn that is already on screen.
+    await out.send_durable(event)
+    assert len(client.posts) == 1
+    await out.send_durable(event)  # a genuine repeat of a posted turn is still ignored
+    assert len(client.posts) == 1
 
 
 async def test_updates_are_throttled_to_one_per_second(clock):

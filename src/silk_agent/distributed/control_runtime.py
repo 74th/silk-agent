@@ -15,6 +15,7 @@ from silk_agent.config import Config, ConfigError
 from silk_agent.core.clock import SystemClock
 from silk_agent.core.ports import Clock
 from silk_agent.distributed.metrics import METRICS
+from silk_agent.distributed.pod_probe import pod_uid_of, pod_uid_of_incarnation
 from silk_agent.stores.firestore.allocator import FirestoreAllocator
 from silk_agent.stores.firestore.client import create_firestore_client
 from silk_agent.stores.firestore.conversations import FirestoreConversationStore
@@ -38,6 +39,7 @@ class RecoveryLoop:
         batch_size: int = 100,
         on_tick: Callable[[], None] | None = None,
         pod_gone: Callable[[Any], Awaitable[bool]] | None = None,
+        current_incarnation: Callable[[str], Awaitable[str | None]] | None = None,
         auto_recover_after_seconds: float = 120,
         notify_blocked: Callable[[Any], Awaitable[None]] | None = None,
         has_demand: Callable[[Any], Awaitable[bool]] | None = None,
@@ -52,7 +54,11 @@ class RecoveryLoop:
         self._backoff_base = backoff_base_seconds
         self._backoff_max = backoff_max_seconds
         self._schedule: dict[str, tuple[int, datetime]] = {}  # key -> (failures, next attempt)
+        self._cursor: Any | None = None
+        self._cycle_seen: set[str] = set()
+        self._cycle_pending = 0
         self._pod_gone = pod_gone
+        self._current_incarnation = current_incarnation
         self._auto_after = timedelta(seconds=auto_recover_after_seconds)
         self._notify_blocked = notify_blocked
         self._on_tick = on_tick
@@ -67,15 +73,24 @@ class RecoveryLoop:
         self._batch_size = batch_size
 
     async def run_once(self) -> int:
-        expired = await self._ownership.list_expired(
-            before=self._clock.now() - self._skew, limit=self._batch_size
-        )
+        before = self._clock.now() - self._skew
+        paged = getattr(self._ownership, "list_expired_page", None)
+        if paged is not None:
+            # Resume after the previous page: expired ownerships nobody is waiting on must not
+            # fill a fixed first page and hide the ones that are.
+            expired, self._cursor = await paged(
+                before=before, limit=self._batch_size, after=self._cursor
+            )
+        else:
+            expired = await self._ownership.list_expired(before=before, limit=self._batch_size)
+            self._cursor = None
 
         now = self._clock.now()
-        live = {token.conversation_key for token in expired}
-        for key in tuple(self._schedule):
-            if key not in live:
-                del self._schedule[key]  # released or renewed: forget its backoff
+        self._cycle_seen.update(token.conversation_key for token in expired)
+        if self._cursor is None:  # the pass over every ownership is complete
+            for key in tuple(self._schedule):
+                if key not in self._cycle_seen:
+                    del self._schedule[key]  # released or renewed: forget its backoff
 
         async def recover(token: Any) -> int:
             key = token.conversation_key
@@ -103,8 +118,9 @@ class RecoveryLoop:
                 return 0
             state = result.state if result is not None else "skipped"
             if state == "blocked":
-                if await self._released_for_missing_pod(token):
-                    METRICS.inc("control_recovery_total", result="pod_absent")
+                auto = await self._released_with_evidence(token)
+                if auto is not None:
+                    METRICS.inc("control_recovery_total", result=auto)
                     return 1
                 await self._tell_user(token)
                 self._back_off(key, failures)
@@ -113,34 +129,56 @@ class RecoveryLoop:
 
         released = sum(await asyncio.gather(*(recover(token) for token in expired)))
         # Expired and not released: each is waiting for stop evidence (recovery_blocked).
-        METRICS.set("control_recovery_pending", len(expired) - released)
+        self._cycle_pending += len(expired) - released
+        if self._cursor is None:
+            METRICS.set("control_recovery_pending", self._cycle_pending)
+            self._cycle_seen.clear()
+            self._cycle_pending = 0
         return released
 
     def _back_off(self, key: str, failures: int) -> None:
         delay = min(self._backoff_base * (2**failures), self._backoff_max)
         self._schedule[key] = (failures + 1, self._clock.now() + timedelta(seconds=delay))
 
-    async def _released_for_missing_pod(self, token: Any) -> bool:
-        """Release when Kubernetes shows the old Pod is gone and enough time has passed for a
-        partitioned live Worker to have stopped itself after losing its lease."""
-        if self._pod_gone is None:
-            return False
+    async def _released_with_evidence(self, token: Any) -> str | None:
+        """Release when something proves the old incarnation's SDK is gone, and enough time has
+        passed for a partitioned live Worker to have stopped itself after losing its lease.
+
+        Evidence: the Worker id now runs a newer incarnation of the same Pod (the container
+        restarted, which ends the old process), or Kubernetes shows the Pod is absent or
+        replaced. Returns the metric label of the evidence used, or None."""
         if self._clock.now() - token.expires_at < self._auto_after:
-            return False
+            return None
         try:
-            if not await self._pod_gone(token):
-                return False
-            return bool(
-                await self._ownership.confirm_stopped(
-                    token,
-                    evidence_id=f"auto:pod-absent:{token.worker_id}",
-                    worker_incarnation=token.worker_incarnation,
-                    now=self._clock.now(),
-                )
+            evidence = await self._stop_evidence(token)
+            if evidence is None:
+                return None
+            label, evidence_id = evidence
+            released = await self._ownership.confirm_stopped(
+                token,
+                evidence_id=evidence_id,
+                worker_incarnation=token.worker_incarnation,
+                now=self._clock.now(),
             )
+            return label if released else None
         except Exception as exc:
-            log.warning("Pod-absence recovery failed (%s)", type(exc).__name__)
-            return False
+            log.warning("Automatic recovery failed (%s)", type(exc).__name__)
+            return None
+
+    async def _stop_evidence(self, token: Any) -> tuple[str, str] | None:
+        if self._current_incarnation is not None:
+            current = await self._current_incarnation(token.worker_id)
+            uid = pod_uid_of(token)
+            if (
+                current is not None
+                and current != token.worker_incarnation
+                and uid is not None
+                and pod_uid_of_incarnation(current) == uid
+            ):
+                return "incarnation_replaced", f"auto:incarnation-replaced:{token.worker_id}"
+        if self._pod_gone is not None and await self._pod_gone(token):
+            return "pod_absent", f"auto:pod-absent:{token.worker_id}"
+        return None
 
     async def _tell_user(self, token: Any) -> None:
         if self._notify_blocked is None:
@@ -177,27 +215,41 @@ class OutboxSenderLoop:
         poll_seconds: float = 1,
         batch_size: int = 100,
         concurrency: int = 8,
+        max_per_conversation: int = 20,
         on_tick: Callable[[], None] | None = None,
     ) -> None:
         self._on_tick = on_tick
-        if min(poll_seconds, batch_size, concurrency) <= 0:
+        if min(poll_seconds, batch_size, concurrency, max_per_conversation) <= 0:
             raise ValueError("sender loop values must be positive")
         self._outbox = outbox
         self._sender = sender
         self._poll_seconds = poll_seconds
         self._batch_size = batch_size
         self._slots = asyncio.Semaphore(concurrency)
+        self._cursor: Any | None = None
+        # Outputs sent for one conversation in one pass. A conversation that always has
+        # something to send must not keep the pass from reaching the next page.
+        self._max_per_conversation = max_per_conversation
+        self.backlog = False  # some conversation still had output when its pass ended
 
     async def run_once(self) -> int:
-        keys = await self._outbox.list_conversations_with_pending(limit=self._batch_size)
+        self.backlog = False  # a failed listing below must not inherit the previous pass's
+        paged = getattr(self._outbox, "list_pending_page", None)
+        if paged is not None:
+            # Resume after the last page: a stuck conversation must not fill every page.
+            keys, self._cursor = await paged(limit=self._batch_size, after=self._cursor)
+        else:
+            keys = await self._outbox.list_conversations_with_pending(limit=self._batch_size)
         delivered = 0
 
         async def drain(key: str) -> int:
             count = 0
             async with self._slots:
                 try:
-                    while await self._sender.run_once(key):
+                    while count < self._max_per_conversation and await self._sender.run_once(key):
                         count += 1
+                    if count >= self._max_per_conversation:
+                        self.backlog = True
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -219,6 +271,9 @@ class OutboxSenderLoop:
                 raise
             except Exception as exc:
                 log.warning("Outbox listing failed (%s)", type(exc).__name__)
+            if self.backlog:
+                await asyncio.sleep(0)  # more to send: go straight to the next page
+                continue
             try:
                 await asyncio.wait_for(stop.wait(), timeout=self._poll_seconds)
             except TimeoutError:
@@ -341,9 +396,15 @@ async def run_control(config: Config) -> None:
     retention = RetentionPolicy.from_config(config.distributed.retention)
     identity = f"{os.environ.get('HOSTNAME', 'control')}:{uuid.uuid4().hex}"
     conversations = FirestoreConversationStore(client, collection_prefix=prefix)
+    directory = FirestoreWorkerDirectory(client, collection_prefix=prefix, retention=retention)
+
+    async def current_incarnation(worker_id: str) -> str | None:
+        worker = await directory.get_worker(worker_id)
+        return worker.incarnation if worker is not None else None
+
     allocator = ControlAllocatorLoop(
         conversations,
-        FirestoreWorkerDirectory(client, collection_prefix=prefix, retention=retention),
+        directory,
         FirestoreAllocator(client, collection_prefix=prefix),
         clock,
         allocator_id=identity,
@@ -402,6 +463,7 @@ async def run_control(config: Config) -> None:
         skew_seconds=config.distributed.lease_clock_skew_seconds,
         on_tick=health.loop("recovery", 180),
         pod_gone=pod_probe.is_gone if pod_probe is not None else None,
+        current_incarnation=current_incarnation,
         auto_recover_after_seconds=(
             config.distributed.auto_recover_after_seconds or 2 * config.distributed.lease_seconds
         ),

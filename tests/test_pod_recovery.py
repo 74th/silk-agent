@@ -200,3 +200,98 @@ async def test_failed_recovery_backs_off_exponentially_up_to_a_cap():
     gaps = [b - a for a, b in zip(attempts, attempts[1:], strict=False)]
     assert gaps[:4] == [5, 10, 20, 40] and set(gaps[3:]) == {40}
     assert len(attempts) < 12  # not one attempt per poll
+
+
+def replaced_loop(ownership, current, *, gone=False, after=120):
+    async def current_incarnation(worker_id):
+        assert worker_id == "worker-pod-a"
+        return current
+
+    async def pod_gone(_token):
+        return gone
+
+    return RecoveryLoop(
+        ownership,
+        Coordinator(),
+        object(),
+        Clock(),
+        pod_gone=pod_gone,
+        current_incarnation=current_incarnation,
+        auto_recover_after_seconds=after,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_newer_incarnation_of_the_same_pod_releases_even_though_the_pod_exists():
+    # The container restarted (OOM): same Pod, same UID, new incarnation. Kubernetes still
+    # shows the Pod, but the old process is gone.
+    ownership = Ownership(token(expired_for=300))
+    newer = json.dumps([UID, "boot-2"])
+    assert await replaced_loop(ownership, newer, gone=False).run_once() == 1
+    assert ownership.confirmed == ["auto:incarnation-replaced:worker-pod-a"]
+
+
+@pytest.mark.asyncio
+async def test_the_same_incarnation_or_another_pod_is_not_evidence():
+    same = Ownership(token(expired_for=300))
+    assert await replaced_loop(same, token().worker_incarnation).run_once() == 0
+    other_pod = Ownership(token(expired_for=300))
+    assert await replaced_loop(other_pod, json.dumps(["uid-2", "boot"])).run_once() == 0
+    no_record = Ownership(token(expired_for=300))
+    assert await replaced_loop(no_record, None).run_once() == 0
+    assert same.confirmed == other_pod.confirmed == no_record.confirmed == []
+
+
+@pytest.mark.asyncio
+async def test_a_newer_incarnation_still_waits_for_the_self_stop_window():
+    ownership = Ownership(token(expired_for=30))
+    assert await replaced_loop(ownership, json.dumps([UID, "boot-2"])).run_once() == 0
+    assert ownership.confirmed == []
+
+
+class PagedOwnership(Ownership):
+    """A stable-order collection of expired ownerships, served in pages like Firestore."""
+
+    def __init__(self, count):
+        self.tokens = [
+            OwnershipToken(
+                f"slack:T:C:{n}",
+                "worker-pod-a",
+                json.dumps([UID, "boot"]),
+                3,
+                1,
+                NOW - timedelta(seconds=300),
+            )
+            for n in range(count)
+        ]
+        self.confirmed = []
+
+    async def list_expired_page(self, *, before, limit, after):
+        start = 0 if after is None else after
+        page = self.tokens[start : start + limit]
+        nxt = start + limit
+        return tuple(page), (nxt if nxt < len(self.tokens) else None)
+
+
+@pytest.mark.asyncio
+async def test_an_ownership_nobody_waits_on_cannot_hide_a_later_one_that_is_waited_on():
+    # More expired ownerships than one page, and the only one with a waiting input is last.
+    ownership = PagedOwnership(5)
+    asked = []
+
+    async def has_demand(tok):
+        asked.append(tok.conversation_key)
+        return tok.conversation_key == "slack:T:C:4"
+
+    recovery = RecoveryLoop(
+        ownership,
+        Coordinator(),
+        object(),
+        Clock(),
+        batch_size=2,
+        has_demand=has_demand,
+        current_incarnation=None,
+    )
+    for _ in range(3):  # three pages: 0-1, 2-3, 4
+        await recovery.run_once()
+    assert "slack:T:C:4" in asked

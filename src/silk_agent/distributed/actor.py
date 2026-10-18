@@ -96,6 +96,7 @@ class DistributedConversationActor:
             self._session,
             command_monitor=self._command_monitor,
         )
+        await self._finish_pending_rebind()
         await self._settle_leftovers()
         self._dispatcher = ConversationDispatcher(
             read_inputs=self._read_inputs,
@@ -327,6 +328,28 @@ class DistributedConversationActor:
         )
         self._input_seqs.pop(record.input_id, None)
         METRICS.inc("inputs_abandoned_total")
+
+    async def _finish_pending_rebind(self) -> None:
+        """A reset that stopped between its new generation and the rebind of the inputs that
+        arrived after it: finish it here, or those inputs stay on the old generation and are
+        checked again and again."""
+        pending_rebind = getattr(self._inbox, "pending_rebind", None)
+        if pending_rebind is None:
+            return
+        key = self._owner.conversation_key
+        pending = await pending_rebind(key)
+        if pending is None:
+            return
+        previous_generation, reset_seq = pending
+        if previous_generation + 1 != self._owner.conversation_generation:
+            return  # a later reset superseded it
+        rebound = await self._inbox.rebind_after_reset(
+            conversation_key=key,
+            previous_generation=previous_generation,
+            reset_seq=reset_seq,
+            owner=self._owner,
+        )
+        log.info("finished an interrupted reset rebind for %s (%d inputs)", key, rebound)
 
     async def _settle_leftovers(self) -> None:
         """A new actor has nothing in flight: inputs an earlier owner left as dispatching or
