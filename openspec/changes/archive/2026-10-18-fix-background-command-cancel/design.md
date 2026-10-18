@@ -19,7 +19,7 @@
 ## Decisions
 
 1. **runtime に任意の `cancel_command(conversation_key, command_id, request_id=None) -> str` を持たせる。** 既存の `cancel_sender`（RemoteSandboxRuntime の同名メソッド）と同じシグネチャにして、`BackgroundCommands` が `getattr(runtime, "cancel_command")` で拾う既存の仕組みをそのまま使う。持たない runtime（LocalProcess）は従来どおり task の cancel で止める。代案として `SandboxRuntime` の Protocol に必須で加える案は、LocalProcess に空実装が要るので採らない。
-2. **GKE runtime の `cancel_command` は `handle.commands.cancel(command_id)` の成功を `confirmed`、失敗や handle なしを `unknown` とする。** tracker の cancel は SIGTERM→SIGKILL を送るが、終了の確認は wait の結果で行うため、ここでは「受け付けた」までしか言えない。しかし単一 Pod 構成には `accepted` を扱う経路（停止の確認を待つ手段）がないので、cancel の API が成功したら `confirmed`、例外なら `unknown` とする。
+2. **GKE runtime の `cancel_command` は、tracker が終了を報告したときだけ `confirmed` とする。** tracker の cancel API は SIGTERM を送って HTTP 202 を返すだけで、終了を待たない（SIGKILL は5秒後）。そのため、cancel の後に `get` で record が `finished` になるのを `cancel_confirm_seconds`（既定10秒）まで確認する。終了を確認できなければ `accepted`、cancel や `get` の失敗は `unknown` とし、どちらもローカルの handle と tracker の ID を残す。（当初は「cancel API の成功を `confirmed`」としていたが、SIGTERM を無視するコマンドで誤って停止成功になるため改めた。）
 3. **`BackgroundCommands._cancel` は、sender があり command_id があるとき、先に sender で取消を送り、その結果を返す。** task は結果にかかわらず cancel する（待ち続けない）。結果が `unknown` のときは、`_run` の `finally` で tracker の ID を消さない。そのため、`entry.result` を `cancelled` ではなく `unknown` にする。
 4. **`cancel_all` は `CommandCancelReport` を返す。** orchestrator の `report_stop` はすでにこの型を扱え、`unknown` があれば「停止を確認できません」と表示する。件数だけを返す今の経路は、`int` の分岐として残る（互換）。
 

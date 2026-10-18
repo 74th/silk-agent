@@ -40,11 +40,14 @@ class GkeSessionSandboxRuntime:
         env_provider: EnvProvider | None = None,
         session_key_factory: Callable[[str, str], Any] | None = None,
         default_timeout_seconds: float = 120.0,
+        cancel_confirm_seconds: float = 10.0,
     ) -> None:
         self._manager = manager
         self._env_provider = env_provider
         self._key_factory = session_key_factory
         self._timeout = default_timeout_seconds
+        # The tracker sends SIGTERM, and SIGKILL 5 s later: wait for the exit past that.
+        self._cancel_confirm = cancel_confirm_seconds
         self._handles: dict[str, Any] = {}
         self._pending: dict[str, list[str]] = {}
         self._events: dict[str, list[Any]] = {}
@@ -177,25 +180,39 @@ class GkeSessionSandboxRuntime:
     async def cancel_command(
         self, conversation_key: str, command_id: str, request_id: str | None = None
     ) -> str:
-        """Ask the tracker to stop one command: "confirmed" once the tracker took the
-        cancel, "unknown" when it could not be sent (the process may still be running)."""
+        """Ask the tracker to stop one command.
+
+        "confirmed" only once the tracker reports it finished; "accepted" when the cancel
+        was taken but the process is still running (the tracker's cancel returns at once, with
+        SIGKILL following later); "unknown" when it could not be sent or read. Only a
+        confirmed stop drops the local handle."""
         handle = self._running.get(conversation_key, {}).get(command_id)
         self._cancelled.setdefault(conversation_key, set()).add(command_id)
-        try:
+
+        async def ask(call: Callable[[Any], Awaitable[Any]]) -> Any:
             if handle is not None:
-                await handle.commands.cancel(command_id)
-            else:
+                return await call(handle)
+            return await self._with_session(conversation_key, call)
 
-                async def op(session: Any) -> Any:
-                    return await session.commands.cancel(command_id)
-
-                await self._with_session(conversation_key, op)
+        try:
+            await ask(lambda session: session.commands.cancel(command_id))
         except Exception:
             log.exception("cancelling command %s failed", command_id)
             self._cancelled.get(conversation_key, set()).discard(command_id)
             return "unknown"
-        self._running.get(conversation_key, {}).pop(command_id, None)
-        return "confirmed"
+        deadline = asyncio.get_running_loop().time() + self._cancel_confirm
+        while True:
+            try:
+                record = await ask(lambda session: session.commands.get(command_id))
+            except Exception:
+                log.exception("reading command %s after cancel failed", command_id)
+                return "unknown"
+            if record.get("state") == "finished":
+                self._running.get(conversation_key, {}).pop(command_id, None)
+                return "confirmed"
+            if asyncio.get_running_loop().time() >= deadline:
+                return "accepted"
+            await asyncio.sleep(0.25)
 
     async def cancel_commands(self, conversation_key: str) -> None:
         """Ask the tracker to stop the running commands (SIGTERM, then SIGKILL)."""

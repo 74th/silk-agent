@@ -356,6 +356,18 @@ class RemoteRuntime(SlowRuntime):
         return self.outcome
 
 
+class SequencedRuntime(RemoteRuntime):
+    """Each cancel answers with the next outcome of the list."""
+
+    def __init__(self, outcomes):
+        super().__init__()
+        self.outcomes = list(outcomes)
+
+    async def cancel_command(self, key, command_id, request_id=None):
+        self.cancel_requests.append(command_id)
+        return self.outcomes.pop(0)
+
+
 class RecordingTracker:
     def __init__(self):
         self.live: set[str] = set()
@@ -422,6 +434,42 @@ async def test_unconfirmed_cancel_is_not_reported_as_stopped_and_keeps_the_id(cl
     texts = [n.text for n in channel.of(Notice)]
     assert len(texts) == 1 and "停止を確認できませんでした" in texts[0]
     assert tracker.live == {"cmd-1"}  # restart notices can still find it
+
+
+async def test_mixed_stop_reports_both_the_stopped_and_the_unconfirmed_commands(clock):
+    rt = SequencedRuntime(["confirmed", "unknown"])
+    tracker = RecordingTracker()
+    bg = BackgroundCommands(rt, tracker)
+    channel = ScriptedChannel()
+    orch = ConversationOrchestrator(
+        lambda key: FakeAgentEngine(clock, [Text("ok")]),
+        channel,
+        clock,
+        guard=AllowAllGuard(),
+        sanitizer=NoopSanitizer(),
+        stop_words=StopWords(["停止"]),
+        settings=SessionSettings(),
+        cancel_background=bg.cancel_all,
+    )
+    bg.detach(await bg.start("K", "first"))
+    bg.detach(await bg.start("K", "second"))
+    await orch.handle(UserMessage("K", "u", "停止"))
+    texts = [n.text for n in channel.of(Notice)]
+    assert texts == [
+        "バックグラウンドで実行中のコマンド1件を停止しました。",
+        "バックグラウンドコマンド1件の停止を確認できませんでした。まだ動いている可能性があります。",
+    ]
+    assert tracker.live == {"cmd-2"}  # only the unconfirmed one is still tracked
+
+
+async def test_an_accepted_but_unfinished_stop_keeps_the_id_and_is_reported_as_requested(clock):
+    rt = SequencedRuntime(["accepted"])
+    tracker = RecordingTracker()
+    bg = BackgroundCommands(rt, tracker)
+    bg.detach(await bg.start("K", "sleep 300"))
+    report = await bg.cancel_all("K")
+    assert (report.confirmed, report.accepted) == (0, 1)
+    assert tracker.live == {"cmd-1"}
 
 
 async def test_cancel_command_tool_does_not_report_an_unconfirmed_stop_as_success():
