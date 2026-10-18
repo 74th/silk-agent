@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -183,6 +183,7 @@ def test_worker_drain_all_command_sets_global_and_per_worker_barriers(
                 firestore_database="(default)",
                 firestore_prefix="silk-agent-test",
                 drain_timeout_seconds=None,
+                lease_seconds=60,
             ),
         ),
     )
@@ -249,3 +250,60 @@ def test_migration_import_defaults_to_read_only_and_closes_client(monkeypatch, t
     assert report["dry_run"] and report["created"] == 0
     assert target.documents == {}
     assert client.closed
+
+
+def test_drain_wait_ignores_workers_that_stopped_heartbeating(monkeypatch, tmp_path, capsys):
+    """A dead Pod keeps its last reserved/active counts; waiting on it would never finish."""
+    from silk_agent.core.distributed_models import WorkerRecord
+    from silk_agent.stores.firestore import client as firestore_client
+    from silk_agent.stores.firestore import workers as firestore_workers
+
+    now = datetime.now(UTC)
+    records = [
+        WorkerRecord("live", "inc-1", 4, 0, 0, False, now),
+        WorkerRecord("dead", "inc-0", 4, 1, 1, True, now - timedelta(days=2)),
+    ]
+
+    class FakeClient:
+        def close(self):
+            pass
+
+    class FakeDirectory:
+        def __init__(self, *_args, **_kwargs):
+            self.records = list(records)
+
+        async def list_workers(self):
+            return tuple(self.records)
+
+        async def set_cluster_draining(self, _draining):
+            pass
+
+        async def is_cluster_draining(self):
+            return True
+
+        async def set_draining(self, *, worker_id, incarnation, **_kwargs):
+            return next(r for r in self.records if r.worker_id == worker_id)
+
+    monkeypatch.setattr(
+        "silk_agent.cli.load_config",
+        lambda _path: SimpleNamespace(
+            execution_mode="distributed",
+            distributed=SimpleNamespace(
+                firestore_project="p",
+                firestore_database="(default)",
+                firestore_prefix="x",
+                drain_timeout_seconds=None,
+                lease_seconds=60,
+            ),
+        ),
+    )
+    monkeypatch.setattr(firestore_client, "create_firestore_client", lambda _c: FakeClient())
+    monkeypatch.setattr(firestore_workers, "FirestoreWorkerDirectory", FakeDirectory)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("unused: true\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as result:
+        main(["worker", "drain-all", "--wait", "--timeout", "5", "--config", str(config_path)])
+    assert result.value.code == 0  # did not time out on the dead Worker
+    output = capsys.readouterr().out
+    assert "worker=dead" in output and "stale=true" in output
+    assert "worker=live" in output and output.count("stale=true") == 1

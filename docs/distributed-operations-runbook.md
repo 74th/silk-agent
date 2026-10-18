@@ -149,3 +149,31 @@ Firestore の操作数は Cloud Monitoring の `firestore.googleapis.com/api/req
 - 一時停止中の Sandbox へ入力すると、再開に約70秒かかる（再開後の次の入力は約13秒）。Sandbox は `lifecycle.idle_timeout_seconds`（300秒）で一時停止し、一時停止の7日後に削除される（Sandbox の `spec.shutdownTime`、`shutdownPolicy: Delete`）。これは Sandbox Service が起動する `LifecycleReconciler`（`sandbox.run_reconciler: true`）の仕事で、無効だと Sandbox と PVC が回収されず増え続ける。
 - Firestore の操作数はアプリ内では数えず、Cloud Monitoring の `firestore.googleapis.com/api/request_count` を見る。
 - 自動縮退（HPA など）は、drain との整合を確認していないため有効にしていない。
+
+## 10. 実環境の受け入れ記録（OpenSpec 14.7、2026-10-15〜18）
+
+「確認済み」と「未実施」を分けて記録する。時刻は UTC（JST は +9 時間）。Slack の操作は人間（74th）が実施し、結果を報告した。API 経由は、実 Firestore へ入力と制御を直接投入した検証（Slack を使わない）。
+
+**環境**: GKE `gke_nnyn-dev_us-central1-a_silk-agent-gke`、namespace `session-sandbox-system`（Sandbox は `session-sandboxes`）、Firestore `nnyn-dev` / `silk-agent`、Slack ワークスペース `T8W42FC4U` のチャンネル `C0C8ETHFKS8`（#test-agent）。Gateway 1 / Control 1 / Worker 2 / Sandbox Service 1。commit `f988f3c`、イメージ `sha256:ae932f60023d6098b5c5b9d04ebe9abaa729d4d0b0319c354b47d62f511a51fb`（2026-10-18 時点）。
+
+| 確認項目 | 方法 | 結果 | 記録 |
+| --- | --- | --- | --- |
+| 質問への応答、進捗表示 | Slack | 確認済み | 操作者の報告（2026-10-15〜17） |
+| 追記（実行中の turn への追加指示） | Slack | 確認済み | 操作者の報告（2026-10-18）。command_id は記録していない |
+| STOP（実行中の turn、background コマンド） | Slack、API | 確認済み | Slack は操作者の報告。API は約5秒で中断、後続の入力も処理 |
+| background コマンドの完了返信 | Slack | 確認済み | 2026-10-17 07:17 の command_id `843a35286c7f4e9594097c4344296ac7`、`6066d77ff9f44f1d97312b007688365f`（いずれも finished / background） |
+| 複数スレッドの同時実行（2 Worker） | Slack、API | 確認済み | Slack は操作者の報告。API は8会話を2 Worker に分散（負荷測定 §9） |
+| リセット | Slack、API | 確認済み | 世代が2に進み、通知が出て、文脈が消えることを確認（2026-10-17） |
+| 再デプロイをまたぐ追加指示 | Slack、API | 確認済み | Worker 入替え後の追加指示に文脈つきで返答（API は約12秒） |
+| Pod の強制削除からの回復 | Slack、API | 確認済み | 強制削除の約1分後に回復待ちの通知が1回、約2分後に別 Worker へ引継ぎ（2026-10-17 16:53〜16:56 JST）。旧 turn の入力は uncertain で再実行されない |
+| drain | Slack + CLI | 確認済み | 下記 |
+| 許可外ユーザの STOP | — | **未実施** | 許可外のユーザがいないため。単体テストでの確認のみ |
+
+**drain（2026-10-18 00:49〜00:58 UTC、会話 `…1792284522.078759`）**: 8 回の `sleep 8` の実行中（00:49:20 開始）に、`silk-agent worker drain-all` を 00:49:42 に実行（担当 Worker は `draining=true`、全体の割当停止も有効）。turn は中断されず最後まで完了し（command_id `264149e69a384fbfa1245c55e10d1ca9` から `d2ed4545d12d4f13ba026425a64ff6b3` までの8件がすべて finished / foreground）、「完了」の返信が出て、00:50:47 に担当が解放された（`reserved=0`）。drain 中の 00:56 に送った追加メッセージは pending のまま待機し（会話は waiting、担当なし）、`undrain-all` の 00:57:22 以降に処理されて 00:58:00 に完了した（command_id `fe19bcabea1e40788ea09c4c1ef5c781`）。
+
+**この受け入れで未確認、または近似になっている点**
+- 許可外ユーザの STOP は未実施。
+- Worker の異常終了は、実プロセスへの SIGKILL ではなく `kubectl delete pod --grace-period=0 --force` で再現した。
+- Gateway と Control は1台で運用しており、2台構成での受信の重複排除と割当の競合は、Firestore Emulator の試験までの確認。
+- `drain-all --wait` は、死んだ Pod の古い登録が残っていると完了しなかった（2026-10-18 に修正: heartbeat が lease の期間内にある Worker だけを待つ。古い登録は `status-all` に `stale=true` と表示される。実クラスタで確認済み）。
+

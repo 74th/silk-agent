@@ -314,7 +314,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             timed_out = False
             if args.wait:
                 deadline = time.monotonic() + drain_timeout if drain_timeout is not None else None
-                while any(record.reserved or record.active_sdk for record in records):
+                # A Pod that died keeps its last counts forever; only live Workers can drain.
+                # Its conversations are recovered by Control, not by waiting here.
+                while any(
+                    record.reserved or record.active_sdk
+                    for record in records
+                    if _is_live(record, SystemClock().now(), config.distributed.lease_seconds)
+                ):
                     if deadline is not None and time.monotonic() >= deadline:
                         print("drain timed out; Worker(s) remain draining")
                         timed_out = True
@@ -333,6 +339,11 @@ def main(argv: Sequence[str] | None = None) -> None:
                     f"worker={record.worker_id} incarnation={record.incarnation} "
                     f"draining={str(record.draining).lower()} reserved={record.reserved} "
                     f"active_sdk={record.active_sdk} capacity={record.capacity}"
+                    + (
+                        ""
+                        if _is_live(record, now, config.distributed.lease_seconds)
+                        else " stale=true"
+                    )
                 )
             if all_workers:
                 print(f"cluster_draining={str(await directory.is_cluster_draining()).lower()}")
@@ -393,3 +404,8 @@ async def _administer_recovery(config, args) -> int:
         return 0 if released else 1
     finally:
         client.close()
+
+
+def _is_live(record, now, window_seconds: int) -> bool:
+    """A Worker is live while its heartbeat is within the lease window."""
+    return (now - record.heartbeat_at).total_seconds() <= window_seconds
