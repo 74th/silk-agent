@@ -577,6 +577,7 @@ class FirestoreInboxStore:
         while True:
             page = await self.list_unfinished(conversation_key, after_seq=cursor, limit=100)
             if not page:
+                await self._finish_rebind(conversation_ref, previous_generation, reset_seq)
                 return rebound
             cursor = page[-1].seq
             for envelope in page:
@@ -653,6 +654,42 @@ class FirestoreInboxStore:
                         rebound += 1
                 except Exception as exc:
                     raise convert_firestore_error("rebind_after_reset", exc) from None
+
+    async def pending_rebind(self, conversation_key: str) -> tuple[int, int] | None:
+        """(previous generation, reset_seq) of a reset whose rebind did not finish, if any."""
+        snapshot = await (
+            self._collection("conversations")
+            .document(self._conversation_id(conversation_key))
+            .get()
+        )
+        marker = (snapshot.to_dict() or {}).get("rebind_pending") if snapshot.exists else None
+        if not isinstance(marker, dict):
+            return None
+        previous, seq = marker.get("previous_generation"), marker.get("reset_seq")
+        if isinstance(previous, int) and isinstance(seq, int):
+            return previous, seq
+        return None
+
+    async def _finish_rebind(
+        self,
+        conversation_ref: firestore.AsyncDocumentReference,
+        previous_generation: int,
+        reset_seq: int,
+    ) -> None:
+        """Every input of the old generation has been moved: drop the marker (only ours)."""
+        transaction = self.client.transaction()
+
+        @async_transactional
+        async def finish(transaction: firestore.AsyncTransaction) -> None:
+            snapshot = await conversation_ref.get(transaction=transaction)
+            marker = (snapshot.to_dict() or {}).get("rebind_pending") if snapshot.exists else None
+            if marker == {"previous_generation": previous_generation, "reset_seq": reset_seq}:
+                transaction.update(conversation_ref, {"rebind_pending": firestore.DELETE_FIELD})
+
+        try:
+            await finish(transaction)
+        except Exception as exc:
+            raise convert_firestore_error("finish_rebind", exc) from None
 
     async def recover_dispatching(
         self,

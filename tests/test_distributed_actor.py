@@ -72,6 +72,79 @@ async def test_distributed_actor_dispatches_durable_input_and_completes_it(clock
 
 
 @pytest.mark.asyncio
+async def test_actor_start_finishes_a_reset_rebind_the_previous_owner_left_half_done(
+    clock, channel
+):
+    # A reset advanced the conversation to generation 2 and stopped before it moved the input
+    # that arrived after it; the new owner (generation 2) finishes the job when it starts.
+    owner = OwnershipToken(
+        "T:C:thread", "worker-1", "inc-2", 2, 2, clock.now() + timedelta(minutes=1)
+    )
+    inbox = FakeInboxStore()
+    inbox.owners[owner.conversation_key] = owner
+    envelope = await inbox.accept_input(
+        conversation_key=owner.conversation_key,
+        input_id="after-reset",
+        conversation_generation=1,  # still the old generation
+        kind="message",
+        payload={"text": "keep me", "user": "U1", "team": "T", "channel": "C", "sender": SENDER},
+        created_at=clock.now(),
+    )
+    inbox.rebind_markers = {owner.conversation_key: (1, 0)}
+    orchestrator = ConversationOrchestrator(
+        lambda _key: FakeAgentEngine(clock, [Text("reply")]),
+        channel,
+        clock,
+        guard=AllowAllGuard(),
+        sanitizer=NoopSanitizer(),
+        stop_words=StopWords(()),
+        settings=SessionSettings(),
+    )
+    actor = DistributedConversationActor(
+        owner,
+        inbox,
+        orchestrator,
+        read_controls=_no_controls,
+        handle_control=_ignore_control,
+    )
+    await actor.start()
+    key = (owner.conversation_key, envelope.input_id)
+    assert inbox.inputs[key].conversation_generation == 2
+    assert await inbox.pending_rebind(owner.conversation_key) is None
+    await channel.wait_for(TurnFinished)  # and it is processed
+    await actor.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_stale_rebind_marker_of_an_earlier_reset_is_left_alone(clock, channel):
+    owner = OwnershipToken(
+        "T:C:thread", "worker-1", "inc-2", 5, 3, clock.now() + timedelta(minutes=1)
+    )
+    inbox = FakeInboxStore()
+    inbox.owners[owner.conversation_key] = owner
+    inbox.rebind_markers = {owner.conversation_key: (1, 0)}  # generation 3 != 1 + 1
+    orchestrator = ConversationOrchestrator(
+        lambda _key: FakeAgentEngine(clock, [Text("reply")]),
+        channel,
+        clock,
+        guard=AllowAllGuard(),
+        sanitizer=NoopSanitizer(),
+        stop_words=StopWords(()),
+        settings=SessionSettings(),
+    )
+    actor = DistributedConversationActor(
+        owner,
+        inbox,
+        orchestrator,
+        read_controls=_no_controls,
+        handle_control=_ignore_control,
+    )
+    await actor.start()  # must not raise (the fake rejects a mismatched generation)
+    assert await inbox.pending_rebind(owner.conversation_key) == (1, 0)
+    await actor.aclose()
+
+
+@pytest.mark.asyncio
 async def test_distributed_actor_resumes_queued_input_without_rechecking_guard(clock, channel):
     owner = OwnershipToken(
         "T:C:thread",
