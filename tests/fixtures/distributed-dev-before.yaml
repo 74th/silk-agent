@@ -253,7 +253,7 @@ spec:
             secretKeyRef:
               key: SLACK_BOT_TOKEN
               name: silk-agent-slack
-        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:c93b31bb51e10ef6fc4c1fac208a8e3c78b4f43996dd9f1846bb11404773ced9
+        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:fb0c4cc2947f192d86fe7d27671e9384494e2093d9f1991ea5e232c6047b2766
         livenessProbe:
           failureThreshold: 3
           httpGet:
@@ -347,7 +347,7 @@ spec:
         envFrom:
         - secretRef:
             name: silk-agent-slack
-        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:c93b31bb51e10ef6fc4c1fac208a8e3c78b4f43996dd9f1846bb11404773ced9
+        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:fb0c4cc2947f192d86fe7d27671e9384494e2093d9f1991ea5e232c6047b2766
         livenessProbe:
           failureThreshold: 3
           httpGet:
@@ -437,7 +437,7 @@ spec:
             secretKeyRef:
               key: environment-fingerprint-key
               name: silk-agent-sandbox
-        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:c93b31bb51e10ef6fc4c1fac208a8e3c78b4f43996dd9f1846bb11404773ced9
+        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:fb0c4cc2947f192d86fe7d27671e9384494e2093d9f1991ea5e232c6047b2766
         livenessProbe:
           httpGet:
             path: /healthz
@@ -525,7 +525,7 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.uid
-        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:c93b31bb51e10ef6fc4c1fac208a8e3c78b4f43996dd9f1846bb11404773ced9
+        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:fb0c4cc2947f192d86fe7d27671e9384494e2093d9f1991ea5e232c6047b2766
         livenessProbe:
           failureThreshold: 3
           httpGet:

@@ -48,8 +48,14 @@ class ServiceCommandRuntime:
             record = await _call_and_close(handle.observe_commands, "get", command_id)
         except (SandboxLostError, StaleGenerationError):
             return CommandResult(command_id, "lost")
-        except Exception:
+        except Exception as exc:
             # Not ready (suspended) or unreachable: nothing is known, and nothing is started.
+            log.warning(
+                "command status of %s unavailable (%s: %s)",
+                command_id,
+                type(exc).__name__,
+                exc,
+            )
             return CommandResult(command_id, "unknown")
         state = record.get("state") if hasattr(record, "get") else None
         if state == "running":

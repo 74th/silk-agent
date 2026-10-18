@@ -216,9 +216,16 @@ async def test_real_commands_files_dedup_cancel_and_owner_fencing_without_slack(
             CommandMonitor(OnlyThisCommand(), monitor_runtime, clock, monitor_id=f"{run_id}-{i}")
             for i in range(2)
         ]
-        claims = await asyncio.gather(*(monitor.poll_once() for monitor in monitors))
-        assert sum(claims) == 1
-        finished = await ledger.get_command(command_id)
+        # The Sandbox Service runs its own monitor, which may well hold the lease: the command
+        # is completed by whichever monitor gets it, never by two. Poll until it is finished.
+        claims = [0]
+        for _ in range(40):
+            claims.extend(await asyncio.gather(*(monitor.poll_once() for monitor in monitors)))
+            finished = await ledger.get_command(command_id)
+            if finished is not None and finished["state"] == "finished":
+                break
+            await asyncio.sleep(2)
+        assert sum(claims) <= 1
         assert finished is not None and finished["state"] == "finished"
         unfinished = await inbox.list_unfinished(key)
         assert sum(item.payload.get("command_id") == command_id for item in unfinished) == 1
