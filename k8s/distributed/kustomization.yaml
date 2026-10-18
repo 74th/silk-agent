@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - sandbox-service.yaml
+  - roles.yaml
+configMapGenerator:
+  - name: silk-agent-sandbox-service-config
+    namespace: session-sandbox-system
+    files:
+      - silk-agent-distributed.yaml=sandbox-service/config/silk-agent-distributed.yaml
+      - sandbox-config.yaml=sandbox-service/config/sandbox-service-config.yaml
+      - mcp.json=sandbox-service/config/mcp.json
+images:
+  - name: silk-agent
+    newName: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent
+    digest: sha256:bfb6d7e125cad25c95efabd5b66544aa58f3debcef243d35c9efe2815281a6e2

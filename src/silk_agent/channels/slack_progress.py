@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -45,6 +45,9 @@ _INTERRUPT_HEADER: dict[InterruptReason, str] = {
     "user": "⏹ 中断しました",
     "new_message": "↪ 新しい指示で再開",
     "shutdown": "⚠️ Botの再起動により中断",
+    "drain": "⚠️ Workerの縮退により中断",
+    "lease_lost": "⚠️ Workerの所有権失効により中断",
+    "reset": "🔄 会話をリセットしました",
     "crash": "⚠️ Botの停止により中断",
 }
 
@@ -92,6 +95,78 @@ class ProgressView:
     @property
     def finished(self) -> bool:
         return self.status in ("completed", "failed", "interrupted")
+
+    def to_dict(self) -> dict[str, object]:
+        data = asdict(self)
+        data["started_at"] = self.started_at.isoformat()
+        data["finished_at"] = self.finished_at.isoformat() if self.finished_at else None
+        return data
+
+    @classmethod
+    def from_dict(cls, data: dict[str, object]) -> ProgressView:
+        started_at = data.get("started_at")
+        if not isinstance(started_at, str):
+            raise ValueError("progress snapshot has no start timestamp")
+        finished_at = data.get("finished_at")
+        raw_tools = data.get("tools", [])
+        tools = (
+            [
+                ToolLine(**tool)
+                for tool in raw_tools
+                if isinstance(tool, dict)
+                and all(
+                    isinstance(tool.get(field), str)
+                    for field in ("tool_id", "name", "summary", "status")
+                )
+            ]
+            if isinstance(raw_tools, list)
+            else []
+        )
+        max_tools = data.get("max_tools_shown", 20)
+        max_tools = max_tools if isinstance(max_tools, int) else 20
+        display = data.get("tool_display", "summary")
+        if display not in {"name", "summary", "verbose"}:
+            display = "summary"
+        status = data.get("status", "running")
+        if status not in {"running", "interrupting", "completed", "failed", "interrupted"}:
+            status = "running"
+        reason = data.get("interrupt_reason")
+        if reason not in {
+            None,
+            "user",
+            "new_message",
+            "shutdown",
+            "drain",
+            "lease_lost",
+            "reset",
+            "crash",
+        }:
+            reason = None
+        raw_warnings = data.get("warnings", [])
+        warnings = (
+            tuple(item for item in raw_warnings if isinstance(item, str))
+            if isinstance(raw_warnings, list)
+            else ()
+        )
+        cost = data.get("cost_usd")
+        appended = data.get("appended", 0)
+        return cls(
+            started_at=datetime.fromisoformat(started_at),
+            timezone=str(data.get("timezone", "Asia/Tokyo")),
+            max_tools_shown=max_tools,
+            tool_display=display,
+            status=status,
+            interrupt_reason=reason,
+            finished_at=datetime.fromisoformat(finished_at)
+            if isinstance(finished_at, str)
+            else None,
+            tools=tools,
+            cost_usd=cost if isinstance(cost, int | float) else None,
+            warnings=warnings,
+            error=str(data.get("error", "")),
+            appended=appended if isinstance(appended, int) else 0,
+            preparing_sandbox=bool(data.get("preparing_sandbox", False)),
+        )
 
     # ------------------------------------------------------------ state
 
@@ -165,7 +240,12 @@ class ProgressView:
             lines.append(APPENDED_LINE.format(n=self.appended))
         if self.status == "running":
             lines.append(STOP_HINT)
-        elif self.status == "interrupted" and self.interrupt_reason in ("shutdown", "crash"):
+        elif self.status == "interrupted" and self.interrupt_reason in (
+            "shutdown",
+            "drain",
+            "lease_lost",
+            "crash",
+        ):
             lines.append(RESUME_HINT)
         return "\n".join(lines)
 

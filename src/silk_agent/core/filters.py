@@ -31,8 +31,10 @@ class FilterChain:
     def __init__(self, filters: Sequence[MessageFilter]) -> None:
         self._filters = list(filters)
 
-    def check(self, message: UserMessage) -> FilterDecision:
+    def check(self, message: UserMessage, *, skip_rate_limit: bool = False) -> FilterDecision:
         for f in self._filters:
+            if skip_rate_limit and isinstance(f, RateLimitFilter):
+                continue
             decision = f.check(message)
             if not decision.allowed:
                 return replace(decision, reason=type(f).__name__)

@@ -1,0 +1,57 @@
+# Distributed-role variant of silk-agent.yaml. Only Gateway reads the Slack secrets.
+execution_mode: distributed
+distributed:
+  firestore_project: nnyn-dev
+  firestore_database: silk-agent
+  firestore_prefix: silk-agent
+  sandbox_service_url: http://silk-agent-sandbox-service.session-sandbox-system.svc:8080
+  command_output_bucket: nnyn-dev-silk-agent-command-output
+  sandbox_service_audience: silk-agent-sandbox-service
+  sandbox_service_allowed_ksas:
+    - system:serviceaccount:session-sandbox-system:silk-agent-worker
+  lease_seconds: 60
+  lease_renewal_seconds: 20
+  lease_clock_skew_seconds: 5
+  max_active_sdks_per_worker: 4
+  idle_close_seconds: 600
+slack:
+  app_token_secret: projects/nnyn-dev/secrets/silk-agent-slack-app-token
+  bot_token_secret: projects/nnyn-dev/secrets/silk-agent-slack-bot-token
+  stop_words: ["停止", "中止", "中断", "STOP"]
+  interrupt_mode: append
+filter:
+  allowed_teams: [T8W42FC4U]
+  allowed_channels: []
+  allowed_users: []
+  allow_direct_messages: true
+  deny_guests: false
+  deny_external_users: false
+input_guard:
+  provider: gemini
+  model: gemini-3.8-flash
+  project: nnyn-dev
+  location: global
+  policy_file: /app/usecase/policies/input-guard.md
+  on_error: block
+output_sanitizer:
+  provider: model_armor
+  template: projects/nnyn-dev/locations/us-central1/templates/silk-agent-test
+  on_sdp_match: mask
+session_store:
+  provider: agent_platform
+  project: nnyn-dev
+  location: us-central1
+  agent_runtime: projects/nnyn-dev/locations/us-central1/reasoningEngines/868017700884971520
+agent:
+  provider: agent_platform
+  project: nnyn-dev
+  region: global
+  model: claude-haiku-5-5
+  system_prompt_file: /app/usecase/prompts/agent-system.md
+mcp:
+  config_file: /config/mcp.json
+skills:
+  source: /app/usecase/skills
+sandbox:
+  runtime: gke_session_sandbox
+  config_file: /config/sandbox-config.yaml

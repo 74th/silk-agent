@@ -81,6 +81,8 @@ class ClaudeEngineSettings:
     # skills generation (used to copy the skills into the sandbox).
     on_skills_generation: Callable[[str, SkillGeneration], Awaitable[None]] | None = None
     on_session_id: Callable[[str, str], None] | None = None
+    # Persist the session/input/dispatch-attempt association before sending query().
+    on_query_start: Callable[[str, str, str, str], Awaitable[None]] | None = None
     # Receives ToolStart / ToolEnd hook events (raw tool input and result).
     on_hook_event: Callable[[HookEvent], None] | None = None
     extra_env: dict[str, str] = field(default_factory=dict)
@@ -169,7 +171,12 @@ class ClaudeAgentEngine:
 
     async def _ensure_client(self, resume_session_id: str | None = None) -> Any:
         if self._client is None:
-            client = self._client_factory(self.build_options(resume_session_id))
+            options = self.build_options(resume_session_id)
+            if options.session_id is not None:
+                self._session_id = options.session_id
+            elif resume_session_id:
+                self._session_id = resume_session_id
+            client = self._client_factory(options)
             await client.connect()
             self._client = client
         return self._client
@@ -309,6 +316,13 @@ class ClaudeAgentEngine:
         try:
             await self._sync_skills()
             client = await self._ensure_client(request.resume_session_id)
+            if self._session_id is not None and self._s.on_query_start is not None:
+                await self._s.on_query_start(
+                    self._key,
+                    self._session_id,
+                    request.input_id,
+                    request.dispatch_attempt_id,
+                )
             await client.query(self.compose_prompt(request))
             pump = asyncio.create_task(self._pump(client, queue))
             while True:

@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 
+from silk_agent.core.background import CommandCancelReport
 from silk_agent.core.events import (
     AssistantText,
     GuardBlocked,
@@ -54,6 +55,12 @@ log = logging.getLogger(__name__)
 HISTORY_FOR_GUARD = 5
 NOTHING_RUNNING = "実行中の処理はありません。"
 BACKGROUND_STOPPED = "バックグラウンドで実行中のコマンド{n}件を停止しました。"
+# Progress already shows each command's state, so an accepted stop needs no caveat; the
+# unknown case is abnormal and says so.
+BACKGROUND_STOP_ACCEPTED = "バックグラウンドコマンド{n}件の停止を依頼しました。"
+BACKGROUND_STOP_UNKNOWN = (
+    "バックグラウンドコマンド{n}件の停止を確認できませんでした。まだ動いている可能性があります。"
+)
 INPUT_CHECK_FAILED = (
     "入力を確認できなかったため、処理しませんでした。しばらくしてからもう一度お試しください。"
 )
@@ -78,11 +85,20 @@ class ConversationOrchestrator:
         state_store: SessionStateStore | None = None,
         bot_instance_id: str = "",
         cancel_commands: Callable[[str], Awaitable[None]] | None = None,
-        cancel_background: Callable[[str], Awaitable[int]] | None = None,
+        orphan_commands: Callable[[str], Awaitable[None]] | None = None,
+        cancel_background: Callable[[str], Awaitable[int | CommandCancelReport]] | None = None,
         notice_source: Callable[[str], Awaitable[list[str]]] | None = None,
         notice_ack: Callable[[str], Awaitable[None]] | None = None,
         sandbox_ready: Callable[[str], Awaitable[bool]] | None = None,
         hooks: HookDispatcher | None = None,
+        guard_history_loader: Callable[[str], Awaitable[Sequence[str]]] | None = None,
+        guard_history_recorder: Callable[[UserMessage], Awaitable[bool]] | None = None,
+        distributed_rate_limit: Callable[[UserMessage], Awaitable[bool]] | None = None,
+        initial_owner_recorder: Callable[[UserMessage], Awaitable[None]] | None = None,
+        outbox_sink: Callable[[OutboundEvent], Awaitable[None]] | None = None,
+        input_completed: Callable[[str], Awaitable[None]] | None = None,
+        input_started: Callable[[str], Awaitable[bool]] | None = None,
+        input_uncertain: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._clock = clock
         self._hooks = hooks
@@ -94,9 +110,13 @@ class ConversationOrchestrator:
             state_store=state_store,
             bot_instance_id=bot_instance_id,
             cancel_commands=cancel_commands,
+            orphan_commands=orphan_commands,
             notice_source=notice_source,
             notice_ack=notice_ack,
             sandbox_ready=sandbox_ready,
+            input_completed=input_completed,
+            input_started=input_started,
+            input_uncertain=input_uncertain,
         )
         self._cancel_background = cancel_background
         self._channel = channel
@@ -108,6 +128,11 @@ class ConversationOrchestrator:
         self._state_store = state_store
         self._owner_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._history: dict[str, deque[str]] = defaultdict(lambda: deque(maxlen=HISTORY_FOR_GUARD))
+        self._guard_history_loader = guard_history_loader
+        self._guard_history_recorder = guard_history_recorder
+        self._distributed_rate_limit = distributed_rate_limit
+        self._initial_owner_recorder = initial_owner_recorder
+        self._outbox_sink = outbox_sink
 
     @property
     def registry(self) -> AgentSessionRegistry:
@@ -134,21 +159,47 @@ class ConversationOrchestrator:
             await self._handle_message(UserMessage(event.conversation_key, event.user, RESUME_TEXT))
 
     async def _handle_message(self, message: UserMessage) -> None:
+        if not await self.prepare_message(message):
+            return
+        session = await self._registry.get_or_create(message.conversation_key)
+        await session.submit(message)
+
+    async def prepare_message(self, message: UserMessage) -> bool:
+        """Apply normal input checks and durable management updates without submitting.
+
+        Distributed actors call this before fencing the Inbox transition and submitting
+        through DurableInputDelivery. The in-process path continues through
+        ``_handle_message`` and submits to the same AgentSession registry.
+        """
         key = message.conversation_key
         if self._filters is not None:
-            decision = self._filters.check(message)
+            decision = self._filters.check(
+                message, skip_rate_limit=self._distributed_rate_limit is not None
+            )
             if not decision.allowed:
                 self._input(message, "filtered", filter=decision.reason)
                 if decision.reply:
                     await self._channel.send(Notice(key, decision.reply))
-                return
+                return False
+
+        if self._distributed_rate_limit is not None:
+            if not await self._distributed_rate_limit(message):
+                self._input(message, "filtered", filter="RateLimitFilter")
+                await self._channel.send(
+                    Notice(key, "送信が多すぎます。少し待ってから送ってください。")
+                )
+                return False
 
         if self._stop_words.matches(message.text):
             self._input(message, "stop_word")
             await self._handle_stop(StopRequest(key, message.user))
-            return
+            return False
 
-        history = list(self._history[key])
+        history = (
+            list(await self._guard_history_loader(key))
+            if self._guard_history_loader is not None
+            else list(self._history[key])
+        )[-HISTORY_FOR_GUARD:]
         try:
             verdict = await self._guard.check(message.text, history)
         except Exception:
@@ -158,25 +209,32 @@ class ConversationOrchestrator:
             else:
                 self._input(message, "guard_failed", reason="input guard failed")
                 await self._channel.send(GuardBlocked(key, "input", INPUT_CHECK_FAILED))
-                return
+                return False
         if verdict is not None and verdict.decision != "allow":
             reason = verdict.reason or "入力がポリシーに違反している可能性があります。"
             self._input(
                 message, "review" if verdict.decision == "review" else "blocked", reason=reason
             )
             await self._channel.send(GuardBlocked(key, "input", reason))
-            return
+            return False
 
+        if self._guard_history_recorder is not None:
+            if not await self._guard_history_recorder(message):
+                log.warning("could not save accepted input history for current owner")
+                return False
+        else:
+            self._history[key].append(message.text)
         self._input(message, "accepted")
-        self._history[key].append(message.text)
         await self._record_owner(message)
-        session = await self._registry.get_or_create(key)
-        await session.submit(message)
+        return True
 
     async def _record_owner(self, message: UserMessage) -> None:
         """The user of the first accepted message owns the conversation (it is saved before
         the Sandbox is created, which takes AGENT_USER_EMAIL from it). A conversation that
         already has a record but no owner predates this and stays without one."""
+        if self._initial_owner_recorder is not None:
+            await self._initial_owner_recorder(message)
+            return
         if self._state_store is None:
             return
         key = message.conversation_key
@@ -193,16 +251,42 @@ class ConversationOrchestrator:
 
     async def _handle_stop(self, request: StopRequest) -> None:
         key = request.conversation_key
+
         # Background commands first: they are stopped on request and send no completion.
-        background = 0
-        if self._cancel_background is not None:
+        async def cancel_background() -> int | CommandCancelReport:
+            if self._cancel_background is None:
+                return 0
             try:
-                background = await self._cancel_background(key)
+                return await self._cancel_background(key)
             except Exception:
                 log.exception("failed to stop background commands for %s", key)
+                return 0
+
         session = self._registry.get(key)
-        stopped = await session.stop() if session is not None else False
-        if background:
+        background_task = asyncio.create_task(cancel_background())
+        stop_task = asyncio.create_task(session.stop()) if session is not None else None
+        background = await background_task
+        stopped = await stop_task if stop_task is not None else False
+        await self.report_stop(key, background, stopped)
+
+    async def report_stop(
+        self, key: str, background: int | CommandCancelReport, stopped: bool
+    ) -> None:
+        """Tell the user what a stop request cancelled (shared with the distributed path)."""
+        if isinstance(background, CommandCancelReport) and background.requested:
+            if background.confirmed:
+                await self._channel.send(
+                    Notice(key, BACKGROUND_STOPPED.format(n=background.confirmed))
+                )
+            elif background.unknown or background.rejected:
+                await self._channel.send(
+                    Notice(key, BACKGROUND_STOP_UNKNOWN.format(n=background.requested))
+                )
+            else:
+                await self._channel.send(
+                    Notice(key, BACKGROUND_STOP_ACCEPTED.format(n=background.requested))
+                )
+        elif isinstance(background, int) and background:
             await self._channel.send(Notice(key, BACKGROUND_STOPPED.format(n=background)))
         elif not stopped:
             await self._channel.send(Notice(key, NOTHING_RUNNING))
@@ -231,19 +315,25 @@ class ConversationOrchestrator:
                 )
             )
             if result.status in ("pass", "masked"):
-                await self._channel.send(replace(event, text=result.text))
+                await self._deliver(replace(event, text=result.text))
             else:
-                await self._channel.send(
+                await self._deliver(
                     GuardBlocked(event.conversation_key, "output", _output_reason(result))
                 )
         elif isinstance(event, ToolStarted | ToolFinished):
             result = await self._sanitize(event.summary) if event.summary else None
             if result is None:
-                await self._channel.send(event)
+                await self._deliver(event)
             elif result.status in ("pass", "masked"):
-                await self._channel.send(replace(event, summary=result.text))
+                await self._deliver(replace(event, summary=result.text))
             else:
-                await self._channel.send(replace(event, summary="（表示できません）"))
+                await self._deliver(replace(event, summary="（表示できません）"))
+        else:
+            await self._deliver(event)
+
+    async def _deliver(self, event: OutboundEvent) -> None:
+        if self._outbox_sink is not None:
+            await self._outbox_sink(event)
         else:
             await self._channel.send(event)
 

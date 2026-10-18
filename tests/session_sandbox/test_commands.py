@@ -178,3 +178,29 @@ async def test_reconnects_and_check_error_keeps_command_id():
             assert error.value.command_id == "failed-id"
             assert error.value.exit_code == 7
     assert calls == 2
+
+
+@pytest.mark.parametrize("action", ["cancel", "stdin", "signal", "resize_tty"])
+async def test_control_requests_accept_success_with_plain_text_or_no_body(action):
+    calls = []
+
+    async def control(request):
+        calls.append(request.path)
+        if action == "cancel":
+            # The real tracker raises HTTPAccepted, whose default body is plain text.
+            raise web.HTTPAccepted()
+        raise web.HTTPNoContent()
+
+    app = web.Application()
+    app.router.add_post("/v1/commands/cmd/{operation}", control)
+    async with TestClient(TestServer(app)) as server:
+        async with CommandTrackerClient(lambda: _resolved(str(server.make_url("")))) as client:
+            if action == "stdin":
+                await client.stdin("cmd", b"input")
+            elif action == "signal":
+                await client.signal("cmd", "SIGTERM")
+            elif action == "resize_tty":
+                await client.resize_tty("cmd", 80, 24)
+            else:
+                await client.cancel("cmd")
+    assert len(calls) == 1

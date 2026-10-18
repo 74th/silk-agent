@@ -85,3 +85,39 @@ async def test_sqlite_repository_serializes_competing_writers_and_session_leases
 
     await repo_a.close()
     await repo_b.close()
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_candidate_pages_filter_states_and_advance_cursor(tmp_path) -> None:
+    repo = SQLiteSessionRepository(tmp_path / "sessions.sqlite3")
+    keys = [SessionKey(tenant_id="tenant", session_id=f"session-{index}") for index in range(4)]
+    for key, state in zip(
+        keys,
+        (
+            SessionState.READY,
+            SessionState.CREATING,
+            SessionState.SUSPENDED,
+            SessionState.TERMINATED,
+        ),
+        strict=True,
+    ):
+        token = await repo.acquire_lease(key, "test")
+        await repo.create(token, record_for(key).model_copy(update={"state": state}))
+        await repo.release_lease(token)
+
+    expected = sorted(
+        (
+            (keys[0].stable_hash(), SessionState.READY),
+            (keys[2].stable_hash(), SessionState.SUSPENDED),
+        )
+    )
+    first, cursor = await repo.list_reconciliation_candidates(limit=1)
+    assert len(first) == 1
+    assert (first[0].record.key_hash, first[0].record.state) == expected[0]
+    assert cursor == expected[0][0]
+
+    second, cursor = await repo.list_reconciliation_candidates(limit=1, cursor=cursor)
+    assert len(second) == 1
+    assert (second[0].record.key_hash, second[0].record.state) == expected[1]
+    assert cursor is None
+    await repo.close()

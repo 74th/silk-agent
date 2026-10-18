@@ -1,0 +1,48 @@
+{
+  "context": "gke_nnyn-dev_us-central1-a_silk-agent-gke",
+  "started_at": "2026-10-14T15:33:57.318960+00:00",
+  "conversation_key": "distributed-validation:b48831b0b06c4c57b5a7a4b929e0e03b",
+  "sandbox": {
+    "generation": 1,
+    "state": "ready",
+    "ready": true,
+    "sandbox_generation": 1
+  },
+  "state_after_handoff": "running",
+  "monitor_claims": 1,
+  "completion_inputs": 1,
+  "command_id": "validation-command-b48831b0b06c4c57b5a7a4b929e0e03b",
+  "command_state": {
+    "request_id": "validation-command-b48831b0b06c4c57b5a7a4b929e0e03b",
+    "command_id": "validation-command-b48831b0b06c4c57b5a7a4b929e0e03b",
+    "state": "finished",
+    "sandbox_generation": 1,
+    "exit_code": 0,
+    "stop_reason": null
+  },
+  "handoff_epoch": 2,
+  "old_epoch": 1,
+  "cancel_command_id": "validation-cancel-b48831b0b06c4c57b5a7a4b929e0e03b",
+  "cancel_state": {
+    "request_id": "validation-cancel-b48831b0b06c4c57b5a7a4b929e0e03b",
+    "command_id": "validation-cancel-b48831b0b06c4c57b5a7a4b929e0e03b",
+    "state": "cancelled",
+    "sandbox_generation": 1,
+    "exit_code": -1,
+    "stop_reason": "cancelled"
+  },
+  "elapsed_seconds": 59.051,
+  "checks": [
+    "ready",
+    "file_roundtrip",
+    "same_id_one_start",
+    "background_continues",
+    "ownership_handoff",
+    "old_epoch_rejected",
+    "output",
+    "explicit_cancel",
+    "two_monitors_one_completion"
+  ],
+  "cleanup": "Sandbox terminated; owned workspace PVCs removed",
+  "finished_at": "2026-10-14T15:35:04.555234+00:00"
+}

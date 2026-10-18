@@ -1,2 +1,7 @@
 project_id = "nnyn-dev"
-region     = "us-central1"
+region = "us-central1"
+model_armor_template_id = "silk-agent-test"
+firestore_database_id = "silk-agent"
+firestore_database_mode = "create"
+command_output_bucket_name = "nnyn-dev-silk-agent-command-output"
+command_output_retention_days = 30

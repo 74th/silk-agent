@@ -181,6 +181,38 @@ async def test_active_file_operation_prevents_idle_suspend(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_manager_restart_preserves_another_executors_file_operation(tmp_path):
+    manager, backend, repository, key, _handle, _gate_state, server = await setup_manager(tmp_path)
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    await age_ready_session(
+        repository,
+        key,
+        now - timedelta(seconds=360),
+        active_file_operations=0,
+    )
+    token = await repository.acquire_lease(key, "manager-a")
+    await repository.begin_file_operation(
+        token,
+        operation_id="operation-a",
+        generation=1,
+        executor_id="manager-a",
+        expires_at=now + timedelta(seconds=60),
+    )
+    await repository.release_lease(token)
+
+    # Manager B's process recovery must not clear Manager A's durable operation.
+    await LifecycleReconciler(manager, clock=lambda: now).recover_process_state()
+    assert await LifecycleReconciler(manager, clock=lambda: now).reconcile_once() == ()
+
+    current = await repository.get(key)
+    assert current.record.active_file_operations == 1
+    assert backend.suspended == []
+
+    await manager.close()
+    await server.close()
+
+
+@pytest.mark.asyncio
 async def test_running_durable_command_prevents_idle_suspend_when_tracker_lacks_record(tmp_path):
     manager, backend, repository, key, _handle, _gate_state, server = await setup_manager(tmp_path)
     now = datetime(2030, 1, 1, tzinfo=UTC)
@@ -303,16 +335,16 @@ async def test_reconciler_recovers_terminating_state_idempotently(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_recover_process_state_clears_stale_file_counter_once(tmp_path):
+async def test_recover_process_state_preserves_unconfirmed_file_activity(tmp_path):
     manager, _backend, repository, key, _handle, _gate_state, server = await setup_manager(tmp_path)
     now = datetime(2030, 1, 1, tzinfo=UTC)
     await age_ready_session(repository, key, now - timedelta(seconds=30), active_file_operations=2)
 
     await LifecycleReconciler(manager, clock=lambda: now).recover_process_state()
     recovered = await repository.get(key)
-    assert recovered.record.active_file_operations == 0
-    assert recovered.record.last_file_operation_at == now
-    assert recovered.record.idle_since == now
+    assert recovered.record.active_file_operations == 2
+    assert recovered.record.last_file_operation_at is None
+    assert recovered.record.idle_since is None
 
     await manager.close()
     await server.close()

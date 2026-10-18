@@ -51,6 +51,17 @@ def load_tokens(config: Config, env: Mapping[str, str] | None = None) -> tuple[s
     return bot, app
 
 
+def load_bot_token(config: Config, env: Mapping[str, str] | None = None) -> str:
+    """Bot token only, for roles that post to Slack but never open Socket Mode."""
+    env = os.environ if env is None else env
+    bot = env.get("SLACK_BOT_TOKEN") or (
+        read_secret(config.slack.bot_token_secret) if config.slack.bot_token_secret else ""
+    )
+    if not bot:
+        raise RuntimeError("Slack bot token is not configured (SLACK_BOT_TOKEN)")
+    return bot
+
+
 def check_config(config: Config) -> None:
     if config.sandbox.runtime == "local_process":
         raise RuntimeError(

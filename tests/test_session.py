@@ -1,9 +1,12 @@
 import asyncio
 
+import pytest
+
 from silk_agent.core.events import (
     AssistantText,
     Heartbeat,
     MessageAppended,
+    Notice,
     StatusChanged,
     ToolFinished,
     TurnFinished,
@@ -109,6 +112,33 @@ async def test_turn_event_order(clock, channel):
     assert state is not None and state.status == "idle" and state.bot_instance_id == "bot-1"
 
 
+async def test_input_start_and_completion_callbacks_follow_queued_turns(clock, channel):
+    started = []
+    completed = []
+
+    async def mark_started(input_id):
+        started.append(input_id)
+        return True
+
+    async def mark_completed(input_id):
+        completed.append(input_id)
+
+    registry = AgentSessionRegistry(
+        lambda _key: FakeAgentEngine(clock, lambda request: [Text(request.text)]),
+        channel.send,
+        clock,
+        SessionSettings(interrupt_mode="queue"),
+        input_started=mark_started,
+        input_completed=mark_completed,
+    )
+    session = await registry.get_or_create("k")
+    assert await session.submit(UserMessage("k", "u", "first", input_id="input-1")) == "queued"
+    assert await session.submit(UserMessage("k", "u", "second", input_id="input-2")) == "queued"
+    await channel.wait_for(TurnFinished, count=2)
+    assert started == ["input-1", "input-2"]
+    assert completed == ["input-1", "input-2"]
+
+
 # ---------------------------------------------------------------- 2.4
 
 
@@ -128,6 +158,69 @@ async def test_stop_while_running_tool(clock, channel):
     await s.submit(UserMessage("k", "u", "again"))
     await channel.wait_for(TurnFinished)
     assert channel.of(AssistantText)[-1].text == "again"
+
+
+async def test_shutdown_drain_and_lease_loss_do_not_cancel_remote_commands(clock, channel):
+    for reason in ("shutdown", "drain", "lease_lost"):
+        env = Env(clock, channel, [Tool("bash", "sleep", duration=300), Text("never")])
+        starts = len(channel.of(TurnStarted))
+        session = await env.send(f"k-{reason}", "work")
+        await channel.wait_for(TurnStarted, count=starts + 1)
+        if reason == "lease_lost":
+            await session.aclose(reason="lease_lost")
+        else:
+            await session.shutdown(0, reason=reason)
+        assert env.cancelled == []
+
+
+async def test_shutdown_state_save_failure_is_reported_to_the_worker(clock, channel):
+    env = Env(clock, channel, [Tool("bash", "sleep", duration=300), Text("never")])
+
+    async def fail_put(_state):
+        raise OSError("state store unavailable")
+
+    env.store.put = fail_put
+    session = await env.send("save-failure", "work")
+    await channel.wait_for(TurnStarted)
+
+    with pytest.raises(RuntimeError, match="ownership must remain held"):
+        await session.shutdown(0, reason="drain")
+
+    assert env.cancelled == []
+    assert session.engine is None
+
+
+async def test_shutdown_without_deadline_waits_for_the_current_turn(clock, channel):
+    env = Env(clock, channel, [Tool("bash", "sleep", duration=300), Text("done")])
+    session = await env.send("unbounded-shutdown", "work")
+    await channel.wait_for(TurnStarted)
+
+    closing = asyncio.create_task(session.shutdown())
+    await asyncio.sleep(0)
+    assert not closing.done()
+    assert env.cancelled == []
+
+    await clock.advance(300)
+    await channel.wait_for(TurnFinished)
+    await closing
+    assert session.state == "idle"
+
+
+async def test_shutdown_deadline_interrupts_turn_and_persists_shutdown_state(clock, channel):
+    env = Env(clock, channel, [Tool("bash", "sleep", duration=300), Text("never")])
+    session = await env.send("bounded-shutdown", "work")
+    await channel.wait_for(TurnStarted)
+
+    closing = asyncio.create_task(session.shutdown(5, reason="drain"))
+    await asyncio.sleep(0)
+    assert not closing.done()
+    await clock.advance(5)
+    await closing
+
+    state = await env.store.get("bounded-shutdown")
+    assert state is not None and state.status == "interrupted_shutdown"
+    assert env.engines["bounded-shutdown"].interrupt_count == 1
+    assert env.cancelled == []
 
 
 async def test_stop_when_idle(clock, channel):
@@ -151,6 +244,46 @@ async def test_new_message_is_appended_to_the_running_turn_by_default(clock, cha
     assert not channel.of(TurnInterrupted)
     assert [r.text for r in env.engines["k"].requests] == ["T1"]
     assert env.factory_calls == 1 and env.cancelled == []
+
+
+async def test_completion_notification_appends_to_running_turn_and_tracks_input(clock, channel):
+    env = Env(clock, channel, lambda req: [Tool("bash", duration=30), Text(req.text)])
+    completed = []
+
+    async def mark_completed(input_id):
+        completed.append(input_id)
+
+    registry = AgentSessionRegistry(
+        env.registry._engine_factory,
+        channel.send,
+        clock,
+        input_completed=mark_completed,
+    )
+    session = await registry.get_or_create("k")
+    await session.submit(UserMessage("k", "u", "work"))
+    await channel.wait_for(TurnStarted)
+    assert await session.notify("command finished", input_id="finished-1") == "appended"
+    assert env.engines["k"].appended == ["command finished"]
+    await clock.advance(30)
+    await channel.wait_for(TurnFinished)
+    assert completed == ["finished-1"]
+
+
+async def test_completion_notification_starts_idle_turn(clock, channel):
+    env = Env(clock, channel, lambda request: [Text(request.text)])
+    session = await env.registry.get_or_create("k")
+    assert await session.notify("command finished", input_id="finished-idle") == "queued"
+    await channel.wait_for(TurnFinished)
+    assert env.engines["k"].requests[0].text == "command finished"
+
+
+async def test_completion_notification_is_held_after_interruption(clock, channel):
+    env = Env(clock, channel, [Tool("bash", "sleep", duration=300), Text("never")])
+    session = await env.send("k", "work")
+    await channel.wait_for(TurnStarted)
+    assert await session.stop()
+    assert await session.notify("command finished", input_id="finished-held") == "held"
+    assert channel.of(Notice)[-1].text == "バックグラウンド処理が完了しました。結果は保留中です。"
 
 
 async def test_append_falls_back_to_a_queued_turn_when_the_turn_cannot_take_it(clock, channel):
@@ -304,3 +437,39 @@ async def test_turn_shows_sandbox_start_up_when_not_running(clock, channel):
 
 async def test_running_sandbox_shows_nothing_extra(clock, channel):
     assert await _turn_with_sandbox(clock, channel, ready=True) == []
+
+
+async def test_stop_while_sandbox_is_preparing_skips_engine_query(clock, channel):
+    ensure_entered = asyncio.Event()
+    ensure_release = asyncio.Event()
+    engine = FakeAgentEngine(clock, [Tool("bash", duration=60)])
+
+    async def ensure(_key):
+        ensure_entered.set()
+        await ensure_release.wait()
+        return []
+
+    async def not_ready(_key):
+        return False
+
+    registry = AgentSessionRegistry(
+        lambda _key: engine,
+        channel.send,
+        clock,
+        SessionSettings(),
+        notice_source=ensure,
+        sandbox_ready=not_ready,
+    )
+    session = await registry.get_or_create("k")
+    try:
+        await session.submit(UserMessage("k", "u", "hello"))
+        await channel.wait_for(TurnStarted)
+        await asyncio.wait_for(ensure_entered.wait(), timeout=2)
+        assert await session.request_stop(reason="user")
+        ensure_release.set()
+        await channel.wait_for(TurnInterrupted)
+        assert engine.requests == []
+        assert channel.of(TurnFinished) == []
+    finally:
+        ensure_release.set()
+        await registry.aclose()

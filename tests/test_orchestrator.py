@@ -54,6 +54,24 @@ def msg(text, key="k", **kw):
     return UserMessage(key, "U1", text, **kw)
 
 
+async def test_distributed_output_sink_receives_only_sanitized_events(clock, channel):
+    stored = []
+
+    async def save(event):
+        stored.append(event)
+
+    orch, _ = make(
+        clock,
+        channel,
+        [Text("unused")],
+        sanitizer=FakeSanitizer(["secret"]),
+        outbox_sink=save,
+    )
+    await orch.emit(AssistantText("k", "turn-1", "the secret value"))
+    assert stored == [AssistantText("k", "turn-1", "the [MASKED] value")]
+    assert not channel.events
+
+
 async def test_message_to_turn_finished(clock, channel):
     orch, _ = make(clock, channel, [Tool("bash", "ls"), Text("done")])
     await orch.handle(msg("run"))
@@ -65,6 +83,27 @@ async def test_message_to_turn_finished(clock, channel):
         "AssistantText",
         "TurnFinished",
     ]
+
+
+async def test_prepare_message_checks_input_without_submitting_to_engine(clock, channel):
+    orch, engines = make(clock, channel, [Text("done")])
+
+    assert await orch.prepare_message(msg("run"))
+    assert not engines
+    assert not channel.events
+
+    session = await orch.registry.get_or_create("k")
+    assert await session.submit(msg("run")) == "queued"
+    await channel.wait_for(TurnFinished)
+    assert len(engines) == 1
+
+
+async def test_prepare_message_stops_before_engine_when_guard_blocks(clock, channel):
+    orch, engines = make(clock, channel, [Text("unused")], guard=RuleGuard(["deny"]))
+
+    assert not await orch.prepare_message(msg("please deny this"))
+    assert not engines
+    assert len(channel.of(GuardBlocked)) == 1
 
 
 async def test_input_guard_blocks(clock, channel):
@@ -117,6 +156,71 @@ async def test_guard_receives_last_five_messages(clock, channel):
     for i in range(8):
         await orch.handle(msg(f"m{i}"))
     assert seen[-1] == ["m2", "m3", "m4", "m5", "m6"]
+
+
+async def test_distributed_input_policy_restores_history_and_uses_shared_rate_limit(clock, channel):
+    seen = []
+    history = ["from previous worker"]
+    rate_calls = []
+    owner_calls = []
+
+    class Spy:
+        async def check(self, text, prior):
+            from silk_agent.core.ports import GuardVerdict
+
+            seen.append(list(prior))
+            return GuardVerdict("allow")
+
+    async def rate_limit(message):
+        rate_calls.append(message.user)
+        return len(rate_calls) == 1
+
+    async def record_history(message):
+        history.append(message.text)
+        return True
+
+    async def record_owner(message):
+        owner_calls.append(message.user)
+
+    orch, engines = make(
+        clock,
+        channel,
+        [Text("done")],
+        guard=Spy(),
+        filters=default_chain(clock, per_minute=1),
+        guard_history_loader=lambda _key: _resolved(history),
+        guard_history_recorder=record_history,
+        distributed_rate_limit=rate_limit,
+        initial_owner_recorder=record_owner,
+    )
+    await orch.handle(msg("first"))
+    assert seen == [["from previous worker"]]
+    assert history == ["from previous worker", "first"]
+    await orch.handle(msg("second"))
+    await channel.wait_for(TurnFinished)
+    assert len(rate_calls) == 2
+    assert owner_calls == ["U1"]
+    assert "k" in engines
+    assert channel.of(Notice)[0].text == "送信が多すぎます。少し待ってから送ってください。"
+
+
+async def test_stop_reports_unknown_remote_command_cancel_without_claiming_it_stopped(
+    clock, channel
+):
+    from silk_agent.core.background import CommandCancelReport
+
+    async def cancel_background(_key):
+        return CommandCancelReport(requested=1, unknown=1)
+
+    orch, _ = make(clock, channel, [], cancel_background=cancel_background)
+    await orch.handle(StopRequest("k"))
+    message = channel.of(Notice)[0].text
+    assert "停止を確認できませんでした" in message
+    assert "停止しました" not in message
+
+
+async def _resolved(value):
+    return value
 
 
 async def test_stop_word_skips_guard_and_stops(clock, channel):

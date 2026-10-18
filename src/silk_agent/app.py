@@ -129,6 +129,11 @@ async def build_services(
     runtime: SandboxRuntime | None = None,
     start_background: bool = True,
 ) -> Services:
+    if config.execution_mode != "in_process":
+        raise ConfigError(
+            "the in-process app factory cannot start with execution_mode: distributed; "
+            "use a distributed role factory"
+        )
     clock = clock or SystemClock()
     # Load the hooks first: a hook that cannot be loaded stops the start-up.
     delivery = config.hook_delivery
@@ -146,6 +151,10 @@ async def build_services(
 
     tracker = CommandTracker(state_store)
     background = BackgroundCommands(runtime, tracker)
+
+    async def orphan_commands(key: str) -> None:
+        await background.orphan_all(key)
+
     engine_factory = build_engine_factory(
         config,
         runtime,
@@ -185,6 +194,7 @@ async def build_services(
         state_store=state_store,
         bot_instance_id=bot_instance_id,
         cancel_commands=runtime.cancel_commands,
+        orphan_commands=orphan_commands,
         cancel_background=background.cancel_all,
         notice_source=runtime.pop_notices,
         notice_ack=runtime.ack_notices,

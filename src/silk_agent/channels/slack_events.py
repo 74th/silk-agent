@@ -23,6 +23,21 @@ def slack_unescape(text: str) -> str:
     return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
+def normalize_message_text(text: str) -> str:
+    """Remove Slack mention tokens and unescape message text for the agent."""
+    return slack_unescape(_MENTION.sub("", text)).strip()
+
+
+def slack_message_id(channel: str, timestamp: str) -> str:
+    return f"{channel}:{timestamp}"
+
+
+def attachment_names(files: object) -> list[str]:
+    if not isinstance(files, list):
+        return []
+    return [str(file.get("name") or "") for file in files if isinstance(file, dict)]
+
+
 def make_key(team: str, channel: str, thread_ts: str | None) -> str:
     return f"slack:{team}:{channel}:{thread_ts or DM_THREAD}"
 
@@ -151,18 +166,22 @@ class SlackEventRouter:
         return user_enterprise != self._enterprise
 
     async def _emit(self, key: str, team: str, event: dict[str, Any]) -> None:
-        text = slack_unescape(_MENTION.sub("", event.get("text", ""))).strip()
+        text = normalize_message_text(event.get("text", ""))
+        stable_message_id = slack_message_id(
+            str(event.get("channel", "")), str(event.get("ts", ""))
+        )
         message = UserMessage(
             conversation_key=key,
             user=event.get("user", ""),
             text=text,
-            message_id=f"{event.get('channel', '')}:{event.get('ts', '')}",
-            attachments=tuple(f.get("name", "") for f in event.get("files", []) or []),
+            message_id=stable_message_id,
+            attachments=tuple(attachment_names(event.get("files", []))),
             team=team,
             channel=event.get("channel", ""),
             sender_is_bot=bool(event.get("bot_id")),
             is_direct=event.get("channel_type") == "im",
             sender=await self._sender(event),
             kind=event.get("subtype") or "message",
+            input_id=stable_message_id,
         )
         await self._handle(message)

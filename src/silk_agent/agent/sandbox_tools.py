@@ -115,7 +115,7 @@ def build_sandbox_tools(
             result = await bg.wait(entry, foreground_seconds)
             if result is not None:
                 return format_command(result)
-        result = bg.detach(entry)
+        result = await bg.detach_durable(entry)
         if result is not None:
             return format_command(result)
         return _text(
@@ -218,16 +218,15 @@ def build_sandbox_tools(
     )
     async def command_status(args: dict[str, Any]) -> dict[str, Any]:
         entry = bg.find(key, args["command_id"])
-        if entry is not None and entry.result is None:
-            return _text(f"outcome: running（バックグラウンド）\ncommand: {entry.command}")
-        result = await runtime.command_status(key, args["command_id"])
+        result = await bg.status(key, args["command_id"])
         if result.outcome == "unknown":
             return _text(
                 f"状態を確認できません（command_id={args['command_id']}）。"
                 "コマンドは再実行しないでください。",
                 error=True,
             )
-        return _text(f"outcome: {result.outcome}\nexit code: {result.exit_code}")
+        command_line = f"\ncommand: {entry.command}" if entry is not None else ""
+        return _text(f"outcome: {result.outcome}\nexit code: {result.exit_code}{command_line}")
 
     @tool(
         "command_output",
@@ -235,9 +234,7 @@ def build_sandbox_tools(
         _obj({"command_id": _STR, "cursor": _INT}, ["command_id"]),
     )
     async def command_output(args: dict[str, Any]) -> dict[str, Any]:
-        out, cursor = await runtime.command_output(
-            key, args["command_id"], int(args.get("cursor") or 0)
-        )
+        out, cursor = await bg.output(key, args["command_id"], int(args.get("cursor") or 0))
         return _text(_clip(out) + f"\nnext_cursor: {cursor}")
 
     @tool(
@@ -246,8 +243,27 @@ def build_sandbox_tools(
         _obj({"command_id": _STR}, ["command_id"]),
     )
     async def cancel_command(args: dict[str, Any]) -> dict[str, Any]:
-        if await bg.cancel(key, args["command_id"]):
+        outcome = await bg.cancel(key, args["command_id"])
+        if outcome is True or outcome == "confirmed":
             return _text(f"止めました（command_id={args['command_id']}）。")
+        if outcome == "accepted":
+            return _text(
+                f"停止要求を受け付けましたが、停止はまだ確認できていません"
+                f"（command_id={args['command_id']}）。command_status で確認してください。",
+                error=True,
+            )
+        if outcome == "unknown":
+            return _text(
+                f"停止要求の結果を確認できません（command_id={args['command_id']}）。"
+                "同じコマンドを再実行せず、command_status で状態を確認してください。",
+                error=True,
+            )
+        if outcome == "too_late":
+            return _text(
+                f"コマンドは既に終了しているため取り消せません"
+                f"（command_id={args['command_id']}）。command_status で結果を確認してください。",
+                error=True,
+            )
         return _text(
             f"実行中のバックグラウンドコマンドが見つかりません（command_id={args['command_id']}）。",
             error=True,

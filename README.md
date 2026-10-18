@@ -307,6 +307,8 @@ SILK_AGENT_TEST_RUNTIME=projects/<project>/locations/us-central1/reasoningEngine
 
 ## 7. 既知の制限と今後の候補
 
+分散配置は、実Slackと接続する手前まで実装・検証済みです。`silk-agent gateway|worker run|control|sandbox-service` の4役割と `k8s/distributed`（Worker/Gateway/Control は `replicas: 0` で配置）があります。実 Slack・2台の本番 Worker・実負荷での受け入れは未実施のため、実環境の切替手順としてはまだ使用しないでください。[運用手順](docs/distributed-operations-runbook.md)に構築・増設・drain・回復を記載しています。移行 export/import は停止した旧系を対象とし、新系の入力受付後に古い SQLite snapshot へ戻す自動逆移行は提供しません。[移行・ロールバック手順](docs/distributed-migration-runbook.md)を参照してください。
+
 - **再起動とバックグラウンド実行**: Botを再起動すると、それまで実行中だったバックグラウンドのコマンドの終了通知は届かない（コマンドはSandboxで動き続ける）。
 - **外部への通信**: Sandboxからは外部へ通信できないため、`pip install`や`git clone`は使えない。必要なら許可するFQDNを設定する。
 - **モデル**: 現在は`claude-haiku-5-5`で動かしている。

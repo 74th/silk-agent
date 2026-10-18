@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 
 class ConfigError(ValueError):
@@ -28,6 +28,8 @@ class SlackConfig(_Model):
     app_token_secret: str = ""
     bot_token_secret: str = ""
     stop_words: list[str] = Field(default_factory=lambda: ["停止", "中止", "中断", "STOP"])
+    # A message that is exactly one of these resets the conversation (distributed Gateway only).
+    reset_words: list[str] = Field(default_factory=lambda: ["リセット", "RESET"])
     interrupt_mode: Literal["append", "interrupt", "queue"] = "append"
     progress: ProgressConfig = Field(default_factory=ProgressConfig)
 
@@ -101,6 +103,38 @@ class SandboxConfig(_Model):
     run_reconciler: bool = True
 
 
+class DistributedExecutionConfig(_Model):
+    firestore_project: str = ""
+    firestore_database: str = "(default)"
+    firestore_prefix: str = "silk-agent"
+    sandbox_service_url: str = ""
+    command_output_bucket: str = ""
+    command_output_retention_days: int = Field(default=30, gt=0)
+    lease_seconds: int = Field(default=60, gt=0)
+    lease_renewal_seconds: int = Field(default=20, gt=0)
+    lease_clock_skew_seconds: int = Field(default=5, ge=0)
+    max_active_sdks_per_worker: int = Field(default=4, gt=0)
+    idle_close_seconds: int = Field(default=600, gt=0)
+    drain_timeout_seconds: int | None = Field(default=None, gt=0)
+    sandbox_service_audience: str = "silk-agent-sandbox-service"
+    sandbox_service_allowed_ksas: list[str] = Field(default_factory=list)
+    sandbox_service_port: int = Field(default=8080, ge=1, le=65535)
+    # Liveness/readiness/metrics endpoint of the Gateway, Worker and Control roles.
+    health_port: int = Field(default=9090, ge=1, le=65535)
+    # Recover an expired ownership without Worker evidence when Kubernetes says its Pod UID no
+    # longer exists, after `auto_recover_after_seconds` past lease expiry (default: twice the
+    # lease, long enough for a partitioned live Worker to stop itself). Off by default: a
+    # force-deleted Pod on a partitioned node can still be running.
+    auto_recover_missing_pods: bool = False
+    auto_recover_after_seconds: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def lease_renewal_precedes_expiration(self) -> DistributedExecutionConfig:
+        if self.lease_renewal_seconds >= self.lease_seconds:
+            raise ValueError("lease_renewal_seconds must be less than lease_seconds")
+        return self
+
+
 class HookEntry(_Model):
     factory: str  # "package.module:function"
     options: dict[str, Any] = Field(default_factory=dict)
@@ -113,6 +147,8 @@ class HookDeliveryConfig(_Model):
 
 
 class Config(_Model):
+    execution_mode: Literal["in_process", "distributed"] = "in_process"
+    distributed: DistributedExecutionConfig = Field(default_factory=DistributedExecutionConfig)
     slack: SlackConfig = Field(default_factory=SlackConfig)
     filter: FilterConfig = Field(default_factory=FilterConfig)
     input_guard: InputGuardConfig = Field(default_factory=InputGuardConfig)
@@ -160,6 +196,31 @@ class Config(_Model):
         missing = self.missing_required()
         if missing:
             raise ConfigError("missing required settings: " + ", ".join(missing))
+        if self.execution_mode == "distributed":
+            if not self.distributed.firestore_project:
+                raise ConfigError("missing required settings: distributed.firestore_project")
+            if not self.distributed.sandbox_service_url:
+                raise ConfigError("missing required settings: distributed.sandbox_service_url")
+            if not self.distributed.command_output_bucket.strip():
+                raise ConfigError("missing required settings: distributed.command_output_bucket")
+            if self.sandbox.runtime != "gke_session_sandbox":
+                raise ConfigError("distributed mode requires sandbox.runtime=gke_session_sandbox")
+
+    def validate_distributed_sandbox_config(self) -> None:
+        """Do not let a distributed deployment silently share SQLite manager state."""
+        if self.execution_mode != "distributed" or not self.sandbox.config_file:
+            return
+        path = self.resolve(self.sandbox.config_file)
+        try:
+            with path.open(encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+        except OSError as exc:
+            raise ConfigError(f"cannot read sandbox config for distributed mode: {path}") from exc
+        if isinstance(data, dict) and data.get("repository_database_path"):
+            raise ConfigError(
+                "distributed mode cannot use SQLite sandbox state; remove "
+                "repository_database_path from the sandbox config"
+            )
 
 
 def load_config(path: str | Path) -> Config:
@@ -169,4 +230,5 @@ def load_config(path: str | Path) -> Config:
     config = Config.model_validate(data)
     config._base_dir = path.resolve().parent
     config.validate_required()
+    config.validate_distributed_sandbox_config()
     return config
