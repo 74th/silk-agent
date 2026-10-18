@@ -111,6 +111,14 @@ class SlackBot:
         assert self.services is not None
         await self.services.orchestrator.handle(event)
 
+    def _reserve(self, conversation_key: str) -> int:
+        assert self.services is not None
+        return self.services.orchestrator.reserve(conversation_key)
+
+    def _release(self, conversation_key: str, arrival: int) -> None:
+        if self.services is not None:
+            self.services.orchestrator.release(conversation_key, arrival)
+
     async def start(self, runtime: Any | None = None) -> None:
         check_config(self._config)
         self.channel = SlackChannel(
@@ -122,6 +130,8 @@ class SlackBot:
             users=self._users,
             workspace_team=self._workspace_team,
             workspace_enterprise=self._workspace_enterprise,
+            reserve=self._reserve,
+            release=self._release,
         )
         self.services = await build_services(
             self._config,

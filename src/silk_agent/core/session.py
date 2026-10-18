@@ -132,6 +132,8 @@ class AgentSession:
         self._closing = False
         self._turn_input_ids: list[str] = []
         self._last_turn_interrupted = False
+        # Notices that arrived while a stop was in effect; the next turn hands them to the agent.
+        self._held_notices: list[str] = []
 
     # ------------------------------------------------------------ properties
 
@@ -183,6 +185,10 @@ class AgentSession:
     ) -> Literal["appended", "queued", "held"]:
         """Deliver a system notice without interrupting a running turn."""
         if self._closing or self._state == "interrupting" or self._last_turn_interrupted:
+            if not input_id:
+                # A durable input (distributed) is held and released by the inbox; only the
+                # single-Pod notice has nowhere else to wait.
+                self._held_notices.append(text)
             await self._sink(
                 Notice(self.key, "バックグラウンド処理が完了しました。結果は保留中です。")
             )
@@ -355,11 +361,14 @@ class AgentSession:
                     continue
             self._state = "running"
             self._interrupt_reason = None
+            # A flag left by the previous (interrupted) turn must not outlive the turn that
+            # replaced it: notices for this turn are appended, not held.
+            self._last_turn_interrupted = False
             self._turn_input_ids = [message.input_id] if message.input_id else []
             self._turn_done.clear()
             try:
                 outcome = await self._run_turn(message)
-                self._last_turn_interrupted = outcome == "interrupted"
+                self._last_turn_interrupted = outcome == "interrupted" and self._queue.empty()
                 if outcome == "completed" and self._input_completed is not None:
                     for input_id in self._turn_input_ids:
                         try:
@@ -412,7 +421,10 @@ class AgentSession:
         notices: list[str] = []
         if prior is not None and prior.status in ("interrupted_crash", "interrupted_shutdown"):
             notices.append(resume_notice(prior))
+        # Only the resume notice replaces the tracked commands; held completions do not.
         await self._save_state("running", turn_id, clear_commands=bool(notices))
+        held, self._held_notices = self._held_notices, []
+        notices.extend(held)
         # Show the turn at once: preparing the sandbox can take tens of seconds.
         await self._sink(TurnStarted(self.key, turn_id, self._clock.now()))
         heartbeat = asyncio.create_task(self._heartbeat(turn_id))
@@ -477,6 +489,8 @@ class AgentSession:
                 agent_session_id=agent_session_id,
                 history_reset_reason=history_reset_reason,
             )
+        if held and outcome != "completed":
+            self._held_notices[:0] = held  # the agent may not have seen them: keep them
         return outcome
 
     async def _heartbeat(self, turn_id: str) -> None:

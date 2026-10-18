@@ -352,3 +352,48 @@ async def test_dm_is_marked_direct():
         body({"user": "U1", "text": "hi", "channel": "D1", "channel_type": "im", "ts": "1.1"})
     )
     assert env.handled[0].is_direct is True
+
+
+async def test_the_arrival_is_taken_before_the_slow_sender_lookup():
+    import asyncio
+
+    handled, reserved, released = [], [], []
+    gate = asyncio.Event()
+
+    class SlowUsers:
+        async def lookup(self, user):
+            if user == "SLOW":
+                await gate.wait()
+            return None
+
+    async def handle(event):
+        handled.append(event)
+
+    async def is_part(key):
+        return False
+
+    router = SlackEventRouter(
+        handle,
+        bot_user_id=BOT,
+        is_participating=is_part,
+        users=SlowUsers(),
+        reserve=lambda key: reserved.append(key) or len(reserved),
+        release=lambda key, arrival: released.append(arrival),
+    )
+    slow = asyncio.create_task(
+        router.on_message(
+            body(
+                {"user": "SLOW", "text": "A", "channel": "D1", "channel_type": "im", "ts": "1.1"},
+                "EvA",
+            )
+        )
+    )
+    await asyncio.sleep(0)
+    await router.on_message(
+        body({"user": "U2", "text": "B", "channel": "D1", "channel_type": "im", "ts": "2.2"}, "EvB")
+    )
+    gate.set()
+    await slow
+    # B was handled first, but A holds the earlier place in the arrival order.
+    assert [(m.text, m.arrival) for m in handled] == [("B", 2), ("A", 1)]
+    assert sorted(released) == [1, 2]

@@ -33,6 +33,8 @@ class SlackChannel:
         users: UserDirectory | None = None,
         workspace_team: str = "",
         workspace_enterprise: str = "",
+        reserve: Callable[[str], int] | None = None,
+        release: Callable[[str, int], None] | None = None,
     ) -> None:
         from silk_agent.channels.slack_output import SlackOutput
 
@@ -48,6 +50,8 @@ class SlackChannel:
             users=users,
             workspace_team=workspace_team,
             workspace_enterprise=workspace_enterprise,
+            reserve=reserve,
+            release=release,
         )
         self.output = SlackOutput(app.client, clock, progress, state_store=state_store)
 

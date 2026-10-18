@@ -78,10 +78,16 @@ class SlackEventRouter:
         users: UserDirectory | None = None,
         workspace_team: str = "",
         workspace_enterprise: str = "",
+        reserve: Callable[[str], int] | None = None,
+        release: Callable[[str, int], None] | None = None,
     ) -> None:
+        # `reserve` / `release`: take the event's place in the conversation's arrival order
+        # before the sender lookup, so a slow lookup cannot reorder inputs or a stop.
         # `workspace_*`: the workspace (and Enterprise Grid org) the Bot is installed in
         # (`auth.test`); used to tell external users apart.
         self._handle = handle
+        self._reserve = reserve
+        self._release = release
         self._bot_user_id = bot_user_id
         self._is_participating = is_participating
         self._mark = mark_participating
@@ -166,6 +172,18 @@ class SlackEventRouter:
         return user_enterprise != self._enterprise
 
     async def _emit(self, key: str, team: str, event: dict[str, Any]) -> None:
+        arrival = self._reserve(key) if self._reserve is not None else None
+        try:
+            await self._emit_reserved(key, team, event, arrival)
+        finally:
+            # Handling releases it as well; releasing twice is harmless, and this covers a
+            # failure before the message reached the orchestrator.
+            if arrival is not None and self._release is not None:
+                self._release(key, arrival)
+
+    async def _emit_reserved(
+        self, key: str, team: str, event: dict[str, Any], arrival: int | None
+    ) -> None:
         text = normalize_message_text(event.get("text", ""))
         stable_message_id = slack_message_id(
             str(event.get("channel", "")), str(event.get("ts", ""))
@@ -183,5 +201,6 @@ class SlackEventRouter:
             sender=await self._sender(event),
             kind=event.get("subtype") or "message",
             input_id=stable_message_id,
+            arrival=arrival,
         )
         await self._handle(message)
