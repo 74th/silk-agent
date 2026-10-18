@@ -276,3 +276,16 @@ dev の Agent Platform（`reasoningEngines/868017700884971520`）に試験用セ
 | `delete` | `config` に `wait_for_completion` を渡すと検証エラーになる。`delete(name=)` だけで削除できる |
 
 この change では `update_mask="ttl"` を使い、`ttl` は `{ttl_seconds}s` で渡す。
+
+## 12. 複数ユースケースの分離の確認（`support-distributed-usecases` 6.4、2026-10-18）
+
+dev（`session-sandbox-system`）と bigquery-analysis（`bigquery-analysis-system`）を同じクラスタに置いた状態で確認した。
+
+| 確認 | 結果 |
+|---|---|
+| bigquery-analysis の Worker から dev の Sandbox Service（`silk-agent-sandbox-service.session-sandbox-system.svc:8080/healthz`）へ接続 | タイムアウトで拒否（NetworkPolicy。Worker の egress は自分の namespace の Sandbox Service だけ） |
+| 同じ Worker から自分の Sandbox Service（`...bigquery-analysis-system.svc:8080/healthz`） | 200 |
+| `bigquery-analysis-system` に dev の設定（`overlays/dev/config`）で `silk-agent worker run` の Pod を作る | 起動せず終了コード 1。`ConfigError: configuration does not match the deployment: distributed.sandbox_service_url: expected namespace 'bigquery-analysis-system', got 'session-sandbox-system'` |
+| `silk-agent worker status-all`（bigquery-analysis の Worker から） | bigquery-analysis の Worker 2 台だけが出る（接頭辞が違うので dev の Worker は見えない） |
+
+確認用の Pod と ConfigMap は削除した。照合のコードは dev の現行イメージ（`sha256:00675bf4...`）には入っていないので、dev の Pod は照合を行わない。dev のイメージを更新したときに有効になる。
