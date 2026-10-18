@@ -118,6 +118,7 @@ async def run_sandbox_service(config: Config) -> None:
     from silk_agent.core.clock import SystemClock
     from silk_agent.stores.firestore.client import create_firestore_client
     from silk_agent.stores.firestore.ownership import FirestoreOwnershipStore
+    from silk_agent.stores.firestore.retention import RetentionPolicy
     from silk_agent.stores.firestore.service_operations import FirestoreServiceOperationStore
 
     clock = SystemClock()
@@ -161,7 +162,11 @@ async def run_sandbox_service(config: Config) -> None:
     from silk_agent.stores.firestore.command_monitor import FirestoreCommandMonitorStore
 
     monitor = CommandMonitor(
-        FirestoreCommandMonitorStore(firestore_client, collection_prefix=prefix),
+        FirestoreCommandMonitorStore(
+            firestore_client,
+            collection_prefix=prefix,
+            retention=RetentionPolicy.from_config(config.distributed.retention),
+        ),
         ServiceCommandRuntime(manager),
         clock,
         monitor_id=f"{os.environ.get('HOSTNAME', 'sandbox-service')}:{uuid.uuid4().hex}",

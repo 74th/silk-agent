@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -19,17 +19,35 @@ from silk_agent.core.distributed_models import (
 )
 from silk_agent.core.distributed_ports import InboxStore
 from silk_agent.stores.firestore.codec import decode_record, encode_record
+from silk_agent.stores.firestore.command_monitor import (
+    command_expiry_patch,
+    operation_to_stamp,
+    stamp_operation_expiry,
+)
 from silk_agent.stores.firestore.errors import FirestoreStoreError, convert_firestore_error
 from silk_agent.stores.firestore.ids import document_id
 from silk_agent.stores.firestore.ownership import ownership_matches
+from silk_agent.stores.firestore.retention import (
+    RetentionPolicy,
+    control_expiry,
+    receipt_expiry,
+    terminal_expiry,
+)
 
 
 class FirestoreInboxStore:
-    def __init__(self, client: firestore.AsyncClient, *, collection_prefix: str = "silk-agent"):
+    def __init__(
+        self,
+        client: firestore.AsyncClient,
+        *,
+        collection_prefix: str = "silk-agent",
+        retention: RetentionPolicy | None = None,
+    ):
         if not collection_prefix or "/" in collection_prefix:
             raise ValueError("collection_prefix must be non-empty and cannot contain '/'")
         self.client = client
         self.collection_prefix = collection_prefix
+        self.retention = retention or RetentionPolicy()
 
     def _collection(self, name: str) -> firestore.AsyncCollectionReference:
         return self.client.collection(f"{self.collection_prefix}_{name}")
@@ -153,6 +171,15 @@ class FirestoreInboxStore:
 
         @async_transactional
         async def write(transaction: firestore.AsyncTransaction) -> tuple[dict[str, Any], bool]:
+            received_at = datetime.now(UTC)
+            receipt_times = (
+                {
+                    "received_at": received_at,
+                    "expire_at": receipt_expiry(received_at, retention=self.retention.receipt),
+                }
+                if receipt_refs
+                else {}
+            )
             record_snapshot = await record_ref.get(transaction=transaction)
             receipt_snapshots = []
             for receipt_ref, _ in receipt_refs:
@@ -202,6 +229,7 @@ class FirestoreInboxStore:
                                 "conversation_id": conversation_id,
                                 "receipt_kind": receipt_kind,
                                 "schema_version": 1,
+                                **receipt_times,
                             },
                         )
                 if participating:
@@ -238,6 +266,7 @@ class FirestoreInboxStore:
                                 "conversation_id": conversation_id,
                                 "receipt_kind": receipt_kind,
                                 "schema_version": 1,
+                                **receipt_times,
                             },
                         )
                 if participating:
@@ -348,6 +377,7 @@ class FirestoreInboxStore:
                         "conversation_id": conversation_id,
                         "receipt_kind": receipt_kind,
                         "schema_version": 1,
+                        **receipt_times,
                     },
                 )
             return record_data, True
@@ -465,6 +495,7 @@ class FirestoreInboxStore:
 
         @async_transactional
         async def update(transaction: firestore.AsyncTransaction) -> bool:
+            now = datetime.now(UTC)
             owner_snapshot = await owner_ref.get(transaction=transaction)
             input_snapshot = await input_ref.get(transaction=transaction)
             conversation_snapshot = await conversation_ref.get(transaction=transaction)
@@ -478,10 +509,11 @@ class FirestoreInboxStore:
                 owner_snapshot.to_dict() or {},
                 conversation_snapshot.to_dict() or {},
                 owner,
-                now=datetime.now(UTC),
+                now=now,
             ):
                 return False
-            current = decode_record(input_snapshot.to_dict() or {}, InputEnvelope)
+            input_data = input_snapshot.to_dict() or {}
+            current = decode_record(input_data, InputEnvelope)
             if (
                 current.conversation_generation != owner.conversation_generation
                 or current.delivery_state is not expected
@@ -506,7 +538,14 @@ class FirestoreInboxStore:
             changes: dict[str, Any] = {"delivery_state": new_state.value}
             if dispatch_attempt_id is not None:
                 changes["dispatch_attempt_id"] = dispatch_attempt_id
+            if expected is not new_state:
+                changes.update(self._input_retention_patch(input_data, new_state, now))
+                settle = await self._plan_command_notice(transaction, input_data, new_state, now)
+            else:
+                settle = None
             transaction.update(input_ref, changes)
+            if settle is not None:
+                settle()
             return True
 
         try:
@@ -584,10 +623,21 @@ class FirestoreInboxStore:
                                 {"conversation_generation": owner.conversation_generation},
                             )
                             return True
+                        now = datetime.now(UTC)
+                        settle = await self._plan_command_notice(
+                            transaction, data, InputDeliveryState.SUPPRESSED, now
+                        )
                         transaction.update(
                             input_ref,
-                            {"delivery_state": InputDeliveryState.SUPPRESSED.value},
+                            {
+                                "delivery_state": InputDeliveryState.SUPPRESSED.value,
+                                **self._input_retention_patch(
+                                    data, InputDeliveryState.SUPPRESSED, now
+                                ),
+                            },
                         )
+                        if settle is not None:
+                            settle()
                         return False
                     if state in {
                         InputDeliveryState.DISPATCHING.value,
@@ -806,8 +856,12 @@ class FirestoreInboxStore:
                 if record_collection == "inputs":
                     if data.get("delivery_state") == InputDeliveryState.PENDING.value:
                         update_data["delivery_state"] = InputDeliveryState.BLOCKED.value
+                        update_data.update(
+                            self._input_retention_patch(data, InputDeliveryState.BLOCKED, now)
+                        )
                 else:
                     update_data["authorization_state"] = "filtered"
+                    update_data.update(self._control_retention_patch(data, "filtered", now))
             elif sender_info is None:
                 update_data.update(
                     sender_lookup_state="pending",
@@ -834,7 +888,10 @@ class FirestoreInboxStore:
                             "next_sender_lookup_at", firestore.DELETE_FIELD
                         ),
                         **(
-                            {"authorization_state": "filtered"}
+                            {
+                                "authorization_state": "filtered",
+                                **self._control_retention_patch(data, "filtered", now),
+                            }
                             if update_data["sender_lookup_state"] == "failed"
                             else {}
                         ),
@@ -922,9 +979,15 @@ class FirestoreInboxStore:
                 now=now,
             ):
                 return False
-            transaction.update(control_ref, {"authorization_state": "handled", "handled_at": now})
+            retention_patch = self._control_retention_patch(
+                control_snapshot.to_dict() or {}, "handled", now
+            )
+            transaction.update(
+                control_ref,
+                {"authorization_state": "handled", "handled_at": now, **retention_patch},
+            )
             if queue_snapshot.exists:
-                transaction.update(queue_ref, {"authorization_state": "handled"})
+                transaction.update(queue_ref, {"authorization_state": "handled", **retention_patch})
             return True
 
         try:
@@ -968,14 +1031,16 @@ class FirestoreInboxStore:
             if control.get("conversation_generation") != conversation.get(
                 "conversation_generation"
             ):
+                retention_patch = self._control_retention_patch(control, "stale", now)
                 transaction.update(
                     control_ref,
                     {
                         "authorization_state": "stale",
                         "authorized_at": now,
+                        **retention_patch,
                     },
                 )
-                transaction.update(queue_ref, {"authorization_state": "stale"})
+                transaction.update(queue_ref, {"authorization_state": "stale", **retention_patch})
                 return True
             if authorized and control.get("kind") in {"stop_candidate", "reset_candidate"}:
                 seq = control.get("seq")
@@ -996,23 +1061,94 @@ class FirestoreInboxStore:
                 if control.get("kind") == "reset_candidate":
                     control_patch.update(reset_pending=True, reset_seq=seq)
                 transaction.update(conversation_ref, control_patch)
+            resolved = "authorized" if authorized else "filtered"
+            retention_patch = self._control_retention_patch(control, resolved, now)
             transaction.update(
                 control_ref,
-                {
-                    "authorization_state": "authorized" if authorized else "filtered",
-                    "authorized_at": now,
-                },
+                {"authorization_state": resolved, "authorized_at": now, **retention_patch},
             )
-            transaction.update(
-                queue_ref,
-                {"authorization_state": "authorized" if authorized else "filtered"},
-            )
+            transaction.update(queue_ref, {"authorization_state": resolved, **retention_patch})
             return True
 
         try:
             return await resolve(transaction)
         except Exception as exc:
             raise convert_firestore_error("resolve_control_authorization", exc) from None
+
+    def _input_retention_patch(
+        self, previous: Mapping[str, Any], new_state: InputDeliveryState, now: datetime
+    ) -> dict[str, Any]:
+        """`completed_at` and `expire_at` for a terminal input; `expire_at` is removed otherwise."""
+        expiry = terminal_expiry(new_state, now, retention=self.retention.terminal)
+        if expiry is not None:
+            return {"completed_at": now, "expire_at": expiry}
+        if previous.get("expire_at") is not None:
+            return {"expire_at": firestore.DELETE_FIELD}
+        return {}
+
+    def _control_retention_patch(
+        self, previous: Mapping[str, Any], authorization_state: str, now: datetime
+    ) -> dict[str, Any]:
+        expiry = control_expiry(authorization_state, now, retention=self.retention.terminal)
+        if expiry is not None:
+            return {"expire_at": expiry}
+        if previous.get("expire_at") is not None:
+            return {"expire_at": firestore.DELETE_FIELD}
+        return {}
+
+    async def _plan_command_notice(
+        self,
+        transaction: firestore.AsyncTransaction,
+        input_data: Mapping[str, Any],
+        new_state: InputDeliveryState,
+        now: datetime,
+    ) -> Callable[[], None] | None:
+        """A command's completion notice ends when its `command_finished` input does.
+
+        Completed means the agent was told (delivered); any other end means it never will be
+        (suppressed). Only a pending or held notice is settled, and the command (with its
+        Sandbox operation) then gets its `expire_at`. This reads, so call it before the
+        transaction's first write; it returns the function that queues the writes.
+        """
+        if input_data.get("kind") != "command_finished":
+            return None
+        if terminal_expiry(new_state, now) is None:
+            return None
+        payload = input_data.get("payload")
+        command_id = payload.get("command_id") if isinstance(payload, Mapping) else None
+        if not isinstance(command_id, str):
+            return None
+        command_ref = self._collection("commands").document(
+            document_id(command_id, prefix="command")
+        )
+        snapshot = await command_ref.get(transaction=transaction)
+        if not snapshot.exists:
+            return None
+        command = snapshot.to_dict() or {}
+        if command.get("notification_state") not in {"pending", "held"}:
+            return None
+        notice = "delivered" if new_state is InputDeliveryState.COMPLETED else "suppressed"
+        patch: dict[str, Any] = {"notification_state": notice, "notification_updated_at": now}
+        patch.update(
+            command_expiry_patch(
+                command,
+                state=command.get("state"),
+                notification_state=notice,
+                terminal_at=command.get("completed_at"),
+                notified_at=now,
+                now=now,
+                retention=self.retention,
+            )
+        )
+        operation_ref = await operation_to_stamp(
+            self.client, self.collection_prefix, transaction, command_id, patch
+        )
+
+        def apply() -> None:
+            transaction.update(command_ref, patch)
+            stamp_operation_expiry(transaction, operation_ref, patch)
+
+        return apply
 
     def _control_ref(self, conversation_key: str, input_id: str):
         return (

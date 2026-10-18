@@ -13,6 +13,7 @@ from silk_agent.core.distributed_models import WorkerRecord
 from silk_agent.core.distributed_ports import WorkerDirectory
 from silk_agent.stores.firestore.errors import convert_firestore_error
 from silk_agent.stores.firestore.ids import document_id
+from silk_agent.stores.firestore.retention import RetentionPolicy, worker_expiry
 
 
 class FirestoreWorkerDirectory:
@@ -22,6 +23,7 @@ class FirestoreWorkerDirectory:
         *,
         collection_prefix: str = "silk-agent",
         heartbeat_timeout: timedelta = timedelta(seconds=60),
+        retention: RetentionPolicy | None = None,
     ):
         if not collection_prefix or "/" in collection_prefix:
             raise ValueError("collection_prefix must be non-empty and cannot contain '/'")
@@ -30,6 +32,10 @@ class FirestoreWorkerDirectory:
         self.client = client
         self.collection_prefix = collection_prefix
         self.heartbeat_timeout = heartbeat_timeout
+        self.retention = retention or RetentionPolicy()
+
+    def _expire_at(self, heartbeat_at: datetime) -> datetime:
+        return worker_expiry(heartbeat_at.astimezone(UTC), retention=self.retention.worker)
 
     def _worker_ref(self, worker_id: str) -> firestore.AsyncDocumentReference:
         return self.client.collection(f"{self.collection_prefix}_workers").document(
@@ -47,7 +53,10 @@ class FirestoreWorkerDirectory:
                 current = WorkerRecord.from_dict(snapshot.to_dict() or {})
                 if current.incarnation == record.incarnation:
                     return False
-            transaction.set(worker_ref, record.to_dict())
+            transaction.set(
+                worker_ref,
+                {**record.to_dict(), "expire_at": self._expire_at(record.heartbeat_at)},
+            )
             return True
 
         try:
@@ -83,7 +92,8 @@ class FirestoreWorkerDirectory:
                     draining=current.draining,
                     heartbeat_at=record.heartbeat_at,
                     drain_deadline_at=current.drain_deadline_at,
-                ).to_dict(),
+                ).to_dict()
+                | {"expire_at": self._expire_at(record.heartbeat_at)},
             )
             return True
 
@@ -192,7 +202,12 @@ class FirestoreWorkerDirectory:
                 heartbeat_at=current.heartbeat_at,
                 drain_deadline_at=drain_deadline_at if draining else None,
             )
-            transaction.set(worker_ref, updated.to_dict())
+            # An admin action does not move the heartbeat, so it keeps the current expiry.
+            expire_at = (snapshot.to_dict() or {}).get("expire_at")
+            transaction.set(
+                worker_ref,
+                {**updated.to_dict(), **({"expire_at": expire_at} if expire_at else {})},
+            )
             return updated
 
         try:
@@ -271,9 +286,11 @@ def worker_directory(
     *,
     collection_prefix: str = "silk-agent",
     heartbeat_timeout: timedelta = timedelta(seconds=60),
+    retention: RetentionPolicy | None = None,
 ) -> WorkerDirectory:
     return FirestoreWorkerDirectory(
         client,
         collection_prefix=collection_prefix,
         heartbeat_timeout=heartbeat_timeout,
+        retention=retention,
     )

@@ -29,6 +29,7 @@ from silk_agent.agent.sandbox_tools import BACKGROUND_MARKER
 from silk_agent.agent.summaries import display_name, summarize
 from silk_agent.core.events import (
     AssistantText,
+    Notice,
     OutboundEvent,
     ToolFinished,
     ToolStarted,
@@ -61,6 +62,11 @@ HOST_TOOLS = [
 ]
 
 MIRROR_WARNING = "会話履歴の一部が保存されていない可能性があります。"
+# Sent when a conversation is resumed but its history session no longer exists (TTL, deletion).
+HISTORY_LOST_NOTICE = (
+    "以前の会話の履歴は保存期間を過ぎたため引き継げませんでした。作業領域のファイルは残っています。"
+)
+HISTORY_LOST_REASON = "expired"
 
 
 @dataclass
@@ -118,6 +124,8 @@ class ClaudeAgentEngine:
         self._client_generation: str | None = None
         self._sandbox_generation: str | None = None
         self._fresh = False  # set by reset(): never resume the stored session
+        # Why the conversation started over without its history (None: it never did).
+        self._history_reset_reason: str | None = None
         self._interrupted = False
         self._sent, self._echoed, self._closing = 0, 0, False
         self._queue: asyncio.Queue[Any] | None = None
@@ -168,6 +176,51 @@ class ClaudeAgentEngine:
     def session_id(self) -> str | None:
         """The Claude session id of the running conversation (None before the first result)."""
         return self._session_id
+
+    @property
+    def history_reset_reason(self) -> str | None:
+        """Set when the stored history was found missing (the conversation went on without it)."""
+        return self._history_reset_reason
+
+    async def _prepare_history(
+        self, resume_session_id: str | None
+    ) -> tuple[str | None, str | None]:
+        """Keep the stored history alive, or start over when it is gone.
+
+        Before the turn's input reaches the SDK: a session that is still in use is extended
+        (so the TTL never takes the history of an active conversation). Before connecting with
+        `resume`, a missing history session means the conversation starts a new SDK session
+        instead; the returned notice tells the user. Returns (notice, session id to resume).
+        """
+        store = self._s.session_store
+        if self._fresh:
+            # After a reset the old session is never resumed, but the new one is still
+            # in use and must not expire: extend it (there is nothing to check yet).
+            extend = getattr(store, "extend_for_turn", None)
+            if extend is not None:
+                await extend(self._key, self._session_id)
+            return None, resume_session_id
+        session_id = self._session_id or resume_session_id
+        if session_id is None:
+            return None, None
+        exists = getattr(store, "session_exists", None)
+        if self._client is None and exists is not None and not await exists(session_id):
+            log.warning(
+                "history of %s is gone (session %s); starting a new one", self._key, session_id
+            )
+            self._session_id = None
+            self._history_reset_reason = HISTORY_LOST_REASON
+            return HISTORY_LOST_NOTICE, None
+        extend = getattr(store, "extend_for_turn", None)
+        if extend is not None:
+            await extend(self._key, session_id)
+        return None, resume_session_id
+
+    def _note_history_loss(self) -> None:
+        """The history session vanished while this engine was appending to it."""
+        take = getattr(self._s.session_store, "take_history_loss", None)
+        if take is not None and self._session_id and take(self._session_id):
+            self._history_reset_reason = HISTORY_LOST_REASON
 
     async def _ensure_client(self, resume_session_id: str | None = None) -> Any:
         if self._client is None:
@@ -315,7 +368,10 @@ class ClaudeAgentEngine:
         pump: asyncio.Task[None] | None = None
         try:
             await self._sync_skills()
-            client = await self._ensure_client(request.resume_session_id)
+            notice, resume_session_id = await self._prepare_history(request.resume_session_id)
+            if notice is not None:
+                yield Notice(self._key, notice)
+            client = await self._ensure_client(resume_session_id)
             if self._session_id is not None and self._s.on_query_start is not None:
                 await self._s.on_query_start(
                     self._key,
@@ -414,6 +470,7 @@ class ClaudeAgentEngine:
             self._session_id = result.session_id
             if self._s.on_session_id is not None:
                 self._s.on_session_id(self._key, result.session_id)
+        self._note_history_loss()
         if self._interrupted:
             return events  # the caller reports TurnInterrupted
         if result.is_error:
@@ -459,6 +516,7 @@ class ClaudeAgentEngine:
     async def reset(self) -> None:
         await self._drop_client()
         self._session_id = None
+        self._history_reset_reason = None
         self._fresh = True
 
     async def close(self) -> None:

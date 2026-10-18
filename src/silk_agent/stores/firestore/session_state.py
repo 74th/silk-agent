@@ -37,6 +37,7 @@ async def _read_state(
         owner_user=record.get("owner_user"),
         owner_email=record.get("owner_email"),
         progress_snapshot=dict(record.get("progress_snapshot") or {}),
+        history_reset_reason=record.get("history_reset_reason"),
     )
 
 
@@ -60,6 +61,8 @@ class FirestoreSessionStateStore:
             "bot_instance_id": state.bot_instance_id,
             "running_command_ids": list(state.running_command_ids),
         }
+        if state.history_reset_reason:
+            patch["history_reset_reason"] = state.history_reset_reason
         for _ in range(_ATTEMPTS):
             # Re-read each attempt: a lease renewal can replace the token between tries.
             owner = self._owner_for(state.conversation_key)

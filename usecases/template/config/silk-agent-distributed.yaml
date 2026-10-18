@@ -14,6 +14,12 @@ distributed:
   lease_clock_skew_seconds: 5
   max_active_sdks_per_worker: 4
   idle_close_seconds: 600
+  # 処理済みの記録を残す日数（Firestore の TTL が消す。docs/distributed-operations-runbook.md §11）。
+  # 値を変えても Terraform の変更は要らない。省略すると下の既定値。
+  retention:
+    terminal_days: 30  # 入力・制御要求・出力・コマンド・quiesce 要求
+    receipt_days: 7    # Slack の受信記録（再送の重複排除に使う）
+    worker_days: 7     # 最後の heartbeat から
 slack:
   app_token_secret: projects/your-gcp-project/secrets/silk-agent-slack-app-token
   bot_token_secret: projects/your-gcp-project/secrets/silk-agent-slack-bot-token

@@ -225,6 +225,7 @@ class AgentSession:
         if self._state_store is not None:
             state = await self._state_store.get(self.key) or ConversationState(self.key)
             state.agent_session_id = None
+            state.history_reset_reason = None
             await self._state_store.put(state)
 
     async def shutdown(
@@ -458,6 +459,7 @@ class AgentSession:
             await self._stop_task(heartbeat)
 
         agent_session_id = getattr(engine, "session_id", None)
+        history_reset_reason = getattr(engine, "history_reset_reason", None)
         reason = self._interrupt_reason
         if reason is not None and not terminal:
             await self._sink(StatusChanged(self.key, turn_id, "interrupted"))
@@ -466,9 +468,15 @@ class AgentSession:
                 "interrupted_shutdown" if reason in ("shutdown", "drain", "lease_lost") else "idle",
                 turn_id,
                 agent_session_id=agent_session_id,
+                history_reset_reason=history_reset_reason,
             )
         else:
-            await self._save_state("idle", turn_id, agent_session_id=agent_session_id)
+            await self._save_state(
+                "idle",
+                turn_id,
+                agent_session_id=agent_session_id,
+                history_reset_reason=history_reset_reason,
+            )
         return outcome
 
     async def _heartbeat(self, turn_id: str) -> None:
@@ -546,6 +554,7 @@ class AgentSession:
         turn_id: str,
         *,
         agent_session_id: str | None = None,
+        history_reset_reason: str | None = None,
         clear_commands: bool = False,
     ) -> None:
         if self._state_store is None:
@@ -558,6 +567,8 @@ class AgentSession:
             state.updated_at = self._clock.now()
             if agent_session_id:
                 state.agent_session_id = agent_session_id
+            if history_reset_reason:
+                state.history_reset_reason = history_reset_reason
             if clear_commands:
                 state.running_command_ids = []
             await self._state_store.put(state)

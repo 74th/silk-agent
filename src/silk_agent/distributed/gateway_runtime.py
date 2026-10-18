@@ -24,6 +24,7 @@ from silk_agent.slack_app import load_tokens
 from silk_agent.stores.firestore.client import create_firestore_client
 from silk_agent.stores.firestore.conversations import FirestoreConversationStore
 from silk_agent.stores.firestore.inbox import FirestoreInboxStore
+from silk_agent.stores.firestore.retention import RetentionPolicy
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +43,11 @@ async def run_gateway(config: Config) -> None:
     clock = SystemClock()
     database = create_firestore_client(config.distributed)
     prefix = config.distributed.firestore_prefix
-    inbox = FirestoreInboxStore(database, collection_prefix=prefix)
+    inbox = FirestoreInboxStore(
+        database,
+        collection_prefix=prefix,
+        retention=RetentionPolicy.from_config(config.distributed.retention),
+    )
     conversations = FirestoreConversationStore(database, collection_prefix=prefix)
     http_session = aiohttp.ClientSession()
     web_client = AsyncWebClient(token=bot_token, session=http_session)

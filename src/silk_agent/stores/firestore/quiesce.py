@@ -12,14 +12,22 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from silk_agent.core.distributed_models import OwnershipToken
 from silk_agent.stores.firestore.errors import convert_firestore_error
 from silk_agent.stores.firestore.ids import document_id
+from silk_agent.stores.firestore.retention import RetentionPolicy, quiesce_expiry
 
 
 class FirestoreQuiesceMailbox:
-    def __init__(self, client: firestore.AsyncClient, *, collection_prefix: str = "silk-agent"):
+    def __init__(
+        self,
+        client: firestore.AsyncClient,
+        *,
+        collection_prefix: str = "silk-agent",
+        retention: RetentionPolicy | None = None,
+    ):
         if not collection_prefix or "/" in collection_prefix:
             raise ValueError("collection_prefix must be non-empty and cannot contain '/'")
         self.client = client
         self.collection_prefix = collection_prefix
+        self.retention = retention or RetentionPolicy()
 
     def _ref(self, token: OwnershipToken):
         request_id = document_id(token.conversation_key, str(token.epoch), prefix="quiesce")
@@ -76,8 +84,14 @@ class FirestoreQuiesceMailbox:
         self, token: OwnershipToken, *, evidence: Mapping[str, object], now: datetime
     ) -> None:
         try:
-            await self._ref(token).update(
-                {"state": "answered", "evidence": dict(evidence), "answered_at": now.isoformat()}
-            )
+            patch: dict[str, Any] = {
+                "state": "answered",
+                "evidence": dict(evidence),
+                "answered_at": now.isoformat(),
+            }
+            expiry = quiesce_expiry("answered", now, retention=self.retention.terminal)
+            if expiry is not None:
+                patch["expire_at"] = expiry
+            await self._ref(token).update(patch)
         except Exception as exc:
             raise convert_firestore_error("answer_quiesce", exc) from None

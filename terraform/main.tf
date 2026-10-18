@@ -70,7 +70,7 @@ resource "google_firestore_index" "unfinished_inputs" {
 resource "google_firestore_index" "due_commands" {
   project     = var.project_id
   database    = var.firestore_database_id
-  collection  = "silk-agent_commands"
+  collection  = "${var.firestore_prefix}_commands"
   query_scope = "COLLECTION"
 
   fields {
@@ -89,7 +89,7 @@ resource "google_firestore_index" "due_commands" {
 resource "google_firestore_index" "stop_commands" {
   project     = var.project_id
   database    = var.firestore_database_id
-  collection  = "silk-agent_commands"
+  collection  = "${var.firestore_prefix}_commands"
   query_scope = "COLLECTION"
 
   fields {
@@ -116,7 +116,7 @@ resource "google_firestore_index" "stop_commands" {
 resource "google_firestore_index" "pending_outbox" {
   project     = var.project_id
   database    = var.firestore_database_id
-  collection  = "silk-agent_outbox"
+  collection  = "${var.firestore_prefix}_outbox"
   query_scope = "COLLECTION"
 
   fields {
@@ -179,16 +179,55 @@ resource "google_firestore_field" "input_sender_lookup_group" {
   depends_on = [google_firestore_database.silk_agent]
 }
 
-resource "google_firestore_field" "input_expire_at_ttl" {
+# 処理済みの記録の保持期限。`expire_at` は終端状態に変わる書き込みで書かれる（アプリ側の
+# stores/firestore/retention.py）。所有権や lease の期限 `expires_at` には TTL を付けない。
+# TTL の対象フィールドは索引を持たない（index_config {}）。
+locals {
+  # 会話のサブコレクション（コレクショングループ）
+  retention_group_collections = toset(["inputs", "controls"])
+  # 接頭辞つきのトップレベルのコレクション
+  retention_prefixed_collections = toset([
+    "outbox",
+    "commands",
+    "sandbox_operations",
+    "quiesce_requests",
+    "slack_receipts",
+    "control_queue",
+    "workers",
+  ])
+}
+
+resource "google_firestore_field" "expire_at_ttl_group" {
+  for_each = local.retention_group_collections
+
   project    = var.project_id
   database   = var.firestore_database_id
-  collection = "inputs"
+  collection = each.value
   field      = "expire_at"
 
   ttl_config {}
   index_config {}
 
   depends_on = [google_firestore_database.silk_agent]
+}
+
+resource "google_firestore_field" "expire_at_ttl_prefixed" {
+  for_each = local.retention_prefixed_collections
+
+  project    = var.project_id
+  database   = var.firestore_database_id
+  collection = "${var.firestore_prefix}_${each.value}"
+  field      = "expire_at"
+
+  ttl_config {}
+  index_config {}
+
+  depends_on = [google_firestore_database.silk_agent]
+}
+
+moved {
+  from = google_firestore_field.input_expire_at_ttl
+  to   = google_firestore_field.expire_at_ttl_group["inputs"]
 }
 
 # Sessions（会話履歴と管理情報）の親になる Agent Runtime インスタンス。エージェントコードは配備しない。

@@ -19,16 +19,35 @@ from silk_agent.core.distributed_models import (
 from silk_agent.stores.firestore.errors import convert_firestore_error
 from silk_agent.stores.firestore.ids import conversation_document_id, document_id
 from silk_agent.stores.firestore.ownership import ownership_matches
+from silk_agent.stores.firestore.retention import RetentionPolicy, output_expiry
 
 
 class FirestoreOutboxWriter:
     """Persist one output only while the writer still owns an active conversation."""
 
-    def __init__(self, client: firestore.AsyncClient, *, collection_prefix: str = "silk-agent"):
+    def __init__(
+        self,
+        client: firestore.AsyncClient,
+        *,
+        collection_prefix: str = "silk-agent",
+        retention: RetentionPolicy | None = None,
+    ):
         if not collection_prefix or "/" in collection_prefix:
             raise ValueError("collection_prefix must be non-empty and cannot contain '/'")
         self.client = client
         self.collection_prefix = collection_prefix
+        self.retention = retention or RetentionPolicy()
+
+    def _retention_patch(
+        self, previous: Mapping[str, Any], state: OutputDeliveryState, now: datetime
+    ) -> dict[str, Any]:
+        """`expire_at` for a delivered / suppressed output; removed if it goes back."""
+        expiry = output_expiry(state, now, retention=self.retention.terminal)
+        if expiry is not None:
+            return {"expire_at": expiry}
+        if previous.get("expire_at") is not None:
+            return {"expire_at": firestore.DELETE_FIELD}
+        return {}
 
     async def put_sanitized(
         self,
@@ -272,6 +291,7 @@ class FirestoreOutboxStore(FirestoreOutboxWriter):
                 "updated_at": updated_at,
                 "lease_expires_at": firestore.DELETE_FIELD,
                 "sender_id": firestore.DELETE_FIELD,
+                **self._retention_patch(data, new_state, updated_at),
             }
             if slack_ref is not None:
                 patch["slack_ref"] = dict(slack_ref)
@@ -305,7 +325,13 @@ class FirestoreOutboxStore(FirestoreOutboxWriter):
                 return False
             conversation_key = data.get("conversation_key")
             if not isinstance(conversation_key, str) or not conversation_key:
-                transaction.update(ref, {"status": OutputDeliveryState.SUPPRESSED.value})
+                transaction.update(
+                    ref,
+                    {
+                        "status": OutputDeliveryState.SUPPRESSED.value,
+                        **self._retention_patch(data, OutputDeliveryState.SUPPRESSED, now),
+                    },
+                )
                 return False
             conversation_ref = self.client.collection(
                 f"{self.collection_prefix}_conversations"
@@ -337,6 +363,7 @@ class FirestoreOutboxStore(FirestoreOutboxWriter):
                         "updated_at": now,
                         "lease_expires_at": firestore.DELETE_FIELD,
                         "sender_id": firestore.DELETE_FIELD,
+                        **self._retention_patch(data, OutputDeliveryState.SUPPRESSED, now),
                     },
                 )
                 return False

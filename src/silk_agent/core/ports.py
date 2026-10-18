@@ -160,6 +160,8 @@ class ConversationState:
     owner_user: str | None = None
     owner_email: str | None = None
     progress_snapshot: dict[str, Any] = field(default_factory=dict)
+    # Set when the conversation continued without its stored history (e.g. "expired").
+    history_reset_reason: str | None = None
 
 
 # Environment variable that carries the e-mail address of the user who started the

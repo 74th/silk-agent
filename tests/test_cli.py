@@ -316,3 +316,62 @@ def test_sandbox_network_admin_parses_reapply_and_verify():
         ["sandbox-network", "verify", "--conversation", "slack:T:C.1", "--deny", "example.com:443"]
     )
     assert (args.conversation, args.deny) == ("slack:T:C.1", ["example.com:443"])
+
+
+def _retention_cli(monkeypatch, tmp_path, calls, execution_mode="distributed"):
+    from silk_agent.config import RetentionConfig
+    from silk_agent.stores.firestore import client as firestore_client
+    from silk_agent.stores.firestore import retention_backfill
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("unused: true\n")
+    client = SimpleNamespace(close=lambda: calls.append("closed"))
+
+    async def fake_backfill(db, **kwargs):
+        assert db is client
+        calls.append(kwargs)
+        return [retention_backfill.KindReport("inputs", examined=2, eligible=1)]
+
+    monkeypatch.setattr(
+        "silk_agent.cli.load_config",
+        lambda _path: SimpleNamespace(
+            execution_mode=execution_mode,
+            distributed=SimpleNamespace(firestore_prefix="p", retention=RetentionConfig()),
+        ),
+    )
+    monkeypatch.setattr(firestore_client, "create_firestore_client", lambda _config: client)
+    monkeypatch.setattr(retention_backfill, "backfill", fake_backfill)
+    return str(config_path)
+
+
+def test_retention_backfill_only_counts_unless_apply_is_given(monkeypatch, tmp_path, capsys):
+    calls = []
+    config = _retention_cli(monkeypatch, tmp_path, calls)
+    with pytest.raises(SystemExit) as exit_info:
+        main(["retention", "backfill", "--config", config])
+    assert exit_info.value.code == 0
+    assert calls[0]["apply"] is False and calls[0]["limit"] is None
+    assert calls[0]["prefix"] == "p"
+    assert calls[0]["policy"].terminal.days == 30
+    assert calls[1] == "closed"
+    assert "dry run" in capsys.readouterr().out
+
+
+def test_retention_backfill_applies_only_when_asked(monkeypatch, tmp_path, capsys):
+    calls = []
+    config = _retention_cli(monkeypatch, tmp_path, calls)
+    with pytest.raises(SystemExit):
+        main(["retention", "backfill", "--apply", "--limit", "50", "--config", config])
+    assert calls[0]["apply"] is True and calls[0]["limit"] == 50
+    assert "applied" in capsys.readouterr().out
+
+
+def test_retention_backfill_rejects_a_bad_limit_and_a_single_process_config(monkeypatch, tmp_path):
+    calls = []
+    config = _retention_cli(monkeypatch, tmp_path, calls)
+    with pytest.raises(SystemExit, match="--limit must be positive"):
+        main(["retention", "backfill", "--limit", "0", "--config", config])
+    config = _retention_cli(monkeypatch, tmp_path, calls, execution_mode="in_process")
+    with pytest.raises(SystemExit, match="requires execution_mode: distributed"):
+        main(["retention", "backfill", "--config", config])
+    assert calls == []

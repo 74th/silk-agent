@@ -15,21 +15,30 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from silk_agent.core.distributed_models import (
     CommandExecutionState,
     InputEnvelope,
+    NotificationState,
     validate_state_transition,
 )
 from silk_agent.stores.firestore.codec import encode_record
 from silk_agent.stores.firestore.errors import convert_firestore_error
 from silk_agent.stores.firestore.ids import conversation_document_id, document_id
+from silk_agent.stores.firestore.retention import RetentionPolicy, command_expiry
 
 
 class FirestoreCommandMonitorStore:
     """Claim nonterminal command records without making tracker start requests."""
 
-    def __init__(self, client: firestore.AsyncClient, *, collection_prefix: str = "silk-agent"):
+    def __init__(
+        self,
+        client: firestore.AsyncClient,
+        *,
+        collection_prefix: str = "silk-agent",
+        retention: RetentionPolicy | None = None,
+    ):
         if not collection_prefix or "/" in collection_prefix:
             raise ValueError("collection_prefix must be non-empty and cannot contain '/'")
         self.client = client
         self.collection_prefix = collection_prefix
+        self.retention = retention or RetentionPolicy()
 
     def _collection(self) -> firestore.AsyncCollectionReference:
         return self.client.collection(f"{self.collection_prefix}_commands")
@@ -68,10 +77,23 @@ class FirestoreCommandMonitorStore:
             data = snapshot.to_dict() or {}
             if data.get("notification_state") != expected:
                 return False
-            transaction.update(
-                ref,
-                {"notification_state": new_state, "notification_updated_at": now},
+            patch = {"notification_state": new_state, "notification_updated_at": now}
+            patch.update(
+                command_expiry_patch(
+                    data,
+                    state=data.get("state"),
+                    notification_state=new_state,
+                    terminal_at=data.get("completed_at"),
+                    notified_at=now,
+                    now=now,
+                    retention=self.retention,
+                )
             )
+            operation_ref = await operation_to_stamp(
+                self.client, self.collection_prefix, transaction, command_id, patch
+            )
+            transaction.update(ref, patch)
+            stamp_operation_expiry(transaction, operation_ref, patch)
             return True
 
         try:
@@ -327,7 +349,22 @@ class FirestoreCommandMonitorStore:
                 update["cancel_outcome"] = data.get("cancel_outcome", "pending")
             if data.get("notification_state") == "pending":
                 update["notification_state"] = "suppressed"
+                update.update(
+                    command_expiry_patch(
+                        data,
+                        state=data.get("state"),
+                        notification_state="suppressed",
+                        terminal_at=data.get("completed_at"),
+                        notified_at=now,
+                        now=now,
+                        retention=self.retention,
+                    )
+                )
+            operation_ref = await operation_to_stamp(
+                self.client, self.collection_prefix, transaction, command_id, update
+            )
             transaction.update(ref, update)
+            stamp_operation_expiry(transaction, operation_ref, update)
             return {**data, **update, "command_id": command_id}
 
         try:
@@ -425,6 +462,18 @@ class FirestoreCommandMonitorStore:
                 notification_state = "pending"
             elif decision == "suppressed":
                 notification_state = "suppressed"
+            expiry_patch = command_expiry_patch(
+                data,
+                state=terminal.value,
+                notification_state=notification_state,
+                terminal_at=now,
+                notified_at=now if notification_state == "suppressed" else None,
+                now=now,
+                retention=self.retention,
+            )
+            operation_ref = await operation_to_stamp(
+                self.client, self.collection_prefix, transaction, command_id, expiry_patch
+            )
             completion_input = None
             if decision == "notify":
                 conversation_key = data.get("conversation_key")
@@ -492,6 +541,7 @@ class FirestoreCommandMonitorStore:
                         merge=True,
                     )
                     transaction.create(input_ref, encode_record(completion_input))
+            stamp_operation_expiry(transaction, operation_ref, expiry_patch)
             transaction.update(
                 ref,
                 {
@@ -501,6 +551,7 @@ class FirestoreCommandMonitorStore:
                     "completed_at": now,
                     "notification_state": notification_state,
                     "terminal_delivery": decision,
+                    **expiry_patch,
                     **(
                         {"cancel_confirmed_at": now}
                         if terminal is CommandExecutionState.CANCELLED
@@ -530,6 +581,68 @@ class FirestoreCommandMonitorStore:
             return await finish_in_transaction(transaction)
         except Exception as exc:
             raise convert_firestore_error("finish_command", exc) from None
+
+
+def command_expiry_patch(
+    data: Mapping[str, Any],
+    *,
+    state: Any,
+    notification_state: Any,
+    terminal_at: Any,
+    notified_at: datetime | None,
+    now: datetime,
+    retention: RetentionPolicy,
+) -> dict[str, Any]:
+    """`expire_at` for a command after a state change: set, removed, or left alone.
+
+    The expiry counts from the later of the command's end and its notice. A command whose
+    notice is pending or held keeps (or loses) its `expire_at` so it is never deleted early.
+    """
+    try:
+        command_state = CommandExecutionState(state)
+        notice = NotificationState(notification_state)
+    except ValueError:
+        return {}
+    expiry = command_expiry(
+        command_state,
+        notice,
+        terminal_at if isinstance(terminal_at, datetime) else now,
+        notified_at,
+        retention=retention.terminal,
+    )
+    if expiry is not None:
+        return {"expire_at": expiry}
+    if data.get("expire_at") is not None:
+        return {"expire_at": firestore.DELETE_FIELD}
+    return {}
+
+
+async def operation_to_stamp(
+    client: firestore.AsyncClient,
+    collection_prefix: str,
+    transaction: firestore.AsyncTransaction,
+    command_id: str,
+    patch: Mapping[str, Any],
+) -> firestore.AsyncDocumentReference | None:
+    """The Sandbox operation (same ID as the command) that must follow a command's `expire_at`.
+
+    This reads, so call it before the transaction's first write.
+    """
+    if "expire_at" not in patch:
+        return None
+    operation_ref = client.collection(f"{collection_prefix}_sandbox_operations").document(
+        document_id(command_id, prefix="operation")
+    )
+    return operation_ref if (await operation_ref.get(transaction=transaction)).exists else None
+
+
+def stamp_operation_expiry(
+    transaction: firestore.AsyncTransaction,
+    operation_ref: firestore.AsyncDocumentReference | None,
+    patch: Mapping[str, Any],
+) -> None:
+    if operation_ref is not None:
+        transaction.update(operation_ref, {"expire_at": patch["expire_at"]})
 
 
 def _validate_time(value: datetime, field_name: str) -> None:

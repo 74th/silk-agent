@@ -63,6 +63,17 @@ variable "firestore_database_id" {
   default     = "silk-agent"
 }
 
+variable "firestore_prefix" {
+  description = "分散実行の Firestore コレクション名の接頭辞。設定ファイルの distributed.firestore_prefix と一致させる。"
+  type        = string
+  default     = "silk-agent"
+
+  validation {
+    condition     = length(var.firestore_prefix) > 0 && !strcontains(var.firestore_prefix, "/")
+    error_message = "firestore_prefix は空でなく、'/' を含まない値を指定してください。"
+  }
+}
+
 variable "firestore_database_mode" {
   description = "Firestore database の扱い: create、use-existing、import-existing。"
   type        = string

@@ -9,10 +9,16 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-from silk_agent.agent.engine import HOST_TOOLS, ClaudeAgentEngine, ClaudeEngineSettings
+from silk_agent.agent.engine import (
+    HISTORY_LOST_NOTICE,
+    HOST_TOOLS,
+    ClaudeAgentEngine,
+    ClaudeEngineSettings,
+)
 from silk_agent.agent.summaries import display_name, summarize
 from silk_agent.core.events import (
     AssistantText,
+    Notice,
     ToolFinished,
     ToolStarted,
     TurnFailed,
@@ -542,3 +548,117 @@ async def test_a_failing_hook_handler_does_not_break_the_turn(clock, tmp_path):
     eng = make(clock, tmp_path, lambda n: script, on_hook_event=boom)
     events = await run(eng)
     assert any(isinstance(e, TurnFinished) for e in events)
+
+
+class FakeHistoryStore:
+    """The parts of AgentPlatformSessionStore the engine uses to guard a conversation's history."""
+
+    def __init__(self, existing=(), loss=()):
+        self.existing = set(existing)
+        self.loss = set(loss)
+        self.extended: list[tuple[str, str | None]] = []
+        self.checked: list[str] = []
+
+    async def session_exists(self, session_id):
+        self.checked.append(session_id)
+        return session_id in self.existing
+
+    async def extend_for_turn(self, conversation_key, session_id):
+        # Runs before the SDK sees this turn's input: it has been sent `len(extended)` inputs.
+        assert sum(len(c.queries) for c in FakeSDKClient.instances) == len(self.extended)
+        self.extended.append((conversation_key, session_id))
+
+    def take_history_loss(self, session_id):
+        if session_id in self.loss:
+            self.loss.discard(session_id)
+            return True
+        return False
+
+
+async def test_history_is_extended_before_the_input_reaches_the_sdk(clock, tmp_path):
+    store = FakeHistoryStore(existing={"old"})
+    eng = make(clock, tmp_path, lambda n: [("msg", result())], session_store=store)
+    events = await run_resume(eng, "old")
+    assert [type(e) for e in events] == [TurnFinished]
+    assert store.extended == [("conv", "old")]
+    assert FakeSDKClient.instances[0].options.resume == "old"
+    assert eng.history_reset_reason is None
+
+
+async def test_a_new_conversation_has_nothing_to_extend_or_check(clock, tmp_path):
+    store = FakeHistoryStore()
+    eng = make(clock, tmp_path, lambda n: [("msg", result())], session_store=store)
+    await run(eng)
+    assert store.checked == [] and store.extended == []
+
+
+async def test_each_turn_extends_the_history_but_checks_existence_only_when_connecting(
+    clock, tmp_path
+):
+    store = FakeHistoryStore(existing={"old", "sid-1"})
+    eng = make(clock, tmp_path, lambda n: [("msg", result())], session_store=store)
+    await run_resume(eng, "old")
+    await run(eng, "second", "t2")
+    assert store.checked == ["old"]
+    assert len(store.extended) == 2
+
+
+async def test_missing_history_starts_a_new_session_and_tells_the_user(clock, tmp_path):
+    store = FakeHistoryStore(existing=set())
+    persisted = []
+
+    async def before_query(key, session_id, input_id, attempt_id):
+        persisted.append(session_id)
+
+    eng = make(
+        clock,
+        tmp_path,
+        lambda n: [("msg", text("はい")), ("msg", result())],
+        session_store=store,
+        on_query_start=before_query,
+    )
+    events = await run_resume(eng, "gone")
+    assert [type(e) for e in events] == [Notice, AssistantText, TurnFinished]
+    assert events[0] == Notice("conv", HISTORY_LOST_NOTICE)
+    options = FakeSDKClient.instances[0].options
+    assert options.resume is None and options.session_id
+    assert persisted == [options.session_id]  # the conversation's sdk_session_id moves on
+    assert eng.history_reset_reason == "expired"
+    assert store.extended == []  # nothing left to extend
+
+
+async def test_history_lost_while_appending_is_recorded(clock, tmp_path):
+    store = FakeHistoryStore(existing={"old"}, loss={"sid-1"})
+    eng = make(clock, tmp_path, lambda n: [("msg", result())], session_store=store)
+    events = await run_resume(eng, "old")
+    assert [type(e) for e in events] == [TurnFinished]  # no notice: the turn had its history
+    assert eng.history_reset_reason == "expired"
+
+
+async def test_reset_forgets_the_history_reset_reason(clock, tmp_path):
+    store = FakeHistoryStore(existing=set())
+    eng = make(clock, tmp_path, lambda n: [("msg", result())], session_store=store)
+    await run_resume(eng, "gone")
+    assert eng.history_reset_reason == "expired"
+    await eng.reset()
+    assert eng.history_reset_reason is None
+
+
+async def test_a_store_without_history_support_is_left_alone(clock, tmp_path):
+    eng = make(clock, tmp_path, lambda n: [("msg", result())], session_store=object())
+    events = await run_resume(eng, "old")
+    assert [type(e) for e in events] == [TurnFinished]
+    assert FakeSDKClient.instances[0].options.resume == "old"
+
+
+async def test_history_created_after_a_reset_is_still_extended(clock, tmp_path):
+    store = FakeHistoryStore(existing={"old", "sid-1"})
+    eng = make(clock, tmp_path, lambda n: [("msg", result())], session_store=store)
+    await run_resume(eng, "old")
+    await eng.reset()
+    await run(eng, "after reset", "t2")  # starts a new SDK session; "old" is not resumed
+    assert FakeSDKClient.instances[-1].options.resume is None
+    await run(eng, "next", "t3")
+    assert eng.session_id == "sid-1"
+    assert store.extended[-1] == ("conv", "sid-1")
+    assert all(sid != "old" for _, sid in store.extended[1:])
