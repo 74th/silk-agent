@@ -69,7 +69,10 @@ class GkeSessionSandboxRuntime:
         if not fresh and key in self._handles:
             return self._handles[key]
         env = dict(await self._env_provider(key)) if self._env_provider else {}
-        handle = await self._manager.ensure(self._session_key(key), env=env or None)
+        # `new_generation_env`: the e-mail applies to the Sandbox generations created from now on
+        # and never conflicts with a generation that was created without it (for example when
+        # the owner's e-mail was unknown at the first message and was filled in later).
+        handle = await self._manager.ensure(self._session_key(key), new_generation_env=env or None)
         self._handles[key] = handle
         self._pending[key] = [e.event_id for e in getattr(handle, "pending_context_events", ())]
         self._events[key] = list(getattr(handle, "pending_context_events", ()))

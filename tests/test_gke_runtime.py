@@ -108,8 +108,8 @@ class FakeManager:
         self.events = {}  # (tenant, session) -> [events]
         self.acked = []
 
-    async def ensure(self, key, env=None):
-        self.ensured.append((key, env))
+    async def ensure(self, key, new_generation_env=None):
+        self.ensured.append((key, new_generation_env))
         k = (key[0], key[1])
         if k not in self.handles:
             self.handles[k] = FakeHandle(key, self.events.get(k, ()))

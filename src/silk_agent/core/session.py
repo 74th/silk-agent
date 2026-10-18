@@ -99,8 +99,10 @@ class AgentSession:
         input_uncertain: InputUncertain | None = None,
         input_interrupted: InputInterrupted | None = None,
         inputs_dropped: InputsDropped | None = None,
+        on_idle_release: Callable[[AgentSession], None] | None = None,
     ) -> None:
         self.key = key
+        self._on_idle_release = on_idle_release
         self._sandbox_ready = sandbox_ready
         self._input_completed = input_completed
         self._input_started = input_started
@@ -519,6 +521,24 @@ class AgentSession:
         if self._state == "idle" and self._engine is not None:
             engine, self._engine = self._engine, None
             await engine.close()
+        await self._release_if_idle()
+
+    async def _release_if_idle(self) -> None:
+        """Hand this session back to its registry once it holds nothing: its state is in the
+        state store and the next input creates a fresh session. Without this, a long-running
+        single-process Bot keeps one session (and a worker task) per conversation forever."""
+        if (
+            self._on_idle_release is None
+            or self._closing
+            or self._state != "idle"
+            or self._engine is not None
+            or not self._queue.empty()
+            or self._held_notices
+        ):
+            return
+        await self._cancel_worker()
+        self._idle_task = None
+        self._on_idle_release(self)
 
     async def _prepare_sandbox(self, turn_id: str) -> list[str]:
         """Start / resume the sandbox (via the notice source) and return its notices.
@@ -630,7 +650,13 @@ class AgentSessionRegistry:
         input_uncertain: InputUncertain | None = None,
         input_interrupted: InputInterrupted | None = None,
         inputs_dropped: InputsDropped | None = None,
+        release_idle_sessions: bool = False,
+        on_session_released: Callable[[str], None] | None = None,
     ) -> None:
+        # Single-process Bot only: a distributed actor keeps the session it started with, so a
+        # second one for the same conversation must never appear.
+        self._release_idle = release_idle_sessions
+        self._on_session_released = on_session_released
         self._sandbox_ready = sandbox_ready
         self._input_completed = input_completed
         self._input_started = input_started
@@ -675,9 +701,16 @@ class AgentSessionRegistry:
                     input_uncertain=self._input_uncertain,
                     input_interrupted=self._input_interrupted,
                     inputs_dropped=self._inputs_dropped,
+                    on_idle_release=self._release if self._release_idle else None,
                 )
                 self._sessions[key] = session
             return session
+
+    def _release(self, session: AgentSession) -> None:
+        if self._sessions.get(session.key) is session:
+            del self._sessions[session.key]
+            if self._on_session_released is not None:
+                self._on_session_released(session.key)
 
     def get(self, key: str) -> AgentSession | None:
         return self._sessions.get(key)

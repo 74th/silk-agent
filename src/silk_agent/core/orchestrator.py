@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import re
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
@@ -70,6 +71,17 @@ OUTPUT_CHECK_FAILED = "出力を検査できなかったため、表示できま
 RESUME_TEXT = "続けてください。"
 
 
+_FAILURE_KIND = re.compile(r"[A-Za-z_][\w.]{0,80}")
+
+
+def public_failure(error: str) -> str:
+    """What a user may see of a turn's failure: the exception class, never its text."""
+    head, sep, _rest = error.partition(":")
+    if sep and _FAILURE_KIND.fullmatch(head.strip()):
+        return f"{head.strip()}（詳細は表示しません）"
+    return "処理に失敗しました（詳細は表示しません）"
+
+
 class ConversationOrchestrator:
     def __init__(
         self,
@@ -100,6 +112,7 @@ class ConversationOrchestrator:
         input_completed: Callable[[str], Awaitable[None]] | None = None,
         input_started: Callable[[str], Awaitable[bool]] | None = None,
         input_uncertain: Callable[[str], Awaitable[None]] | None = None,
+        release_idle_sessions: bool = False,
     ) -> None:
         self._clock = clock
         self._hooks = hooks
@@ -118,6 +131,8 @@ class ConversationOrchestrator:
             input_completed=input_completed,
             input_started=input_started,
             input_uncertain=input_uncertain,
+            release_idle_sessions=release_idle_sessions,
+            on_session_released=self._forget_conversation,
         )
         self._cancel_background = cancel_background
         self._channel = channel
@@ -167,6 +182,14 @@ class ConversationOrchestrator:
             await self._channel.send(Notice(event.conversation_key, "会話をリセットしました。"))
         elif isinstance(event, ResumeRequest):
             await self._handle_message(UserMessage(event.conversation_key, event.user, RESUME_TEXT))
+
+    def _forget_conversation(self, key: str) -> None:
+        """Drop the per-conversation bookkeeping of a session that went idle for good."""
+        self._owner_locks.pop(key, None)
+        if not self._tickets.get(key):  # an input still being checked needs its counters
+            self._arrivals.pop(key, None)
+            self._stop_arrival.pop(key, None)
+            self._tickets.pop(key, None)
 
     def reserve(self, conversation_key: str) -> int:
         """Take the next place in the conversation's arrival order (call it when the event
@@ -281,9 +304,16 @@ class ConversationOrchestrator:
         key = message.conversation_key
         async with self._owner_locks[key]:
             try:
-                if await self._state_store.get(key) is not None:
-                    return
+                existing = await self._state_store.get(key)
                 email = message.sender.email if message.sender else ""
+                if existing is not None:
+                    # The first lookup of the sender's e-mail can fail (Slack hiccup) and leave
+                    # it empty for good. The owner's later message fills it in; it never
+                    # changes who the owner is.
+                    if existing.owner_user == message.user and not existing.owner_email and email:
+                        existing.owner_email = email
+                        await self._state_store.put(existing)
+                    return
                 await self._state_store.put(
                     ConversationState(key, owner_user=message.user, owner_email=email)
                 )
@@ -376,6 +406,10 @@ class ConversationOrchestrator:
                 await self._deliver(replace(event, summary=result.text))
             else:
                 await self._deliver(replace(event, summary="（表示できません）"))
+        elif isinstance(event, TurnFailed):
+            # The error text comes from the SDK or an exception and has not been inspected;
+            # users see only the kind of failure.
+            await self._deliver(replace(event, error=public_failure(event.error)))
         else:
             await self._deliver(event)
 
