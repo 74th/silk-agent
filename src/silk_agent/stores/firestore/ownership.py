@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Any, cast
 
 from google.cloud import firestore
 from google.cloud.firestore_v1.async_transaction import async_transactional
@@ -334,24 +334,22 @@ class FirestoreOwnershipStore:
             conversation_snapshot = await conversation_ref.get(transaction=transaction)
             worker_snapshot = await worker_ref.get(transaction=transaction)
             reservation_snapshot = await reservation_ref.get(transaction=transaction)
-            if (
-                not owner_snapshot.exists
-                or not conversation_snapshot.exists
-                or not worker_snapshot.exists
-                or not reservation_snapshot.exists
-            ):
+            if not owner_snapshot.exists or not conversation_snapshot.exists:
                 return False
             owner_data = owner_snapshot.to_dict() or {}
             saved = decode_record(owner_data, OwnershipToken)
             phase = owner_data.get("phase")
-            worker = WorkerRecord.from_dict(cast(dict, worker_snapshot.to_dict() or {}))
+            worker = _worker_if_exists(worker_snapshot)
             lease_ok = token.expires_at <= now if _expired_unactivated else token.expires_at > now
             allowed_phases = {"assigned"} if _expired_unactivated else {"assigned", "active"}
+            if saved != token or phase not in allowed_phases or not lease_ok:
+                return False
+            # A live Worker must still be the incarnation that holds the token. An unactivated
+            # assignment started no process, so a replaced incarnation does not block it.
             if (
-                saved != token
-                or phase not in allowed_phases
-                or not lease_ok
-                or worker.incarnation != token.worker_incarnation
+                worker is not None
+                and not _expired_unactivated
+                and worker.incarnation != token.worker_incarnation
             ):
                 return False
             conversation = conversation_snapshot.to_dict() or {}
@@ -371,17 +369,14 @@ class FirestoreOwnershipStore:
                 owner_ref,
                 {"phase": "released", "released_at": now.isoformat()},
             )
-            transaction.delete(reservation_ref)
-            transaction.update(
+            if reservation_snapshot.exists:
+                transaction.delete(reservation_ref)
+            _release_worker_counters(
+                transaction,
                 worker_ref,
-                {
-                    "reserved": max(0, worker.reserved - 1),
-                    "active_sdk": max(
-                        0,
-                        worker.active_sdk
-                        - (1 if phase == "active" and owner_data.get("sdk_active", True) else 0),
-                    ),
-                },
+                worker,
+                token,
+                active=phase == "active" and owner_data.get("sdk_active", True),
             )
             transaction.update(
                 conversation_ref,
@@ -498,12 +493,7 @@ class FirestoreOwnershipStore:
             conversation_snapshot = await conversation_ref.get(transaction=transaction)
             worker_snapshot = await worker_ref.get(transaction=transaction)
             reservation_snapshot = await reservation_ref.get(transaction=transaction)
-            if (
-                not owner_snapshot.exists
-                or not conversation_snapshot.exists
-                or not worker_snapshot.exists
-                or not reservation_snapshot.exists
-            ):
+            if not owner_snapshot.exists or not conversation_snapshot.exists:
                 return False
             owner_data = owner_snapshot.to_dict() or {}
             conversation = conversation_snapshot.to_dict() or {}
@@ -544,7 +534,7 @@ class FirestoreOwnershipStore:
                 == "foreground"
                 and item_data.get("state") in {"intent", "running", "cancel_requested"}
             ]
-            worker = WorkerRecord.from_dict(cast(dict, worker_snapshot.to_dict() or {}))
+            worker = _worker_if_exists(worker_snapshot)
             transaction.update(
                 owner_ref,
                 {
@@ -573,22 +563,15 @@ class FirestoreOwnershipStore:
                         "updated_at": now,
                     },
                 )
-            transaction.delete(reservation_ref)
-            transaction.update(
+            if reservation_snapshot.exists:
+                transaction.delete(reservation_ref)
+            _release_worker_counters(
+                transaction,
                 worker_ref,
-                {
-                    "reserved": max(0, worker.reserved - 1),
-                    "active_sdk": max(
-                        0,
-                        worker.active_sdk
-                        - (
-                            1
-                            if owner_data.get("recovery_prior_phase") == "active"
-                            and owner_data.get("sdk_active", True)
-                            else 0
-                        ),
-                    ),
-                },
+                worker,
+                token,
+                active=owner_data.get("recovery_prior_phase") == "active"
+                and owner_data.get("sdk_active", True),
             )
             transaction.update(
                 conversation_ref,
@@ -603,6 +586,38 @@ class FirestoreOwnershipStore:
             return await release_after_stop(transaction)
         except Exception as exc:
             raise convert_firestore_error("confirm_worker_stopped", exc) from None
+
+
+def _worker_if_exists(snapshot: Any) -> WorkerRecord | None:
+    """The Worker record, or None once it was removed (its retention period passed)."""
+    if not snapshot.exists:
+        return None
+    return WorkerRecord.from_dict(cast(dict, snapshot.to_dict() or {}))
+
+
+def _release_worker_counters(
+    transaction: firestore.AsyncTransaction,
+    worker_ref: firestore.AsyncDocumentReference,
+    worker: WorkerRecord | None,
+    token: OwnershipToken,
+    *,
+    active: bool,
+) -> None:
+    """Give back the reservation (and SDK slot) of `token` on its Worker.
+
+    The counters belong to the incarnation recorded on the Worker document. A newer
+    incarnation (the container restarted) or a removed record has nothing of this token's to
+    give back, and decrementing would free capacity somebody else holds.
+    """
+    if worker is None or worker.incarnation != token.worker_incarnation:
+        return
+    transaction.update(
+        worker_ref,
+        {
+            "reserved": max(0, worker.reserved - 1),
+            "active_sdk": max(0, worker.active_sdk - (1 if active else 0)),
+        },
+    )
 
 
 def ownership_matches(

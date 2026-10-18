@@ -15,6 +15,7 @@ from silk_agent.config import Config, ConfigError
 from silk_agent.core.clock import SystemClock
 from silk_agent.core.ports import Clock
 from silk_agent.distributed.metrics import METRICS
+from silk_agent.distributed.pod_probe import pod_uid_of, pod_uid_of_incarnation
 from silk_agent.stores.firestore.allocator import FirestoreAllocator
 from silk_agent.stores.firestore.client import create_firestore_client
 from silk_agent.stores.firestore.conversations import FirestoreConversationStore
@@ -38,6 +39,7 @@ class RecoveryLoop:
         batch_size: int = 100,
         on_tick: Callable[[], None] | None = None,
         pod_gone: Callable[[Any], Awaitable[bool]] | None = None,
+        current_incarnation: Callable[[str], Awaitable[str | None]] | None = None,
         auto_recover_after_seconds: float = 120,
         notify_blocked: Callable[[Any], Awaitable[None]] | None = None,
         has_demand: Callable[[Any], Awaitable[bool]] | None = None,
@@ -53,6 +55,7 @@ class RecoveryLoop:
         self._backoff_max = backoff_max_seconds
         self._schedule: dict[str, tuple[int, datetime]] = {}  # key -> (failures, next attempt)
         self._pod_gone = pod_gone
+        self._current_incarnation = current_incarnation
         self._auto_after = timedelta(seconds=auto_recover_after_seconds)
         self._notify_blocked = notify_blocked
         self._on_tick = on_tick
@@ -103,8 +106,9 @@ class RecoveryLoop:
                 return 0
             state = result.state if result is not None else "skipped"
             if state == "blocked":
-                if await self._released_for_missing_pod(token):
-                    METRICS.inc("control_recovery_total", result="pod_absent")
+                auto = await self._released_with_evidence(token)
+                if auto is not None:
+                    METRICS.inc("control_recovery_total", result=auto)
                     return 1
                 await self._tell_user(token)
                 self._back_off(key, failures)
@@ -120,27 +124,45 @@ class RecoveryLoop:
         delay = min(self._backoff_base * (2**failures), self._backoff_max)
         self._schedule[key] = (failures + 1, self._clock.now() + timedelta(seconds=delay))
 
-    async def _released_for_missing_pod(self, token: Any) -> bool:
-        """Release when Kubernetes shows the old Pod is gone and enough time has passed for a
-        partitioned live Worker to have stopped itself after losing its lease."""
-        if self._pod_gone is None:
-            return False
+    async def _released_with_evidence(self, token: Any) -> str | None:
+        """Release when something proves the old incarnation's SDK is gone, and enough time has
+        passed for a partitioned live Worker to have stopped itself after losing its lease.
+
+        Evidence: the Worker id now runs a newer incarnation of the same Pod (the container
+        restarted, which ends the old process), or Kubernetes shows the Pod is absent or
+        replaced. Returns the metric label of the evidence used, or None."""
         if self._clock.now() - token.expires_at < self._auto_after:
-            return False
+            return None
         try:
-            if not await self._pod_gone(token):
-                return False
-            return bool(
-                await self._ownership.confirm_stopped(
-                    token,
-                    evidence_id=f"auto:pod-absent:{token.worker_id}",
-                    worker_incarnation=token.worker_incarnation,
-                    now=self._clock.now(),
-                )
+            evidence = await self._stop_evidence(token)
+            if evidence is None:
+                return None
+            label, evidence_id = evidence
+            released = await self._ownership.confirm_stopped(
+                token,
+                evidence_id=evidence_id,
+                worker_incarnation=token.worker_incarnation,
+                now=self._clock.now(),
             )
+            return label if released else None
         except Exception as exc:
-            log.warning("Pod-absence recovery failed (%s)", type(exc).__name__)
-            return False
+            log.warning("Automatic recovery failed (%s)", type(exc).__name__)
+            return None
+
+    async def _stop_evidence(self, token: Any) -> tuple[str, str] | None:
+        if self._current_incarnation is not None:
+            current = await self._current_incarnation(token.worker_id)
+            uid = pod_uid_of(token)
+            if (
+                current is not None
+                and current != token.worker_incarnation
+                and uid is not None
+                and pod_uid_of_incarnation(current) == uid
+            ):
+                return "incarnation_replaced", f"auto:incarnation-replaced:{token.worker_id}"
+        if self._pod_gone is not None and await self._pod_gone(token):
+            return "pod_absent", f"auto:pod-absent:{token.worker_id}"
+        return None
 
     async def _tell_user(self, token: Any) -> None:
         if self._notify_blocked is None:
@@ -341,9 +363,15 @@ async def run_control(config: Config) -> None:
     retention = RetentionPolicy.from_config(config.distributed.retention)
     identity = f"{os.environ.get('HOSTNAME', 'control')}:{uuid.uuid4().hex}"
     conversations = FirestoreConversationStore(client, collection_prefix=prefix)
+    directory = FirestoreWorkerDirectory(client, collection_prefix=prefix, retention=retention)
+
+    async def current_incarnation(worker_id: str) -> str | None:
+        worker = await directory.get_worker(worker_id)
+        return worker.incarnation if worker is not None else None
+
     allocator = ControlAllocatorLoop(
         conversations,
-        FirestoreWorkerDirectory(client, collection_prefix=prefix, retention=retention),
+        directory,
         FirestoreAllocator(client, collection_prefix=prefix),
         clock,
         allocator_id=identity,
@@ -402,6 +430,7 @@ async def run_control(config: Config) -> None:
         skew_seconds=config.distributed.lease_clock_skew_seconds,
         on_tick=health.loop("recovery", 180),
         pod_gone=pod_probe.is_gone if pod_probe is not None else None,
+        current_incarnation=current_incarnation,
         auto_recover_after_seconds=(
             config.distributed.auto_recover_after_seconds or 2 * config.distributed.lease_seconds
         ),

@@ -90,7 +90,7 @@ needs a terminal record. None does; the reads that can see a deleted record degr
 | `sandbox_operations` | `list_for_stop`: `accepted` only, and `is_dispatch_allowed` (new operations). `get_operation` (Sandbox Service): idempotency check by request ID, and command status / cancel / output | A request ID is unique per turn; a status request for an operation older than the retention returns 404 `unknown_command` |
 | `quiesce_requests` | `list_requested`: `requested` only. `get`: polled by the requester until `answered` (seconds) | No |
 | `slack_receipts` | `accept_received`: by ID, inside the receive transaction | The marker must outlive the Slack replay window (hours); 7 days |
-| `workers` | `list_available`, `list_workers`, `get_worker`, CLI `status-all`: filtered by `heartbeat_at` or listed | A Worker that stopped heartbeating more than 7 days ago disappears from `status-all` |
+| `workers` | `list_available`, `list_workers`, `get_worker` (also by the Control recovery loop, once per blocked ownership, to see whether a newer incarnation replaced the old one), CLI `status-all`: filtered by `heartbeat_at` or listed | A Worker that stopped heartbeating more than 7 days ago disappears from `status-all` |
 
 `workers/*/incarnations/*` is not a document: it exists only as the parent path of
 `reservations` documents, so it gets no TTL. Reservations left by a crashed Worker are

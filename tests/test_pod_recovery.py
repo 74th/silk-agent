@@ -200,3 +200,50 @@ async def test_failed_recovery_backs_off_exponentially_up_to_a_cap():
     gaps = [b - a for a, b in zip(attempts, attempts[1:], strict=False)]
     assert gaps[:4] == [5, 10, 20, 40] and set(gaps[3:]) == {40}
     assert len(attempts) < 12  # not one attempt per poll
+
+
+def replaced_loop(ownership, current, *, gone=False, after=120):
+    async def current_incarnation(worker_id):
+        assert worker_id == "worker-pod-a"
+        return current
+
+    async def pod_gone(_token):
+        return gone
+
+    return RecoveryLoop(
+        ownership,
+        Coordinator(),
+        object(),
+        Clock(),
+        pod_gone=pod_gone,
+        current_incarnation=current_incarnation,
+        auto_recover_after_seconds=after,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_newer_incarnation_of_the_same_pod_releases_even_though_the_pod_exists():
+    # The container restarted (OOM): same Pod, same UID, new incarnation. Kubernetes still
+    # shows the Pod, but the old process is gone.
+    ownership = Ownership(token(expired_for=300))
+    newer = json.dumps([UID, "boot-2"])
+    assert await replaced_loop(ownership, newer, gone=False).run_once() == 1
+    assert ownership.confirmed == ["auto:incarnation-replaced:worker-pod-a"]
+
+
+@pytest.mark.asyncio
+async def test_the_same_incarnation_or_another_pod_is_not_evidence():
+    same = Ownership(token(expired_for=300))
+    assert await replaced_loop(same, token().worker_incarnation).run_once() == 0
+    other_pod = Ownership(token(expired_for=300))
+    assert await replaced_loop(other_pod, json.dumps(["uid-2", "boot"])).run_once() == 0
+    no_record = Ownership(token(expired_for=300))
+    assert await replaced_loop(no_record, None).run_once() == 0
+    assert same.confirmed == other_pod.confirmed == no_record.confirmed == []
+
+
+@pytest.mark.asyncio
+async def test_a_newer_incarnation_still_waits_for_the_self_stop_window():
+    ownership = Ownership(token(expired_for=30))
+    assert await replaced_loop(ownership, json.dumps([UID, "boot-2"])).run_once() == 0
+    assert ownership.confirmed == []
