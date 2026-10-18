@@ -170,3 +170,19 @@ def test_the_sandbox_service_runs_the_lifecycle_reconciler():
         Path("k8s/distributed/sandbox-service/config/silk-agent-distributed.yaml").read_text()
     )
     assert config["sandbox"]["run_reconciler"] is True
+
+
+def test_bootstrap_overlay_starts_no_role_and_docs_do_not_claim_the_steady_state_does_not():
+    bootstrap = yaml.safe_load(Path("k8s/distributed-bootstrap/kustomization.yaml").read_text())
+    assert bootstrap["resources"] == ["../distributed"]
+    zero = {item["name"]: item["count"] for item in bootstrap["replicas"]}
+    assert zero == {"silk-agent-gateway": 0, "silk-agent-worker": 0, "silk-agent-control": 0}
+    # The steady-state manifest starts the roles; the docs must say so (they used to say it was
+    # committed with replicas: 0, which made `kubectl apply -k k8s/distributed` look safe).
+    for doc in (
+        Path("k8s/distributed/README.md"),
+        Path("docs/distributed-operations-runbook.md"),
+    ):
+        text = doc.read_text(encoding="utf-8")
+        assert "committed with `replicas: 0`" not in text
+        assert "k8s/distributed-bootstrap" in text

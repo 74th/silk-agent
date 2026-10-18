@@ -176,7 +176,12 @@ class FakeInboxStore:
         )[:limit]
 
     async def list_unfinished(
-        self, conversation_key: str, *, after_seq: int = 0, limit: int = 100
+        self,
+        conversation_key: str,
+        *,
+        after_seq: int = 0,
+        limit: int = 100,
+        states=None,
     ) -> Sequence[InputEnvelope]:
         terminal = {
             InputDeliveryState.COMPLETED,
@@ -194,6 +199,7 @@ class FakeInboxStore:
                     if key == conversation_key
                     and item.seq > after_seq
                     and item.delivery_state not in terminal
+                    and (states is None or item.delivery_state in states)
                 ),
                 key=lambda item: item.seq,
             )[:limit]
@@ -224,7 +230,15 @@ class FakeInboxStore:
         return due[:limit]
 
     async def record_sender_enrichment(
-        self, *, conversation_key, input_id, record_collection, sender_info, retry_at, now
+        self,
+        *,
+        conversation_key,
+        input_id,
+        record_collection,
+        sender_info,
+        retry_at,
+        now,
+        give_up=False,
     ):
         key = (conversation_key, input_id)
         state = self.sender_enrichment.get(key)
@@ -235,7 +249,14 @@ class FakeInboxStore:
             return False
         state["sender_lookup_attempts"] += 1
         state["updated_at"] = now
-        if sender_info is None:
+        if sender_info is None and give_up:
+            state["sender_lookup_state"] = "failed"
+            state.pop("next_sender_lookup_at", None)
+            if record_collection == "controls":
+                self.control_authorization[key] = "filtered"
+            elif envelope.delivery_state is InputDeliveryState.PENDING:
+                self.inputs[key] = replace(envelope, delivery_state=InputDeliveryState.BLOCKED)
+        elif sender_info is None:
             state["next_sender_lookup_at"] = retry_at
         else:
             state["sender_lookup_state"] = "resolved"

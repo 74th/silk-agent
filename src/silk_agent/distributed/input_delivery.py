@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
-from typing import Protocol
+from typing import Literal, Protocol
 
 from silk_agent.core.distributed_models import InputDeliveryState, InputEnvelope, OwnershipToken
 from silk_agent.core.distributed_ports import InboxStore
@@ -38,7 +38,9 @@ class DurableInputDelivery:
         source = self._owner_source
         return source() if callable(source) else source
 
-    async def dispatch(self, envelope: InputEnvelope, message: UserMessage) -> SubmissionOutcome:
+    async def dispatch(
+        self, envelope: InputEnvelope, message: UserMessage
+    ) -> SubmissionOutcome | Literal["fenced"]:
         if envelope.delivery_state not in {
             InputDeliveryState.PENDING,
             InputDeliveryState.QUEUED,
@@ -89,7 +91,19 @@ class DurableInputDelivery:
             expected=InputDeliveryState.DISPATCHING,
             new_state=InputDeliveryState.ACCEPTED,
         )
-        return outcome if accepted else "rejected"
+        if accepted:
+            return outcome
+        # The SDK already has this input but the durable "accepted" record was refused (a stop
+        # boundary or an owner change landed in between). Resending is wrong; so is retrying
+        # the hand-off. Settle it as unknown so it cannot hold the conversation.
+        await self._inbox.advance_input(
+            conversation_key=envelope.conversation_key,
+            input_id=envelope.input_id,
+            owner=self._owner,
+            expected=InputDeliveryState.DISPATCHING,
+            new_state=InputDeliveryState.UNCERTAIN,
+        )
+        return "fenced"
 
     async def complete(self, input_id: str) -> bool:
         return await self._inbox.advance_input(
@@ -107,6 +121,23 @@ class DurableInputDelivery:
             owner=self._owner,
             expected=InputDeliveryState.QUEUED,
             new_state=InputDeliveryState.ACCEPTED,
+        )
+
+    async def interrupted(self, input_id: str, reason: str) -> bool:
+        """Settle an accepted input whose turn ended in an interrupt.
+
+        A user stop/reset or a newer message that replaced the turn cancels it. A stop by the
+        system (shutdown, drain, lost lease) leaves it unknown: never resent automatically.
+        """
+        user_initiated = reason in {"user", "reset", "new_message"}
+        return await self._inbox.advance_input(
+            conversation_key=self._owner.conversation_key,
+            input_id=input_id,
+            owner=self._owner,
+            expected=InputDeliveryState.ACCEPTED,
+            new_state=(
+                InputDeliveryState.CANCELLED if user_initiated else InputDeliveryState.UNCERTAIN
+            ),
         )
 
     async def mark_uncertain(self, input_id: str) -> bool:

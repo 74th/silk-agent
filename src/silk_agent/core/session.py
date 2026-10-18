@@ -39,6 +39,11 @@ InputCompletion = Callable[[str], Awaitable[None]]
 InputStart = Callable[[str], Awaitable[bool]]
 InputQueue = Callable[[str], Awaitable[bool]]
 InputUncertain = Callable[[str], Awaitable[None]]
+# (input_id, reason): a turn ended by an interrupt; the reason says why (user, reset,
+# new_message, shutdown, drain, lease_lost) so the durable state can be settled.
+InputInterrupted = Callable[[str, str], Awaitable[None]]
+# input ids removed from the in-memory queue by a stop; their durable state is untouched.
+InputsDropped = Callable[[list[str]], Awaitable[None]]
 
 SYSTEM_USER = "system"  # author of notices that the agent receives as a message
 
@@ -92,12 +97,17 @@ class AgentSession:
         input_completed: InputCompletion | None = None,
         input_started: InputStart | None = None,
         input_uncertain: InputUncertain | None = None,
+        input_interrupted: InputInterrupted | None = None,
+        inputs_dropped: InputsDropped | None = None,
     ) -> None:
         self.key = key
         self._sandbox_ready = sandbox_ready
         self._input_completed = input_completed
         self._input_started = input_started
         self._input_uncertain = input_uncertain
+        self._input_interrupted = input_interrupted
+        self._inputs_dropped = inputs_dropped
+        self._dropped_input_ids: list[str] = []
         self._notice_source = notice_source
         self._notice_ack = notice_ack
         self._engine_factory = engine_factory
@@ -201,6 +211,7 @@ class AgentSession:
     async def request_stop(self, *, reason: Literal["user", "reset"] = "user") -> bool:
         """Set the stop barrier in this actor and request interrupt without waiting for a turn."""
         dropped = self._drain_queue()
+        await self._flush_dropped()
         if self._state == "idle":
             return dropped > 0
         await self._interrupt(reason)
@@ -226,6 +237,7 @@ class AgentSession:
         otherwise interrupt it (reason "shutdown")."""
         self._closing = True
         self._drain_queue()
+        await self._flush_dropped()
         self._cancel_idle_timer()
         if self._state != "idle":
             if not await self._wait_turn_done(grace_seconds):
@@ -272,9 +284,25 @@ class AgentSession:
     def _drain_queue(self) -> int:
         n = 0
         while not self._queue.empty():
-            self._queue.get_nowait()
+            message = self._queue.get_nowait()
             n += 1
+            if message.input_id:
+                self._dropped_input_ids.append(message.input_id)
         return n
+
+    async def _flush_dropped(self) -> None:
+        """Tell the owner which durable inputs left the memory queue.
+
+        A stop empties the queue regardless of an input's position, but an input behind the stop
+        boundary must still run afterwards: its durable state is still queued, so the owner has
+        to hand it over again (those at or before the boundary are cancelled in the store).
+        """
+        ids, self._dropped_input_ids = self._dropped_input_ids, []
+        if ids and self._inputs_dropped is not None:
+            try:
+                await self._inputs_dropped(ids)
+            except Exception:
+                log.exception("failed to report dropped inputs for %s", self.key)
 
     def _ensure_worker(self) -> None:
         if self._worker is None or self._worker.done():
@@ -343,6 +371,16 @@ class AgentSession:
                             await self._input_uncertain(input_id)
                         except Exception:
                             log.exception("failed to mark inbox input uncertain for %s", self.key)
+                elif outcome == "interrupted" and self._input_interrupted is not None:
+                    # Without this the inputs of an interrupted turn stay "accepted" forever:
+                    # they hold the conversation's slot and eventually fill the inbox page.
+                    for input_id in self._turn_input_ids:
+                        try:
+                            await self._input_interrupted(
+                                input_id, self._interrupt_reason or "user"
+                            )
+                        except Exception:
+                            log.exception("failed to settle an interrupted input for %s", self.key)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -565,11 +603,15 @@ class AgentSessionRegistry:
         input_completed: InputCompletion | None = None,
         input_started: InputStart | None = None,
         input_uncertain: InputUncertain | None = None,
+        input_interrupted: InputInterrupted | None = None,
+        inputs_dropped: InputsDropped | None = None,
     ) -> None:
         self._sandbox_ready = sandbox_ready
         self._input_completed = input_completed
         self._input_started = input_started
         self._input_uncertain = input_uncertain
+        self._input_interrupted = input_interrupted
+        self._inputs_dropped = inputs_dropped
         self._notice_source = notice_source
         self._notice_ack = notice_ack
         self._engine_factory = engine_factory
@@ -606,6 +648,8 @@ class AgentSessionRegistry:
                     input_completed=self._input_completed,
                     input_started=self._input_started,
                     input_uncertain=self._input_uncertain,
+                    input_interrupted=self._input_interrupted,
+                    inputs_dropped=self._inputs_dropped,
                 )
                 self._sessions[key] = session
             return session
@@ -622,6 +666,8 @@ class AgentSessionRegistry:
         completed: InputCompletion | None,
         started: InputStart | None,
         uncertain: InputUncertain | None,
+        interrupted: InputInterrupted | None = None,
+        dropped: InputsDropped | None = None,
     ) -> None:
         """Install durable input callbacks before creating any conversation session."""
         if self._sessions:
@@ -629,6 +675,8 @@ class AgentSessionRegistry:
         self._input_completed = completed
         self._input_started = started
         self._input_uncertain = uncertain
+        self._input_interrupted = interrupted
+        self._inputs_dropped = dropped
 
     async def shutdown(self, grace_seconds: float | None = None) -> None:
         await asyncio.gather(*(s.shutdown(grace_seconds) for s in self.sessions()))

@@ -23,6 +23,7 @@ from silk_agent.distributed.metrics import METRICS
 
 log = logging.getLogger(__name__)
 INPUT_PAGE = 100
+_DELIVERABLE = (InputDeliveryState.PENDING, InputDeliveryState.QUEUED)
 
 
 ControlReader = Callable[[], Awaitable[Sequence[Mapping[str, Any]]]]
@@ -76,6 +77,8 @@ class DistributedConversationActor:
             completed=self._mark_completed,
             started=self._mark_started,
             uncertain=self._mark_uncertain,
+            interrupted=self._mark_interrupted,
+            dropped=self._on_inputs_dropped,
         )
         self._session = await registry.get_or_create(self._owner.conversation_key)
         self._delivery = DurableInputDelivery(self._inbox, lambda: self._owner, self._session)
@@ -85,6 +88,7 @@ class DistributedConversationActor:
             self._session,
             command_monitor=self._command_monitor,
         )
+        await self._settle_leftovers()
         self._dispatcher = ConversationDispatcher(
             read_inputs=self._read_inputs,
             read_controls=self._read_controls,
@@ -96,6 +100,8 @@ class DistributedConversationActor:
             poll_seconds=self._poll_seconds,
             read_limit=INPUT_PAGE,
             still_unfinished=self._still_unfinished,
+            refresh_input=self._refresh_input,
+            abandon_input=self._abandon_input,
         )
         self._task = asyncio.create_task(self._dispatcher.run(), name="distributed-conversation")
         await asyncio.sleep(0)
@@ -191,7 +197,9 @@ class DistributedConversationActor:
         if self._control_only:
             # No SDK slot was reserved; user input waits for a normal assignment.
             return ()
-        records = await self._inbox.list_unfinished(self._owner.conversation_key, limit=INPUT_PAGE)
+        records = await self._inbox.list_unfinished(
+            self._owner.conversation_key, limit=INPUT_PAGE, states=_DELIVERABLE
+        )
         # Gateway persists and ACKs first, then resolves the sender (users.info). A message
         # whose sender is not stored yet must not be judged: policy and the conversation
         # owner depend on it, and a later input must not overtake it.
@@ -241,6 +249,10 @@ class DistributedConversationActor:
             # input stranded behind a dispatcher that considers it handled.
             log.warning("input dispatch was rejected; will retry")
             raise DispatchRetryable()
+        if outcome == "fenced":
+            # The SDK already has it; the delivery marked it uncertain. Never retry.
+            log.warning("input reached the SDK but its accepted record was fenced")
+            return
         if envelope.kind == "message":
             # The user is back: hand over command results kept while the turn was interrupted.
             # Run it on the actor's own task, not this input's: once the reply completes, the
@@ -269,11 +281,65 @@ class DistributedConversationActor:
         if released and self._dispatcher is not None:
             self._dispatcher.wake_inputs()
 
-    async def _still_unfinished(self, seq: int) -> bool:
-        records = await self._inbox.list_unfinished(
-            self._owner.conversation_key, after_seq=seq - 1, limit=1
+    async def _refresh_input(self, record: InputEnvelope) -> InputEnvelope | None:
+        """The stored input with this seq if it can still be delivered, else None."""
+        latest = await self._inbox.list_unfinished(
+            self._owner.conversation_key,
+            after_seq=record.seq - 1,
+            limit=1,
+            states=_DELIVERABLE,
         )
-        return bool(records) and records[0].seq == seq
+        return latest[0] if latest and latest[0].seq == record.seq else None
+
+    async def _still_unfinished(self, seq: int) -> bool:
+        latest = await self._inbox.list_unfinished(
+            self._owner.conversation_key, after_seq=seq - 1, limit=1, states=_DELIVERABLE
+        )
+        return bool(latest) and latest[0].seq == seq
+
+    async def _abandon_input(self, record: InputEnvelope) -> None:
+        """Give up on an input whose preparation never succeeds, so it cannot block the rest."""
+        terminal = (
+            InputDeliveryState.BLOCKED
+            if record.delivery_state is InputDeliveryState.PENDING
+            else InputDeliveryState.CANCELLED
+        )
+        await self._inbox.advance_input(
+            conversation_key=record.conversation_key,
+            input_id=record.input_id,
+            owner=self._owner,
+            expected=record.delivery_state,
+            new_state=terminal,
+        )
+        METRICS.inc("inputs_abandoned_total")
+
+    async def _settle_leftovers(self) -> None:
+        """A new actor has nothing in flight: inputs an earlier owner left as dispatching or
+        accepted can no longer be resolved by a turn. Mark them uncertain (never resent) so
+        they do not hold the conversation's slot or fill the inbox page."""
+        leftovers = await self._inbox.list_unfinished(
+            self._owner.conversation_key,
+            limit=500,
+            states=(InputDeliveryState.DISPATCHING, InputDeliveryState.ACCEPTED),
+        )
+        for record in leftovers:
+            await self._inbox.advance_input(
+                conversation_key=record.conversation_key,
+                input_id=record.input_id,
+                owner=self._owner,
+                expected=record.delivery_state,
+                new_state=InputDeliveryState.UNCERTAIN,
+            )
+        if leftovers:
+            METRICS.inc("inputs_uncertain_total", len(leftovers))
+
+    async def _mark_interrupted(self, input_id: str, reason: str) -> None:
+        if self._delivery is not None:
+            await self._delivery.interrupted(input_id, reason)
+
+    async def _on_inputs_dropped(self, input_ids: list[str]) -> None:
+        if self._dispatcher is not None:
+            self._dispatcher.forget_inputs(input_ids)
 
     async def _dispatch_completion(self, envelope: InputEnvelope) -> None:
         if self._completion is None:

@@ -69,7 +69,8 @@ class FirestoreAllocator:
             .document(document_id(conversation_key, prefix="reservation"))
             for worker_ref, candidate in zip(worker_refs, candidates, strict=True)
         ]
-        transaction = self.client.transaction()
+        # Competing allocators contend on the same worker and conversation documents.
+        transaction = self.client.transaction(max_attempts=15)
 
         @async_transactional
         async def assign(transaction: firestore.AsyncTransaction) -> OwnershipToken | None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -362,10 +362,32 @@ class FirestoreInboxStore:
             raise convert_firestore_error("accept_input", exc) from None
 
     async def list_unfinished(
-        self, conversation_key: str, *, after_seq: int = 0, limit: int = 100
+        self,
+        conversation_key: str,
+        *,
+        after_seq: int = 0,
+        limit: int = 100,
+        states: Sequence[InputDeliveryState] | None = None,
     ) -> tuple[InputEnvelope, ...]:
+        """Unfinished inputs in sequence order; ``states`` narrows them (default: all four).
+
+        A reader that only delivers (pending/queued) passes those two, so inputs that were
+        already handed to an SDK cannot fill its page.
+        """
         if limit < 1:
             raise ValueError("limit must be greater than zero")
+        wanted = [
+            state.value
+            for state in (
+                states
+                or (
+                    InputDeliveryState.PENDING,
+                    InputDeliveryState.DISPATCHING,
+                    InputDeliveryState.QUEUED,
+                    InputDeliveryState.ACCEPTED,
+                )
+            )
+        ]
         conversation_ref = self._collection("conversations").document(
             self._conversation_id(conversation_key)
         )
@@ -373,11 +395,7 @@ class FirestoreInboxStore:
             query = (
                 conversation_ref.collection("inputs")
                 .where(filter=FieldFilter("seq", ">", after_seq))
-                .where(
-                    filter=FieldFilter(
-                        "delivery_state", "in", ["pending", "dispatching", "queued", "accepted"]
-                    )
-                )
+                .where(filter=FieldFilter("delivery_state", "in", wanted))
                 .order_by("seq")
                 .limit(limit)
             )
@@ -733,7 +751,14 @@ class FirestoreInboxStore:
         sender_info: Mapping[str, Any] | None,
         retry_at: datetime,
         now: datetime,
+        give_up: bool = False,
     ) -> bool:
+        """Store a resolved sender, schedule a retry, or (``give_up``) end the lookup.
+
+        Giving up is the safe-side outcome for a sender that can never be verified: a user
+        message becomes blocked and a stop/reset candidate is filtered, so neither holds the
+        conversation or is treated as authorized.
+        """
         _validate_time(now, "now")
         _validate_time(retry_at, "retry_at")
         if record_collection not in {"inputs", "controls"}:
@@ -773,7 +798,17 @@ class FirestoreInboxStore:
                 "sender_lookup_attempts": attempts + 1,
                 "updated_at": now,
             }
-            if sender_info is None:
+            if sender_info is None and give_up:
+                update_data.update(
+                    sender_lookup_state="failed",
+                    next_sender_lookup_at=firestore.DELETE_FIELD,
+                )
+                if record_collection == "inputs":
+                    if data.get("delivery_state") == InputDeliveryState.PENDING.value:
+                        update_data["delivery_state"] = InputDeliveryState.BLOCKED.value
+                else:
+                    update_data["authorization_state"] = "filtered"
+            elif sender_info is None:
                 update_data.update(
                     sender_lookup_state="pending",
                     next_sender_lookup_at=retry_at,
@@ -797,6 +832,11 @@ class FirestoreInboxStore:
                         "sender_lookup_attempts": attempts + 1,
                         "next_sender_lookup_at": update_data.get(
                             "next_sender_lookup_at", firestore.DELETE_FIELD
+                        ),
+                        **(
+                            {"authorization_state": "filtered"}
+                            if update_data["sender_lookup_state"] == "failed"
+                            else {}
                         ),
                     },
                 )

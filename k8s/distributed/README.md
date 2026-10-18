@@ -2,11 +2,15 @@
 
 `sandbox-service.yaml` runs the authenticated internal Sandbox Service. `roles.yaml` defines
 the Gateway, Worker and Control Deployments with their ServiceAccounts and NetworkPolicies.
-**The three role Deployments are committed with `replicas: 0`**, so applying this directory
-does not connect to Slack, start an SDK, or switch traffic. Enable them one at a time as
-described in [the operations runbook](../../docs/distributed-operations-runbook.md).
+**`kubectl apply -k k8s/distributed` is the steady state and starts the roles** (Gateway 1,
+Worker 2, Control 1): Gateway connects to Slack and Workers start as soon as it is applied. For the
+first build of an environment, apply `k8s/distributed-bootstrap` instead: the same resources with
+the three role Deployments at zero replicas, so nothing connects to Slack or starts an SDK. Start
+the roles in the order of [the operations runbook](../../docs/distributed-operations-runbook.md)
+(§2) with `kubectl scale`, and apply `k8s/distributed` only after the cut-over is done.
+Re-applying either one resets the replica counts it declares.
 
-Before enabling a role, rebuild the image (`k8s/build-image.sh`) and put its digest in
+Before starting a role, rebuild the image (`k8s/build-image.sh`) and put its digest in
 `kustomization.yaml`: an image that predates `silk-agent worker run` / `control` cannot start
 them. The Worker mounts no Secret, Control receives only the Slack bot token, and no role
 mounts a volume with SQLite state.

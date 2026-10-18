@@ -17,7 +17,7 @@
 
 - [x] 2.1 `stores/firestore/` に共通クライアント、document ID hash、schema codec、エラー変換を実装する。本文/認証情報を例外ログへ出さない。検証: 同じ会話キーが安定したIDになり、異なるworkspaceの同一tsが衝突しないことを確認する。
 - [x] 2.2 受信 transaction を実装する。event receipt と message receipt を読み、未処理なら会話seq採番・input/control・receipt・割当待ちを一緒に保存する。検証: emulator で同時2受信、同一event再送、mention/message二重配送を行い、入力が一件だけになる。
-- [x] 2.3 入力状態を expected state + owner epoch で進める API を実装する。dispatch_attempt_id を送信前に保存し、再起動時に dispatching を uncertain へ分類できるようにする。検証: 古い世代の更新拒否、append不可時のpending復帰、送信結果不明時の再送抑止をテストする。
+- [x] 2.3 入力状態を expected state + owner epoch で進める API を実装する。dispatch_attempt_id を送信前に保存し、再起動時に dispatching を uncertain へ分類できるようにする。検証: 古い世代の更新拒否、append不可時のpending復帰、送信結果不明時の再送抑止をテストする。 補足(2026-10-18 のレビュー対応): クラッシュ後の `dispatching`/`accepted` の分類は `confirm_stopped()` と、新しい actor の起動時の整理（`_settle_leftovers`、advance_input で uncertain）が担う。`InboxStore.recover_dispatching` は本番経路から呼ばれておらず、単体・emulator の契約試験だけが使っている。
 - [x] 2.4 会話管理情報を部分更新する API を実装する。turn 状態、owner_user/email、sdk_session_id、停止境界を区別し、開始者は最初の承認済み入力で一度だけ確定する。検証: 進捗更新とコマンド更新が同時でも履歴参照や開始者が消えない。
 - [x] 2.5 watch adapter を作り、callback thread から asyncio loop へ signal を渡す。unsubscribe、再接続、未処理の再照会、重複signalの集約を実装する。検証: 切断中の新着を回収し、同じ入力を二度SDKへ渡さず、終了後にtask/threadが残らない。
 - [x] 2.6 実際の query に対応する composite index と本文フィールドの index exemption を定義する。処理済みのみTTL対象にし、子コレクションの削除方法も定義する。検証: query一覧とindex定義の対応表を作り、pending/uncertain が保持期限で消えないテストを行う。
@@ -71,7 +71,7 @@
 - [x] 8.2 `dispatcher.py` に通常入力reader、順序付きguard task、control reader、turn taskを分離する。dispatcher内でturn/ensure/guard全体をawaitしない。検証: 永久待機するfake tool/guard/ensureの各条件で停止readerが進む。
 - [x] 8.3 `ConversationOrchestrator` のfilter/guard/owner確定を永続入力へ接続し、直前5件のguard履歴を復元する。ユーザごとのrate limitもWorkerローカルだけにしない。検証: Worker交代後も履歴・開始者・制限が維持され、guard完了順で入力が逆転しない。
 - [x] 8.4 `AgentSession` への投入結果を永続入力状態へ結びつける。メモリqueue待ち、append受理、次turn実行を区別し、未実行queueを失わない。検証: queueモードで未実行入力がqueuedとして残り、再割当後に再投入できる。
-- [x] 8.5 Engineの新規session_idをquery前に保存する経路と、入力ID/dispatch attemptの関連を追加する。`_sent/_echoed/_closing` の意味を維持する。検証: `test_prompt_appended_after_the_cli_turn_ended_is_still_answered` と初回query直後の障害試験が通る。
+- [ ] 8.5 Engineの新規session_idをquery前に保存する経路と、入力ID/dispatch attemptの関連を追加する。`_sent/_echoed/_closing` の意味を維持する。検証: `test_prompt_appended_after_the_cli_turn_ended_is_still_answered` と初回query直後の障害試験が通る。 **未接続の部分**: 「新規 session_id を query 前に保存する経路」（`InboxStore.record_query_start`）は、Engine が SDK の init で session_id を得るまで使えないため本番経路に接続していない。session_id の保存は turn 後の状態保存（`commit_turn_state`）による。`CommandStore`（`create_intent` など）、`OwnershipStore.acquire`、`WorkerDirectory.release_reservation` も、本番では別の実装（`FirestoreCommandMonitorStore`、allocator、`release()`）が担っており、port の契約試験だけが使う重複した抽象になっている（整理は別の課題）。
 - [x] 8.6 append拒否時は未送信を確認して次turnへ残し、queryの結果不明ならuncertainにする。検証: append窓終了/送信例外/正常echoの3ケースで再送の有無とturn数を確認する。
 - [x] 8.7 append/interrupt/queueの設定を分散actorに接続する。interruptモードのnew_messageではバックグラウンドコマンドを取消さない。検証: append/interrupt/queueを永続入力付きActorで再実行し、共有Inboxの2 Worker競合で同じ入力を一度だけ投入する。
 

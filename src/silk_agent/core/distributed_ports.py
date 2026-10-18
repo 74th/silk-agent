@@ -69,7 +69,12 @@ class InboxStore(Protocol):
         ...
 
     async def list_unfinished(
-        self, conversation_key: str, *, after_seq: int = 0, limit: int = 100
+        self,
+        conversation_key: str,
+        *,
+        after_seq: int = 0,
+        limit: int = 100,
+        states: Sequence[InputDeliveryState] | None = None,
     ) -> Sequence[InputEnvelope]:
         """Read durable work in sequence order after startup or watch reconnection."""
         ...
@@ -139,6 +144,7 @@ class InboxStore(Protocol):
         sender_info: Mapping[str, Any] | None,
         retry_at: datetime,
         now: datetime,
+        give_up: bool = False,
     ) -> bool: ...
 
     async def list_pending_controls(self, *, limit: int = 100) -> Sequence[Mapping[str, Any]]: ...

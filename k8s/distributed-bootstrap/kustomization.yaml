@@ -1,0 +1,16 @@
+# First build of an environment: the same resources as `k8s/distributed`, but the three role
+# Deployments are created with zero replicas, so applying this connects nothing to Slack and
+# starts no SDK. Start the roles in the order of the operations runbook (§2) with
+# `kubectl scale`, and keep applying THIS overlay until the cut-over is done. Then apply
+# `k8s/distributed` (Gateway 1 / Worker 2 / Control 1), which is the steady state.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../distributed
+replicas:
+  - name: silk-agent-gateway
+    count: 0
+  - name: silk-agent-worker
+    count: 0
+  - name: silk-agent-control
+    count: 0

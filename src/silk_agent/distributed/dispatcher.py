@@ -46,6 +46,11 @@ class ConversationDispatcher[Control, Prepared]:
         poll_seconds: float = 1.0,
         read_limit: int | None = None,
         still_unfinished: Callable[[int], Awaitable[bool]] | None = None,
+        refresh_input: Callable[[InputEnvelope], Awaitable[InputEnvelope | None]] | None = None,
+        abandon_input: Callable[[InputEnvelope], Awaitable[None]] | None = None,
+        max_prepare_attempts: int = 12,
+        max_dispatch_attempts: int = 60,
+        retry_cap_seconds: float = 30.0,
     ) -> None:
         if poll_seconds <= 0:
             raise ValueError("poll_seconds must be positive")
@@ -53,6 +58,11 @@ class ConversationDispatcher[Control, Prepared]:
         self._read_limit = read_limit
         # Asked only when the page is full: is the input with this seq still unfinished?
         self._still_unfinished = still_unfinished
+        self._refresh_input = refresh_input
+        self._abandon_input = abandon_input
+        self._max_prepare_attempts = max_prepare_attempts
+        self._max_dispatch_attempts = max_dispatch_attempts
+        self._retry_cap_seconds = retry_cap_seconds
         self._read_inputs = read_inputs
         self._read_controls = read_controls
         self._prepare_input = prepare_input
@@ -166,44 +176,89 @@ class ConversationDispatcher[Control, Prepared]:
                 self._sequence_changed.notify_all()
         self._seen_inputs.intersection_update(active_keys | set(self._input_tasks))
 
+    async def _wait_for_turn(self, record: InputEnvelope) -> bool:
+        """Wait until ``record`` is the oldest input still pending (False if stopped)."""
+        async with self._sequence_changed:
+            await self._sequence_changed.wait_for(
+                lambda: (
+                    self._stop.is_set()
+                    or record.seq == min(self._pending_sequences, default=record.seq)
+                )
+            )
+        return not self._stop.is_set()
+
+    async def _retry_pause(self, attempt: int) -> bool:
+        """Back off before a retry (capped). False when stopped."""
+        delay = min(self._poll_seconds * (2**attempt), self._retry_cap_seconds)
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=delay)
+        except TimeoutError:
+            return True
+        return False
+
+    async def _latest(self, record: InputEnvelope) -> InputEnvelope | None:
+        """The input as stored now, or None if it is no longer unfinished."""
+        if self._refresh_input is None:
+            return record
+        return await self._refresh_input(record)
+
     async def _prepare_and_dispatch(self, record: InputEnvelope, key: str) -> None:
         committed = False
         try:
+            if not await self._wait_for_turn(record):
+                return
             if record.kind == "command_finished" and self._dispatch_completion is not None:
-                async with self._sequence_changed:
-                    await self._sequence_changed.wait_for(
-                        lambda: (
-                            self._stop.is_set()
-                            or record.seq == min(self._pending_sequences, default=record.seq)
-                        )
-                    )
-                if self._stop.is_set():
-                    return
                 await self._dispatch_completion(record)
                 committed = True
                 return
             # Preparation has durable side effects (guard history, conversation owner), and the
             # guard's context depends on earlier inputs: run it in acceptance order, never
             # speculatively. STOP and control handling stay on their own tasks.
-            async with self._sequence_changed:
-                await self._sequence_changed.wait_for(
-                    lambda: (
-                        self._stop.is_set()
-                        or record.seq == min(self._pending_sequences, default=record.seq)
+            prepared = None
+            attempt = 0
+            while True:
+                try:
+                    prepared = await self._prepare_input(record)
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # A transient failure must not let a later input overtake this one: keep
+                    # the turn and retry with backoff. A poison input is abandoned after a
+                    # bounded number of tries so it cannot hold the conversation forever.
+                    attempt += 1
+                    log.warning(
+                        "input preparation failed (%s); attempt %d", type(exc).__name__, attempt
                     )
-                )
-            if self._stop.is_set():
-                return
-            prepared = await self._prepare_input(record)
+                    if attempt >= self._max_prepare_attempts:
+                        if self._abandon_input is not None:
+                            await self._abandon_input(record)
+                        committed = True  # settled: release the turn to later inputs
+                        return
+                    if not await self._retry_pause(attempt):
+                        return
+                    latest = await self._latest(record)
+                    if latest is None:
+                        return  # cancelled (stop barrier) while waiting to retry
+                    record = latest
+            attempt = 0
             while True:
                 try:
                     await self._dispatch_input(record, prepared)
                     break
                 except DispatchRetryable:
-                    # Preparation (guard, history, owner) is not repeated; only the hand-off.
-                    await asyncio.sleep(self._poll_seconds)
-                    if self._stop.is_set():
+                    # Preparation (guard, history, owner) is not repeated; only the hand-off,
+                    # against the state stored now and for a bounded number of tries.
+                    attempt += 1
+                    if attempt >= self._max_dispatch_attempts:
+                        log.warning("input dispatch kept being refused; giving up for now")
+                        return  # the reader offers it again on a later scan
+                    if not await self._retry_pause(min(attempt, 4)):
                         return
+                    latest = await self._latest(record)
+                    if latest is None:
+                        return  # no longer unfinished
+                    record = latest
             committed = True
         except asyncio.CancelledError:
             raise
@@ -216,12 +271,18 @@ class ConversationDispatcher[Control, Prepared]:
                     self._sequence_changed.notify_all()
                 else:
                     self._seen_inputs.discard(key)
-                    # A failed or cancelled attempt must not keep later inputs waiting; the
+                    # A cancelled or abandoned attempt must not keep later inputs waiting; the
                     # reader re-adds the sequence if the record is still unfinished.
                     self._pending_sequences.discard(record.seq)
                     self._sequence_changed.notify_all()
             if committed:
                 self.wake_inputs()
+
+    def forget_inputs(self, input_ids: list[str]) -> None:
+        """Offer these inputs again: they left an in-memory queue but are still queued durably."""
+        for input_id in input_ids:
+            self._seen_inputs.discard(input_id)
+        self.wake_inputs()
 
     async def _control_reader(self) -> None:
         while not self._stop.is_set():

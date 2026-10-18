@@ -166,3 +166,63 @@ async def test_only_authorized_stop_advances_the_persistent_stop_boundary():
     assert inbox.conversations["slack:T1:C1:100.1"]["stop_seq"] == 1
     assert inbox.control_authorization[("slack:T1:C1:100.1", "C1:102.1")] == "authorized"
     assert inbox.control_authorization[("slack:T1:C1:100.1", "C1:103.1")] == "filtered"
+
+
+@pytest.mark.asyncio
+async def test_a_sender_that_never_resolves_is_given_up_blocking_the_input_and_telling_the_user():
+    inbox = FakeInboxStore()
+    clock = Clock()
+    envelope = await accept(inbox, clock.now())
+    told = []
+
+    async def on_gave_up(key, input_id, collection):
+        told.append((key, input_id, collection))
+
+    users = Users([None] * 10)
+    enricher = SlackSenderEnricher(
+        inbox,
+        users,
+        clock,
+        workspace_team="T1",
+        max_attempts=3,
+        on_gave_up=on_gave_up,
+    )
+    key = (envelope.conversation_key, envelope.input_id)
+    for _ in range(2):  # attempts 1 and 2 reschedule
+        await enricher.run_once()
+        clock.value += timedelta(hours=1)
+        assert inbox.inputs[key].delivery_state.value == "pending"
+        assert not told
+    await enricher.run_once()  # attempt 3 ends the lookup
+    assert inbox.sender_enrichment[key]["sender_lookup_state"] == "failed"
+    assert inbox.inputs[key].delivery_state.value == "blocked"
+    assert told == [(envelope.conversation_key, envelope.input_id, "inputs")]
+    clock.value += timedelta(hours=1)
+    assert await enricher.run_once() == 0  # nothing is due any more: no endless retries
+    assert len(users.looked_up) == 3
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_stop_candidate_is_filtered_not_authorized():
+    inbox = FakeInboxStore()
+    clock = Clock()
+    control = await inbox.accept_received(
+        conversation_key="slack:T1:C1:100.1",
+        input_id="C1:102.1",
+        conversation_generation=1,
+        kind="stop_candidate",
+        payload={"text": "停止", "user": "U1"},
+        created_at=clock.now(),
+        workspace="T1",
+        team="T1",
+        channel="C1",
+        message_ts="102.1",
+        event_id="Ev2",
+        sender_id="U1",
+    )
+    enricher = SlackSenderEnricher(
+        inbox, Users([None] * 5), clock, workspace_team="T1", max_attempts=1
+    )
+    await enricher.run_once()
+    key = (control.conversation_key, control.input_id)
+    assert inbox.control_authorization[key] == "filtered"

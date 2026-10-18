@@ -8,6 +8,7 @@ import signal
 
 import aiohttp
 
+from silk_agent.channels.slack_events import parse_key
 from silk_agent.channels.slack_users import UserDirectory
 from silk_agent.config import Config, ConfigError
 from silk_agent.core.clock import SystemClock
@@ -70,12 +71,26 @@ async def run_gateway(config: Config) -> None:
             reset_words=config.slack.reset_words,
         )
         users = UserDirectory(web_client, clock)
+
+        async def tell_unresolved(key: str, _input_id: str, collection: str) -> None:
+            # A user message that is blocked because the sender cannot be verified should not
+            # vanish silently. (A stop/reset candidate is just not acted on.)
+            if collection != "inputs":
+                return
+            _team, channel, thread = parse_key(key)
+            await web_client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread,
+                text="送信者を確認できなかったため、このメッセージは処理しませんでした。",
+            )
+
         enricher = SlackSenderEnricher(
             inbox,
             users,
             clock,
             workspace_team=workspace_team,
             workspace_enterprise=workspace_enterprise,
+            on_gave_up=tell_unresolved,
         )
 
         async def enrich_received(item: ReceivedSlackInput) -> None:

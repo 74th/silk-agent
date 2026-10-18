@@ -520,13 +520,11 @@ class FirestoreOwnershipStore:
             )
             uncertain_result = await transaction.get(uncertain_query)
             uncertain_inputs = [item async for item in uncertain_result]
+            # dispatching/accepted inputs are turned into uncertain below, so only work that is
+            # still waiting for a Worker (pending/queued) decides "waiting" versus "idle".
             unfinished_query = (
                 conversation_ref.collection("inputs")
-                .where(
-                    filter=FieldFilter(
-                        "delivery_state", "in", ["pending", "dispatching", "queued", "accepted"]
-                    )
-                )
+                .where(filter=FieldFilter("delivery_state", "in", ["pending", "queued"]))
                 .limit(1)
             )
             unfinished_result = await transaction.get(unfinished_query)
