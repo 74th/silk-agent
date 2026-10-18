@@ -37,7 +37,7 @@
 
 ## 6. 実環境での確認
 
-- [ ] 6.1 Terraform の plan を確認して apply する（開発環境の 1 件）。検証: plan に変更が出ず、apply 後の `terraform plan` も差分なし。
-- [ ] 6.2 開発環境を `overlays/dev` で適用する。検証: Pod が 1 回ローリング再起動する（`POD_NAMESPACE` の追加で Pod テンプレートが変わるため）が、`silk-agent worker status-all` で Worker が稼働中、既存の会話に Slack から返信できる。
+- [x] 6.1 Terraform の plan を確認して apply する（開発環境の 1 件）。検証: plan に変更が出ず、apply 後の `terraform plan` も差分なし。
+- [x] 6.2 開発環境を `overlays/dev` で適用する。検証: Pod が 1 回ローリング再起動する（`POD_NAMESPACE` の追加で Pod テンプレートが変わるため）が、`silk-agent worker status-all` で Worker が稼働中、既存の会話に Slack から返信できる。
 - [ ] 6.3 bigquery-analysis を Terraform の一覧に追加して apply し、`deploy.sh` の分散構成のモードで配置して、bigquery-analysis の Slack アプリから会話する。検証: 会話が `bigquery-analysis_conversations` に記録され、Sandbox が `bigquery-analysis-sandboxes` に作られ、開発環境の Firestore の記録と Sandbox に現れない。
 - [ ] 6.4 分離を確認する: bigquery-analysis の Worker の Pod から開発環境の Sandbox Service へ接続を試す。開発環境の設定を bigquery-analysis の namespace で起動するよう 1 つの Pod を作り、起動しないことを確かめる。検証: 接続が拒否され、Pod が照合のエラーで終了する。結果を `docs/distributed-operations-runbook.md` に記録する。

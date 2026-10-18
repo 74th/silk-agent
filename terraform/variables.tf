@@ -98,6 +98,15 @@ variable "usecases" {
       }
       legacy_bot_access = true
     }
+    "bigquery-analysis" = {
+      system_namespace  = "bigquery-analysis-system"
+      sandbox_namespace = "bigquery-analysis-sandboxes"
+      firestore_prefix  = "bigquery-analysis"
+      slack_secret_ids = {
+        bot_token = "bigquery-analysis-slack-bot-token"
+        app_token = "bigquery-analysis-slack-app-token"
+      }
+    }
   }
 
   validation {

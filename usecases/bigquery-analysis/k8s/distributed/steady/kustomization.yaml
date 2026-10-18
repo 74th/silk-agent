@@ -49,7 +49,7 @@ images:
   # The role Deployments' image is the placeholder `silk-agent`: use this use case's Bot image.
   - name: silk-agent
     newName: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/bigquery-analysis-bot
-    digest: sha256:64ecc03a5876a9ac5ad94796091b55daaab0f8a9251e089c55c48e3558c35807
+    digest: sha256:60c59b338237b6f7c9f7e1af0e291f3ebc71ff2d97f3c9ebcd85cbc899103696
   - name: echo-mcp
     newName: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/bigquery-analysis-echo-mcp
-    digest: sha256:60a8776a4b54caade9a99065518a88d99942c2a62e5041e678dcfda8c65becfc
+    digest: sha256:753f1f1c735e114c49455bb8c95be4f156ed94e92802056a181aa039bb19ceda
