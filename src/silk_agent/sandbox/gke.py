@@ -174,6 +174,29 @@ class GkeSessionSandboxRuntime:
         page = await self._with_session(conversation_key, op)
         return _text(page.data), int(page.cursor)
 
+    async def cancel_command(
+        self, conversation_key: str, command_id: str, request_id: str | None = None
+    ) -> str:
+        """Ask the tracker to stop one command: "confirmed" once the tracker took the
+        cancel, "unknown" when it could not be sent (the process may still be running)."""
+        handle = self._running.get(conversation_key, {}).get(command_id)
+        self._cancelled.setdefault(conversation_key, set()).add(command_id)
+        try:
+            if handle is not None:
+                await handle.commands.cancel(command_id)
+            else:
+
+                async def op(session: Any) -> Any:
+                    return await session.commands.cancel(command_id)
+
+                await self._with_session(conversation_key, op)
+        except Exception:
+            log.exception("cancelling command %s failed", command_id)
+            self._cancelled.get(conversation_key, set()).discard(command_id)
+            return "unknown"
+        self._running.get(conversation_key, {}).pop(command_id, None)
+        return "confirmed"
+
     async def cancel_commands(self, conversation_key: str) -> None:
         """Ask the tracker to stop the running commands (SIGTERM, then SIGKILL)."""
         for command_id, handle in list(self._running.get(conversation_key, {}).items()):

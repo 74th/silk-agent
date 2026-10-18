@@ -241,6 +241,33 @@ async def test_cancelling_the_waiting_tool_leaves_the_sandbox_command_running():
     assert (await rt.command_status(key, command_id)).outcome == "cancelled"
 
 
+async def test_cancel_command_sends_the_cancel_to_the_tracker_by_id():
+    rt, mgr = make()
+    key = "slack:T1:C1:1.0"
+    await rt.run_command(key, "warm")
+    cmds = mgr.handles[("T1", "C1:1.0")].commands
+    cmds.mode = "block"
+    task = asyncio.create_task(rt.run_command(key, "sleep 300"))
+    await asyncio.sleep(0.05)
+    command_id = cmds.runs[-1][3]
+    assert await rt.cancel_command(key, command_id) == "confirmed"
+    assert cmds.cancelled == [command_id]
+    assert (await asyncio.wait_for(task, 2)).outcome == "cancelled"
+
+
+async def test_cancel_command_is_unknown_when_the_tracker_cannot_be_reached():
+    rt, mgr = make()
+    key = "slack:T1:C1:1.0"
+    await rt.run_command(key, "warm")
+    cmds = mgr.handles[("T1", "C1:1.0")].commands
+
+    async def broken(command_id):
+        raise ConnectionError("tracker down")
+
+    cmds.cancel = broken
+    assert await rt.cancel_command(key, "cmd-x") == "unknown"
+
+
 async def test_status_and_output():
     rt, _ = make()
     st = await rt.command_status("slack:T1:C1:1.0", "cmd-1")
