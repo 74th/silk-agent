@@ -30,10 +30,11 @@ from .errors import (
 _COMMAND_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _TRACKER_MARKER_ENV = "GKE_SESSION_SANDBOX_TRACKER_MARKER"
 # Records the command's process group id, then becomes the command (same pid, same group).
+# `mv` is called by its absolute path: the caller's PATH is the command's, not ours to rely on.
 _PGID_WRAPPER = (
     "/bin/sh",
     "-c",
-    'printf "%s" "$$" > "$1.tmp" && mv "$1.tmp" "$1" && shift && exec "$@"',
+    'printf "%s" "$$" > "$1.tmp" && /bin/mv "$1.tmp" "$1" && shift && exec "$@"',
     "tracker-wrapper",
 )
 

@@ -689,3 +689,18 @@ async def test_a_command_that_ended_before_its_group_was_read_still_has_its_grou
             os.killpg(shell.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+def test_the_wrapper_runs_the_command_even_when_the_callers_path_has_no_tools(tmp_path):
+    import subprocess
+
+    pgid_file = tmp_path / "pgid"
+    done = subprocess.run(
+        [*tracker_module._PGID_WRAPPER, str(pgid_file), "/bin/echo", "ok"],
+        env={"PATH": "/nonexistent"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (done.returncode, done.stdout.strip()) == (0, "ok"), done.stderr
+    assert pgid_file.read_text().isdigit()

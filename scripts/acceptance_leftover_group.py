@@ -89,7 +89,8 @@ async def main() -> None:
             timeout_seconds=120,
         )
         print(
-            f"4. leftover that dropped the tracker's environment: {ran.outcome} in {time.time() - t:.1f}s"
+            f"4. leftover that dropped the tracker's environment: {ran.outcome} "
+            f"in {time.time() - t:.1f}s"
         )
         assert ran.outcome == "completed", ran
         left = await leftovers()
