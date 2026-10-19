@@ -8,6 +8,7 @@ from silk_agent.distributed.control_runtime import ControlAllocatorLoop
 from silk_agent.stores.firestore.allocator import FirestoreAllocator
 from silk_agent.stores.firestore.client import create_firestore_client
 from silk_agent.stores.firestore.conversations import FirestoreConversationStore
+from silk_agent.stores.firestore.ids import document_id
 from silk_agent.stores.firestore.inbox import FirestoreInboxStore
 from silk_agent.stores.firestore.ownership import FirestoreOwnershipStore
 from silk_agent.stores.firestore.workers import FirestoreWorkerDirectory
@@ -38,7 +39,7 @@ class Env:
 
     async def send(s, k, text, gen=1):
         n = s.seq[k] = s.seq.get(k, 0) + 1
-        await s.inbox.accept_input(
+        envelope = await s.inbox.accept_input(
             conversation_key=k,
             input_id=f"in-{n}-{uuid.uuid4().hex[:6]}",
             conversation_generation=gen,
@@ -46,6 +47,16 @@ class Env:
             payload={"text": text, "user": "UACC", "team": "T", "channel": "C", "sender": SENDER},
             created_at=datetime.now(UTC),
         )
+        # "UACC" is made up: the Gateway would look it up in Slack, fail for good and block the
+        # input within seconds, before a cold Sandbox or a recovery lets a Worker take it. The
+        # sender is stored with the input, so the lookup is marked resolved.
+        ref = (
+            s.c.collection(f"{P}_conversations")
+            .document(s.conv._conversation_id(k))
+            .collection("inputs")
+            .document(document_id(envelope.input_id, prefix="input"))
+        )
+        await ref.update({"sender_lookup_state": "resolved"})
 
     async def control(s, k, kind, gen=1):
         n = s.seq[k] = s.seq.get(k, 0) + 1
