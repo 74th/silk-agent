@@ -562,6 +562,7 @@ class FirestoreCommandMonitorStore:
                             "conversation_generation": generation,
                             "next_input_seq": seq + 1,
                             "allocation_state": "waiting",
+                            "waiting_since": now,
                             "version": version + 1,
                             "schema_version": 1,
                         },

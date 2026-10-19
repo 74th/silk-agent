@@ -78,6 +78,25 @@ class FirestoreConversationStore:
         except Exception as exc:
             raise convert_firestore_error("list_waiting_conversations", exc) from None
 
+    async def oldest_waiting_since(self) -> datetime | None:
+        """When the conversation that has waited longest for a Worker began waiting, or None.
+
+        A conversation made waiting before `waiting_since` existed is not seen here."""
+        try:
+            query = (
+                self._collection("conversations")
+                .where(filter=FieldFilter("allocation_state", "==", "waiting"))
+                .order_by("waiting_since")
+                .limit(1)
+            )
+            async for snapshot in query.stream():
+                since = (snapshot.to_dict() or {}).get("waiting_since")
+                if isinstance(since, datetime):
+                    return since
+            return None
+        except Exception as exc:
+            raise convert_firestore_error("oldest_waiting_conversation", exc) from None
+
     async def load_guard_history(self, conversation_key: str) -> tuple[str, ...]:
         conversation = await self.get_conversation(conversation_key)
         if conversation is None:

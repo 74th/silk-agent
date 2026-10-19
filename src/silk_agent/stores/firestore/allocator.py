@@ -12,6 +12,7 @@ from google.cloud.firestore_v1.async_transaction import async_transactional
 from silk_agent.core.distributed_models import OwnershipToken, WorkerRecord
 from silk_agent.stores.firestore.errors import convert_firestore_error
 from silk_agent.stores.firestore.ids import conversation_document_id, document_id
+from silk_agent.stores.firestore.workers import HEARTBEAT_FUTURE_TOLERANCE
 
 
 class FirestoreAllocator:
@@ -135,7 +136,7 @@ class FirestoreAllocator:
                 if (
                     current.incarnation != candidate.incarnation
                     or current.draining
-                    or current.heartbeat_at > now
+                    or current.heartbeat_at > now + HEARTBEAT_FUTURE_TOLERANCE
                     or current.heartbeat_at < now - self.worker_heartbeat_timeout
                     or current.reserved >= current.capacity
                 ):

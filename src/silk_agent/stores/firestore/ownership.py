@@ -411,7 +411,10 @@ class FirestoreOwnershipStore:
             )
             transaction.update(
                 conversation_ref,
-                {"allocation_state": "waiting" if unfinished else "idle"},
+                {
+                    "allocation_state": "waiting" if unfinished else "idle",
+                    **({"waiting_since": now} if unfinished else {}),
+                },
             )
             return True
 
@@ -608,6 +611,7 @@ class FirestoreOwnershipStore:
                 conversation_ref,
                 {
                     "allocation_state": "waiting" if unfinished else "idle",
+                    **({"waiting_since": now} if unfinished else {}),
                     "recovery_state": "confirmed_stopped",
                 },
             )

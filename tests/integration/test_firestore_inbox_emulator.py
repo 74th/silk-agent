@@ -2860,3 +2860,40 @@ async def test_sender_enrichment_ignores_inputs_of_another_prefix():
         ]
     finally:
         client.close()
+
+
+@pytest.mark.asyncio
+async def test_oldest_waiting_conversation_and_workers_with_a_slightly_fast_clock():
+    emulator_host = os.environ.get("SILK_AGENT_FIRESTORE_EMULATOR_HOST")
+    if not emulator_host:
+        pytest.skip("set SILK_AGENT_FIRESTORE_EMULATOR_HOST to run the Firestore emulator test")
+
+    prefix = f"test-{uuid.uuid4().hex[:12]}"
+    client = create_firestore_client(
+        DistributedExecutionConfig(firestore_project=f"silk-agent-test-{uuid.uuid4().hex[:12]}"),
+        emulator_host=emulator_host,
+    )
+    conversations = FirestoreConversationStore(client, collection_prefix=prefix)
+    directory = FirestoreWorkerDirectory(client, collection_prefix=prefix)
+    now = datetime.now(UTC)
+    try:
+        assert await conversations.oldest_waiting_since() is None
+        for name, state, since in (
+            ("a", "waiting", now - timedelta(seconds=30)),
+            ("b", "waiting", now - timedelta(seconds=90)),
+            ("c", "assigned", now - timedelta(seconds=500)),
+        ):
+            await (
+                client.collection(f"{prefix}_conversations")
+                .document(name)
+                .set({"conversation_key": name, "allocation_state": state, "waiting_since": since})
+            )
+        assert await conversations.oldest_waiting_since() == now - timedelta(seconds=90)
+
+        fast = WorkerRecord("fast-pod", worker_incarnation("u1", "s1"), 4, 0, 0, False, now)
+        assert await directory.register(fast)
+        # the Control's own clock is a few seconds behind the Worker's
+        assert len(await directory.list_available(now=now - timedelta(seconds=5))) == 1
+        assert not await directory.list_available(now=now - timedelta(minutes=5))
+    finally:
+        client.close()

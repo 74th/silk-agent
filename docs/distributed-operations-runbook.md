@@ -136,7 +136,8 @@ silk-agent recovery confirm-stopped CONVERSATION_KEY --evidence "node gke-xxx de
 | `silk_agent_input_dispatch_latency_seconds` | 受信から SDK 投入決定まで（追記・開始の遅延） |
 | `silk_agent_control_latency_seconds{kind}` | stop / reset の受信から完了まで |
 | `silk_agent_output_delivery_latency_seconds` | 出力の作成から Slack 配送まで（完了から返信まで） |
-| `silk_agent_control_waiting_conversations` / `control_available_workers` | 割当待ちの会話数と利用可能な Worker 数 |
+| `silk_agent_control_waiting_conversations` / `control_available_workers` | 割当待ちの会話数と利用可能な Worker 数。待ちの数は1回に100件までしか見ないので、頭打ちのとき `control_waiting_conversations_capped` が 1 になる |
+| `silk_agent_control_oldest_waiting_seconds` | 最も長く割当を待っている会話の待ち時間（秒）。頭打ちの影響を受けない。`waiting_since` を持たない古い記録は数えない |
 | `silk_agent_control_recovery_total{result}` / `control_recovery_pending` | 回復の結果 / 停止証拠待ちの数 |
 | `silk_agent_outputs_total{result}` | 配送結果（`delivered` / `retry` / `uncertain`） |
 | `silk_agent_inputs_uncertain_total` | uncertain になった入力 |
