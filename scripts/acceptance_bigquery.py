@@ -34,7 +34,9 @@ def expected_top_terms(count: int = 3) -> list[str]:
         check=True,
     ).stdout
     rows = json.loads(out[out.index("[") :])
-    return [row["term"] for row in rows[:count]]
+    terms = [row["term"] for row in rows[:count]]
+    assert len(terms) == count, f"the direct query returned {len(terms)} rows, expected {count}"
+    return terms
 
 
 async def main() -> None:
