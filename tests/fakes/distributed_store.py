@@ -189,6 +189,16 @@ class FakeSharedStore(FakeInboxStore):
         )
         return {**record, "monitor_lease_token": token}
 
+    async def set_unreadable_since(self, command_id, *, claim_token, since):
+        record = self.commands.get(command_id)
+        if record is None or record.get("monitor_lease_token") != claim_token:
+            return False
+        if since is None:
+            record.pop("unreadable_since", None)
+        else:
+            record["unreadable_since"] = since
+        return True
+
     async def record_observation(
         self,
         command_id: str,

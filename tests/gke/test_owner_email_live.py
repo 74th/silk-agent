@@ -35,6 +35,7 @@ from silk_agent.stores.firestore.ids import conversation_document_id
 from silk_agent.stores.firestore.inbox import FirestoreInboxStore
 from silk_agent.stores.firestore.ownership import FirestoreOwnershipStore
 from silk_agent.stores.firestore.workers import FirestoreWorkerDirectory
+from tests.gke.cleanup import delete_records_of_conversation
 
 pytestmark = pytest.mark.gke
 
@@ -206,6 +207,7 @@ async def test_owner_email_reaches_new_sandboxes_and_legacy_ones_keep_working(tm
                 )
                 async for doc in conversation_ref.collection("inputs").stream():
                     await doc.reference.delete()
+                await delete_records_of_conversation(database, prefix, key)
                 token = tokens.get(name)
                 if token is not None:
                     await owners.release(token, now=clock.now())

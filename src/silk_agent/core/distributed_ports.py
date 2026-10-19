@@ -374,6 +374,14 @@ class CommandMonitorStore(Protocol):
         """Persist only a changed state, fenced by the current monitor claim."""
         ...
 
+    async def set_unreadable_since(
+        self, command_id: str, *, claim_token: str, since: datetime | None
+    ) -> bool:
+        """Record when the command's state first became unreadable (None: it is readable
+        again), fenced by the current monitor claim. A give-up decision needs how long it has
+        been unreadable, not how old the command is."""
+        ...
+
     async def detach(self, command_id: str, *, now: datetime) -> Mapping[str, Any] | None:
         """Atomically choose a foreground result or background delivery mode."""
         ...

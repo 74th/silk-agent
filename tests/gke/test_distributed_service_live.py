@@ -35,10 +35,11 @@ from silk_agent.sandbox.remote import (
 )
 from silk_agent.stores.firestore.client import create_firestore_client
 from silk_agent.stores.firestore.command_monitor import FirestoreCommandMonitorStore
-from silk_agent.stores.firestore.ids import conversation_document_id, document_id
+from silk_agent.stores.firestore.ids import conversation_document_id
 from silk_agent.stores.firestore.inbox import FirestoreInboxStore
 from silk_agent.stores.firestore.ownership import FirestoreOwnershipStore
 from silk_agent.stores.firestore.workers import FirestoreWorkerDirectory
+from tests.gke.cleanup import delete_records_of_conversation
 
 pytestmark = pytest.mark.gke
 
@@ -251,6 +252,24 @@ async def test_real_commands_files_dedup_cancel_and_owner_fencing_without_slack(
                 break
             await asyncio.sleep(0.25)
         assert cancelled["state"] == "cancelled"
+
+        # A successor Worker has another turn and origin sequence: it still reads and cancels
+        # the commands of the conversation (they belong to the conversation, not to a turn).
+        successor = {**identity, "turn_id": f"successor-{run_id}", "origin_seq": 99}
+        successor_status = await remote.command_status(key, command_id, **successor)
+        assert successor_status["state"] == "finished"
+        successor_page = await remote.command_output(
+            key, command_id, stream="stdout", cursor=0, **successor
+        )
+        assert base64.b64decode(successor_page["data_base64"]) == b"once\n"
+        result["successor_reads_commands"] = True
+
+        # The runtime ensures the Sandbox in its own request, then starts the command.
+        runtime = RemoteSandboxRuntime(remote, current_identity)
+
+        ran = await runtime.run_command(key, "printf live-ok", timeout_seconds=60)
+        assert (ran.outcome, ran.stdout) == ("completed", "live-ok")
+        result["runtime_run_command"] = True
         result["cancel_command_id"] = cancel_id
         result["cancel_state"] = cancelled
         result["elapsed_seconds"] = round(time.monotonic() - started, 3)
@@ -303,14 +322,9 @@ async def test_real_commands_files_dedup_cancel_and_owner_fencing_without_slack(
             for name in ("inputs", "controls"):
                 async for doc in conversation_ref.collection(name).stream():
                     await doc.reference.delete()
-            for name in ("commands", "sandbox_operations"):
-                for identifier in (command_id, cancel_id, write_id):
-                    kind = "command" if name == "commands" else "operation"
-                    await (
-                        database.collection(f"{prefix}_{name}")
-                        .document(document_id(identifier, prefix=kind))
-                        .delete()
-                    )
+            # By conversation key, not by command id: a start whose response was lost still left
+            # its records.
+            await delete_records_of_conversation(database, prefix, key)
             if token is not None:
                 await owners.release(token, now=clock.now())
             worker_ref = directory._worker_ref(worker_id)
