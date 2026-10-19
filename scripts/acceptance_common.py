@@ -1,5 +1,6 @@
 import asyncio
 import os
+import subprocess
 import uuid
 from datetime import UTC, datetime
 
@@ -19,8 +20,25 @@ TEAM = os.environ.get("ACCEPTANCE_TEAM", "T")  # a use case may allow only its o
 SENDER = {"email": "acceptance@example.com", "is_guest": False, "is_external": False, "team": "T"}
 
 
+def require_dev_target() -> None:
+    """Refuse to run against anything but the dev cluster these scripts are written for."""
+    root = os.path.join(os.path.dirname(__file__), "..", "terraform", "gke")
+    expected = subprocess.run(
+        ["terraform", f"-chdir={root}", "output", "-raw", "kube_context"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    current = subprocess.run(
+        ["kubectl", "config", "current-context"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    if current != expected:
+        raise SystemExit(f"refusing to run: kube context {current!r}, expected {expected!r}")
+
+
 class Env:
     def __init__(s):
+        require_dev_target()
         s.c = create_firestore_client(
             DistributedExecutionConfig(
                 firestore_project="nnyn-dev", firestore_database="silk-agent"

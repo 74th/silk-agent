@@ -1,0 +1,13 @@
+# Keep local state and secrets out of the build context sent to the Docker daemon.
+.venv
+**/__pycache__
+.pytest_cache
+.ruff_cache
+*.egg-info
+.env
+.env.*
+terraform/.terraform
+terraform/*.tfstate*
+terraform/*.tfvars
+!terraform/*.tfvars.example
+tests
