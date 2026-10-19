@@ -260,3 +260,23 @@ async def test_a_hook_that_cannot_be_loaded_stops_the_start_up(monkeypatch, cloc
     bot._config.hooks = ["not_installed.hooks:create"]
     with pytest.raises(HookLoadError, match="not_installed.hooks:create"):
         await bot.start(runtime=InMemoryRuntime())
+
+
+async def test_shutdown_shares_one_grace_deadline_between_handlers_and_turns(
+    monkeypatch, clock, tmp_path
+):
+    bot, *_ = make_bot(monkeypatch, clock, tmp_path)
+    await bot.start(runtime=InMemoryRuntime())
+    bot._grace = 1.0
+    given = []
+
+    async def slow_wait_idle(grace):
+        await asyncio.sleep(0.4)  # the handlers use part of the grace period
+
+    async def record_aclose(grace):
+        given.append(grace)
+
+    monkeypatch.setattr(bot.channel, "wait_idle", slow_wait_idle)
+    monkeypatch.setattr(bot.services, "aclose", record_aclose)
+    await bot.shutdown()
+    assert given and given[0] <= 0.65  # not the full grace period again

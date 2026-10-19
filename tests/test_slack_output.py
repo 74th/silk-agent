@@ -499,3 +499,19 @@ async def test_participation_survives_restart_through_state_store(clock):
         }
     )
     assert handled and handled[0].text == "続けて"
+
+
+async def test_wait_idle_gives_up_after_the_grace_period():
+    import asyncio
+    from types import SimpleNamespace
+
+    app = SimpleNamespace(client=FakeSlackClient(), event=lambda *a, **k: None)
+    channel = SlackChannel(app, None, None, ProgressConfig())
+    blocked = asyncio.create_task(asyncio.Event().wait())
+    channel._tasks.add(blocked)
+    try:
+        await asyncio.wait_for(channel.wait_idle(0.05), 2)
+        await asyncio.sleep(0)
+        assert not blocked.cancelled()  # giving up the wait leaves the handler running
+    finally:
+        blocked.cancel()
