@@ -214,20 +214,20 @@ Firestore の操作数は Cloud Monitoring の `firestore.googleapis.com/api/req
 
 コマンドは「終了」と「通知が済んだ」の遅い方から数える。バックグラウンドコマンドの通知は、その `command_finished` 入力が completed になった時点で delivered になる（STOP などで取り消された入力は suppressed）。入力が uncertain のまま残ったコマンドは、運用者が確認するまで消えない。
 
-削除してはならないもの: 会話ごとの管理情報（`conversations`、`ownership`、`sandboxes`、`resource_leases`、`user_rate_limits`）。会話の入力がすべて消えても会話は再開できる。試験用の会話（`acceptance:*`、`loadtest:*`）の掃除はこの仕組みの対象外。
+削除してはならないもの: 会話ごとの管理情報（`conversations`、`ownership`、`sandboxes`、`resource_leases`）。会話の入力がすべて消えても会話は再開できる。試験用の会話（`acceptance:*`、`loadtest:*`）の掃除はこの仕組みの対象外。
 
 TTL による削除は、期限から最大24時間ほど遅れる。TTL の削除は Firestore の課金対象の削除操作になる。
 
 ### 11.2 Terraform（TTL ポリシー）
 
-`terraform/main.tf` が、対象のコレクションの `expire_at` に TTL ポリシーを設定する（コレクショングループ: `inputs`、`controls`。接頭辞つき: `outbox`、`commands`、`sandbox_operations`、`quiesce_requests`、`slack_receipts`、`control_queue`、`workers`）。`expire_at` は索引から外してある。コレクション名の接頭辞は `firestore_prefix`（既定 `silk-agent`）で、設定ファイルの `distributed.firestore_prefix` と一致させる。
+`terraform/main.tf` が、対象のコレクションの `expire_at` に TTL ポリシーを設定する（コレクショングループ: `inputs`、`controls`。接頭辞つき: `outbox`、`commands`、`sandbox_operations`、`quiesce_requests`、`slack_receipts`、`control_queue`、`workers`、`user_rate_limits`）。`expire_at` は索引から外してある。コレクション名の接頭辞は `firestore_prefix`（既定 `silk-agent`）で、設定ファイルの `distributed.firestore_prefix` と一致させる。
 
 ```sh
 cd terraform
 terraform plan   # TTL の追加だけが出ること（既存の索引に差分がないこと）
 terraform apply
 gcloud firestore fields ttls list --database=silk-agent --project=nnyn-dev \
-  --format="table(name.scope(collectionGroups),ttlConfig.state)"   # 9 件が ACTIVE になるまで数分〜
+  --format="table(name.scope(collectionGroups),ttlConfig.state)"   # 件数 = 2 + 8 × ユースケース数（terraform の usecases。ユースケース1つなら 10 件）が ACTIVE になるまで数分〜
 ```
 
 `inputs` の TTL は `moved` で新しいリソース名に引き継がれる（再作成されない）。

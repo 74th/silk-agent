@@ -12,6 +12,7 @@ from silk_agent.stores.firestore.retention_backfill import (
     decide_operation,
     decide_output,
     decide_quiesce,
+    decide_rate_limit,
     decide_receipt,
     decide_worker,
     format_reports,
@@ -53,6 +54,7 @@ def test_record_that_already_has_a_deadline_is_not_touched():
         (decide_quiesce, {"state": "answered"}),
         (decide_receipt, {}),
         (decide_worker, {}),
+        (decide_rate_limit, {}),
     ):
         decision = decide({**data, "expire_at": NOW + DAY}, NOW, POLICY)
         assert decision.expire_at is None and decision.reason == ALREADY, decide
@@ -132,6 +134,13 @@ def test_quiesce_receipt_and_worker():
     assert decide_worker({"heartbeat_at": beat.isoformat()}, NOW, POLICY).expire_at == (
         beat + 7 * DAY
     )
+
+
+def test_rate_limit_record_expires_only_after_its_window_has_passed():
+    active = NOW - timedelta(seconds=30)
+    assert decide_rate_limit({"updated_at": active}, NOW, POLICY).reason == "window active"
+    dormant = NOW - 20 * DAY
+    assert decide_rate_limit({"updated_at": dormant}, NOW, POLICY).expire_at == dormant + DAY
 
 
 def test_report_says_when_nothing_was_written():

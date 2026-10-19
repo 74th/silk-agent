@@ -26,6 +26,7 @@ from silk_agent.core.distributed_models import (
 )
 from silk_agent.stores.firestore.errors import convert_firestore_error
 from silk_agent.stores.firestore.ids import document_id
+from silk_agent.stores.firestore.rate_limits import RATE_LIMIT_WINDOW, RECORD_RETENTION
 from silk_agent.stores.firestore.retention import (
     RetentionPolicy,
     command_expiry,
@@ -170,6 +171,16 @@ def decide_worker(data: Mapping[str, Any], now: datetime, policy: RetentionPolic
     )
 
 
+def decide_rate_limit(data: Mapping[str, Any], now: datetime, policy: RetentionPolicy) -> Decision:
+    """Hits older than the one-minute window no longer count; a dormant user's record expires."""
+    if data.get("expire_at") is not None:
+        return Decision(None, ALREADY)
+    updated = _first(data, "updated_at", default=now)
+    if now - updated < RATE_LIMIT_WINDOW:
+        return Decision(None, "window active")
+    return Decision(updated + RECORD_RETENTION)
+
+
 def decide_operation(
     data: Mapping[str, Any],
     command: Mapping[str, Any] | None,
@@ -223,6 +234,7 @@ def _kinds() -> tuple[_Kind, ...]:
         _Kind("quiesce_requests", top("quiesce_requests"), decide_quiesce),
         _Kind("slack_receipts", top("slack_receipts"), decide_receipt),
         _Kind("workers", top("workers"), decide_worker),
+        _Kind("user_rate_limits", top("user_rate_limits"), decide_rate_limit),
     )
 
 
