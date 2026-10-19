@@ -89,9 +89,15 @@ if ! kubectl -n session-sandbox-system get secret silk-agent-sandbox >/dev/null 
 fi
 
 if [[ -z "${KUSTOMIZE_DIR:-}" ]]; then
-  kubectl kustomize "${kustomize_dir}" \
+  # The Sandbox image goes into the ConfigMap's source file *before* kustomize runs: the
+  # ConfigMap name carries a hash of its content, so only then does a new image roll the Bot.
+  work="$(mktemp -d)"
+  trap 'rm -rf "${work}"' EXIT
+  cp -r "${repo_root}/k8s" "${work}/k8s"
+  sed -i "s#image: SANDBOX_RUNTIME_IMAGE#image: ${SANDBOX_RUNTIME_IMAGE}#" \
+    "${work}/k8s/overlays/dev/config/sandbox-config.yaml"
+  kubectl kustomize "${work}/k8s/overlays/dev" \
     | sed "s#image: silk-agent\$#image: ${SILK_AGENT_IMAGE}#" \
-    | sed "s#image: SANDBOX_RUNTIME_IMAGE#image: ${SANDBOX_RUNTIME_IMAGE}#" \
     | kubectl apply -f -
 else
   kubectl kustomize "${kustomize_dir}" | kubectl apply -f -

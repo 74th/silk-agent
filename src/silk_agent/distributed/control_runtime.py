@@ -92,7 +92,10 @@ class RecoveryLoop:
                 if key not in self._cycle_seen:
                     del self._schedule[key]  # released or renewed: forget its backoff
 
+        waiting_for_evidence = 0
+
         async def recover(token: Any) -> int:
+            nonlocal waiting_for_evidence
             key = token.conversation_key
             failures, next_at = self._schedule.get(key, (0, now))
             if next_at > now:
@@ -122,14 +125,16 @@ class RecoveryLoop:
                 if auto is not None:
                     METRICS.inc("control_recovery_total", result=auto)
                     return 1
+                waiting_for_evidence += 1
                 await self._tell_user(token)
                 self._back_off(key, failures)
             METRICS.inc("control_recovery_total", result=state)
             return 1 if state == "released" else 0
 
         released = sum(await asyncio.gather(*(recover(token) for token in expired)))
-        # Expired and not released: each is waiting for stop evidence (recovery_blocked).
-        self._cycle_pending += len(expired) - released
+        # Only the ones waiting for stop evidence (recovery_blocked): an expired ownership that
+        # nobody is waiting on is not an alarm.
+        self._cycle_pending += waiting_for_evidence
         if self._cursor is None:
             METRICS.set("control_recovery_pending", self._cycle_pending)
             self._cycle_seen.clear()

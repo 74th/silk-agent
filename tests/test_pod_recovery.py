@@ -295,3 +295,25 @@ async def test_an_ownership_nobody_waits_on_cannot_hide_a_later_one_that_is_wait
     for _ in range(3):  # three pages: 0-1, 2-3, 4
         await recovery.run_once()
     assert "slack:T:C:4" in asked
+
+
+@pytest.mark.asyncio
+async def test_pending_recovery_gauge_ignores_ownerships_nobody_waits_on():
+    from silk_agent.distributed.metrics import METRICS
+
+    METRICS.reset()
+    waiting = {"value": False}
+
+    async def has_demand(_tok):
+        return waiting["value"]
+
+    recovery = RecoveryLoop(
+        Ownership(token()), CountingCoordinator(), object(), MovingClock(), has_demand=has_demand
+    )
+    await recovery.run_once()
+    assert METRICS.value("control_recovery_pending") == 0  # expired, but no input is waiting
+    waiting["value"] = True
+    recovery._schedule.clear()
+    await recovery.run_once()
+    assert METRICS.value("control_recovery_pending") == 1  # a user waits for stop evidence
+    METRICS.reset()
