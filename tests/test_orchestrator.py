@@ -569,3 +569,19 @@ async def test_the_bookkeeping_of_a_released_conversation_goes_with_it(clock, ch
     arrival = orch.reserve("busy")
     orch._forget_conversation("busy")
     assert orch._arrivals["busy"] == arrival
+
+
+async def test_the_user_is_told_when_it_is_unknown_whether_an_added_message_arrived(clock, channel):
+    from silk_agent.core.orchestrator import MESSAGE_OUTCOME_UNKNOWN
+    from silk_agent.core.ports import AppendOutcomeUnknown
+
+    orch, engines = make(clock, channel, [Tool("bash", duration=100)])
+    await orch.handle(msg("work"))
+    await channel.wait_for(ToolStarted)
+
+    async def writes_then_breaks(text):
+        raise AppendOutcomeUnknown("ConnectionError")
+
+    engines["k"].append = writes_then_breaks
+    await orch.handle(msg("do-once"))
+    assert MESSAGE_OUTCOME_UNKNOWN in [n.text for n in channel.of(Notice)]

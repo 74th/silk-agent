@@ -585,3 +585,68 @@ async def test_sessions_are_never_released_unless_the_registry_opts_in(clock, ch
     for _ in range(20):
         await asyncio.sleep(0)
     assert registry.get("k") is session and released.keys == []
+
+
+async def test_an_append_of_unknown_outcome_is_neither_queued_nor_resent(clock, channel):
+    from silk_agent.core.ports import AppendOutcomeUnknown
+
+    env = Env(clock, channel, [Tool("bash", "sleep", duration=300), Text("never")])
+    session = await env.send("k", "work")
+    await channel.wait_for(TurnStarted)
+
+    async def writes_then_breaks(text):
+        raise AppendOutcomeUnknown("ConnectionError")
+
+    env.engines["k"].append = writes_then_breaks
+    outcome = await session.submit(UserMessage("k", "u", "do-once", input_id="in-1"))
+    assert outcome == "uncertain"
+    assert session._queue.empty()  # a resend would run the instruction twice
+    assert "in-1" not in session._turn_input_ids
+
+
+async def test_a_refused_append_still_queues_the_message(clock, channel):
+    env = Env(clock, channel, [Tool("bash", "sleep", duration=300), Text("later")])
+    session = await env.send("k", "work")
+    await channel.wait_for(TurnStarted)
+
+    async def refuses(text):
+        return False  # nothing was sent
+
+    env.engines["k"].append = refuses
+    assert await session.submit(UserMessage("k", "u", "next")) == "queued"
+
+
+async def test_the_stop_gate_survives_the_idle_timeout_and_ends_with_the_next_user_input(
+    clock, channel
+):
+    registry, released = _release_env(clock, channel)
+    engines = []
+
+    def factory(key):
+        engines.append(
+            FakeAgentEngine(
+                clock,
+                (lambda req: [Tool("bash", "sleep", duration=300), Text("never")])
+                if not engines
+                else (lambda req: [Text("ok")]),
+            )
+        )
+        return engines[-1]
+
+    registry._engine_factory = factory
+    session = await registry.get_or_create("k")
+    await session.submit(UserMessage("k", "u", "work"))
+    await channel.wait_for(TurnStarted)
+    assert await session.stop()
+    await clock.advance(301)  # the idle timeout, after the stop
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert registry.get("k") is session and released.keys == []  # kept: it holds the gate
+    assert await session.notify("make build: exit code 0") == "held"  # still held back
+    # The next user input lifts the gate; the session can then go idle and be released.
+    await session.submit(UserMessage("k", "u", "どうなった？"))
+    await channel.wait_for(TurnFinished)
+    await clock.advance(301)
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert registry.get("k") is None and released.keys == ["k"]

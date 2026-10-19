@@ -13,15 +13,23 @@ from typing import Any
 
 def _error_kind(error: BaseException) -> str:
     names = {cls.__name__ for cls in type(error).__mro__}
-    # The daily query quota answers 403 Forbidden with reason quotaExceeded: it is not a
-    # permission problem, and retrying today does not help.
+    # Both are "quota" errors to BigQuery, but only one means "not today": the daily query
+    # usage quota (QueryUsagePerDay / QueryUsagePerUserPerDay) names itself in the message.
+    # Every other quotaExceeded, rateLimitExceeded and 429 is a short-term limit: wait, retry.
     reasons = {
         str(item.get("reason", ""))
         for item in (getattr(error, "errors", None) or [])
         if isinstance(item, dict)
     }
+    texts = [str(error)] + [
+        str(item.get("message", ""))
+        for item in (getattr(error, "errors", None) or [])
+        if isinstance(item, dict)
+    ]
+    if "quotaExceeded" in reasons and any("QueryUsagePer" in text for text in texts):
+        return "daily quota"
     if reasons & {"quotaExceeded", "rateLimitExceeded"} or names & {"TooManyRequests"}:
-        return "quota"
+        return "rate limit"
     if names & {"PermissionDenied", "Forbidden", "Unauthorized", "RefreshError"}:
         return "permission"
     if names & {"DeadlineExceeded", "ServiceUnavailable", "RetryError", "ConnectionError"}:

@@ -109,9 +109,14 @@ def test_script_emits_success_json_for_data_and_empty_results(
         }
 
 
-def _forbidden_with_reason(reason: str) -> Exception:
+DAILY_MESSAGE = (
+    "usage exceeded the custom quota for QueryUsagePerDay, which is set by your administrator."
+)
+
+
+def _forbidden_with_reason(reason: str, message: str = "denied") -> Exception:
     error = type("Forbidden", (Exception,), {})("403")
-    error.errors = [{"reason": reason, "message": "Quota exceeded: Your usage exceeded..."}]  # type: ignore[attr-defined]
+    error.errors = [{"reason": reason, "message": message}]  # type: ignore[attr-defined]
     return error
 
 
@@ -120,11 +125,15 @@ def _forbidden_with_reason(reason: str) -> Exception:
     [
         (type("PermissionDenied", (Exception,), {})("denied"), "permission failure"),
         (type("ServiceUnavailable", (Exception,), {})("offline"), "communication failure"),
-        # The daily query quota: 403 Forbidden, but a quota problem and not a permission one.
+        # The daily query quota: 403 Forbidden, but not a permission problem, and not for today.
+        (_forbidden_with_reason("quotaExceeded", DAILY_MESSAGE), "daily quota failure"),
+        # Short-term limits (and a quotaExceeded that is not the daily usage one): retry later.
+        (_forbidden_with_reason("rateLimitExceeded", "too many requests"), "rate limit failure"),
         (
-            _forbidden_with_reason("quotaExceeded"),
-            "quota failure",
+            _forbidden_with_reason("quotaExceeded", "Quota exceeded: concurrent queries"),
+            "rate limit failure",
         ),
+        (type("TooManyRequests", (Exception,), {})("429"), "rate limit failure"),
         (_forbidden_with_reason("accessDenied"), "permission failure"),
     ],
 )

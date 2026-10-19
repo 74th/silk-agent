@@ -82,6 +82,17 @@ class DurableInputDelivery:
                 new_state=InputDeliveryState.PENDING,
             )
             return outcome
+        if outcome == "uncertain":
+            # The SDK may have this input already (the append failed part way). Settle it as
+            # unknown, never resend it, and do not hold the conversation's slot.
+            await self._inbox.advance_input(
+                conversation_key=envelope.conversation_key,
+                input_id=envelope.input_id,
+                owner=self._owner,
+                expected=InputDeliveryState.DISPATCHING,
+                new_state=InputDeliveryState.UNCERTAIN,
+            )
+            return "fenced"
         if outcome == "queued":
             return outcome
         accepted = await self._inbox.advance_input(

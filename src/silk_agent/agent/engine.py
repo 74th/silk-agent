@@ -37,7 +37,13 @@ from silk_agent.core.events import (
     TurnFinished,
     Usage,
 )
-from silk_agent.core.ports import Clock, SkillGeneration, SkillSource, TurnRequest
+from silk_agent.core.ports import (
+    AppendOutcomeUnknown,
+    Clock,
+    SkillGeneration,
+    SkillSource,
+    TurnRequest,
+)
 from silk_agent.hooks import HookEvent, ToolEnd, ToolStart
 from silk_agent.skills.sources import link_skills
 
@@ -519,12 +525,13 @@ class ClaudeAgentEngine:
         except asyncio.CancelledError:
             self._sent -= 1
             raise
-        except Exception:
-            # Nothing was sent: counting it would keep the turn waiting for an echo that never
-            # comes. The caller queues the text as a turn of its own.
+        except Exception as exc:
+            # The write failed, but it may have got through before the connection broke: the
+            # text could already be with the agent. Not counting it keeps the turn from
+            # waiting for an echo that may never come; resending it is the caller's no-go.
             self._sent -= 1
             log.exception("could not append a message to the running turn of %s", self._key)
-            return False
+            raise AppendOutcomeUnknown(type(exc).__name__) from exc
         return True
 
     async def reset(self) -> None:

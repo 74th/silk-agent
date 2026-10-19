@@ -136,12 +136,13 @@ class ModelArmorSanitizer:
     ) -> SanitizeResult:
         from google.cloud.modelarmor_v1 import FilterMatchState
 
+        # Every filter must have run before any verdict means anything: a partial or failed
+        # invocation may have skipped the filter that would have matched, and a match from the
+        # others (even a masked one) says nothing about the text a skipped filter would flag.
+        invocation = getattr(result, "invocation_result", None)
+        if invocation is not None and getattr(invocation, "name", "SUCCESS") != "SUCCESS":
+            return SanitizeResult("error", "", f"filters incomplete: {invocation.name}")
         if result.filter_match_state != FilterMatchState.MATCH_FOUND:
-            # "No match" counts only when every filter ran: a partial or failed invocation may
-            # have skipped the filter that would have matched.
-            invocation = getattr(result, "invocation_result", None)
-            if invocation is not None and getattr(invocation, "name", "SUCCESS") != "SUCCESS":
-                return SanitizeResult("error", "", f"filters incomplete: {invocation.name}")
             return SanitizeResult("pass", chunk)
 
         matched: dict[str, Any] = {}

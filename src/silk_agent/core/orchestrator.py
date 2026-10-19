@@ -69,6 +69,10 @@ INPUT_CHECK_FAILED = (
 OUTPUT_BLOCKED = "ポリシーにより、この出力は表示できません。"
 OUTPUT_CHECK_FAILED = "出力を検査できなかったため、表示できません。"
 RESUME_TEXT = "続けてください。"
+MESSAGE_OUTCOME_UNKNOWN = (
+    "追加のメッセージが実行中の処理に届いたか確認できませんでした。"
+    "重複を避けるため再送しません。反映されていなければ、もう一度送ってください。"
+)
 
 
 _FAILURE_KIND = re.compile(r"[A-Za-z_][\w.]{0,80}")
@@ -223,7 +227,8 @@ class ConversationOrchestrator:
                 log.info("input dropped: a stop arrived after it (%s)", key)
                 return
             session = await self._registry.get_or_create(key)
-            await session.submit(message)
+            if await session.submit(message) == "uncertain":
+                await self._channel.send(Notice(key, MESSAGE_OUTCOME_UNKNOWN))
         finally:
             self._arrival_var.reset(token)
             self.release(key, arrival)

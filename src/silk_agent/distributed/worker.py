@@ -369,10 +369,10 @@ class DistributedWorker:
             else:
                 renewal_failed = False
             if renewed is None:
-                if (
-                    renewal_failed
-                    and (token.expires_at - now).total_seconds() > self._renew_seconds
-                ):
+                # Measure from now, after the call: a slow request that then failed may have used
+                # up the lease it started with.
+                remaining = (token.expires_at - self._clock.now()).total_seconds()
+                if renewal_failed and remaining > self._renew_seconds:
                     # A transient store error is not a lost lease: the lease still outlasts the
                     # next renewal, so keep the conversation and try again then. Closing here
                     # would interrupt every conversation of this Worker on one failed call.

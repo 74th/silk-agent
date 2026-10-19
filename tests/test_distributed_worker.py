@@ -858,3 +858,30 @@ async def test_a_silent_watch_costs_one_renewal_interval_not_the_conversation():
     stop.set()
     await asyncio.wait_for(task, 2)
     assert [a.token.conversation_key for a in actors] == ["conversation-a"]
+
+
+@pytest.mark.asyncio
+async def test_a_slow_renewal_that_fails_after_using_up_the_lease_closes_the_actor():
+    clock = Clock()
+
+    class SlowThenFails(Ownership):
+        async def renew(self, *args, **kwargs):
+            clock.value += timedelta(seconds=50)  # the call hangs for 50 s of the 60 s lease
+            raise ConnectionError("store timed out")
+
+    ownership = SlowThenFails([token("conversation-a")])
+    actors = []
+    worker = DistributedWorker(
+        ownership,
+        clock,
+        worker_id="worker-a",
+        worker_incarnation="pod-a:boot-1",
+        actor_factory=lambda owner: actors.append(Actor(owner)) or actors[-1],
+        subscribe=no_watch,
+    )
+    await worker.run_once()
+    await worker._renew_actors()
+    # Judged at the start of the call, 60 s would remain; now only 10 s do: less than one
+    # renewal interval, so the conversation must not keep running on a lease that may end.
+    assert actors[0].closed == 1 and worker.actors == ()
+    assert ownership.released == []

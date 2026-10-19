@@ -60,8 +60,9 @@ class AgentEngine(Protocol):
 
     async def append(self, text: str) -> bool:
         """Add a user message to the running turn without stopping it (the model reads it
-        after the running tool finishes). False when no turn can take it; the caller then
-        queues the message as a new turn."""
+        after the running tool finishes). False when no turn can take it and nothing was
+        sent; the caller then queues the message as a new turn. Raises AppendOutcomeUnknown
+        when the write may have reached the agent: the caller must not send it again."""
         ...
 
     async def reset(self) -> None:
@@ -144,6 +145,11 @@ class SandboxRuntime(Protocol):
 # ---------------------------------------------------------------- SessionStateStore
 
 RunStatus = Literal["idle", "running", "interrupted_crash", "interrupted_shutdown"]
+
+
+class AppendOutcomeUnknown(Exception):
+    """A message may or may not have reached the agent (the write failed part way). Sending it
+    again could run its instructions twice."""
 
 
 @dataclass

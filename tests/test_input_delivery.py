@@ -174,3 +174,27 @@ async def test_delivery_uses_the_current_token_after_a_lease_renewal_mid_operati
     delivery = DurableInputDelivery(inbox, lambda: holder["token"], Session())
     message = UserMessage("conversation", "U1", "hi", input_id="in-1")
     assert await delivery.dispatch(envelope, message) == "queued"
+
+
+@pytest.mark.asyncio
+async def test_an_append_of_unknown_outcome_settles_the_input_as_uncertain_and_never_requeues():
+    inbox = FakeInboxStore()
+    now = datetime(2026, 10, 14, tzinfo=UTC)
+    owner = OwnershipToken(
+        "conversation", "worker", "incarnation", 1, 1, now + timedelta(minutes=1)
+    )
+    inbox.owners[owner.conversation_key] = owner
+    envelope = await inbox.accept_input(
+        conversation_key=owner.conversation_key,
+        input_id="message-1",
+        conversation_generation=1,
+        kind="message",
+        payload={"text": "do-once"},
+        created_at=now,
+    )
+    delivery = DurableInputDelivery(inbox, owner, Session("uncertain"))
+    message = UserMessage(owner.conversation_key, "U1", "do-once")
+    assert await delivery.dispatch(envelope, message) == "fenced"  # the actor does not retry
+    saved = inbox.inputs[(owner.conversation_key, "message-1")]
+    assert saved.delivery_state is InputDeliveryState.UNCERTAIN
+    assert await inbox.list_unfinished(owner.conversation_key) == ()  # not waiting to be resent
