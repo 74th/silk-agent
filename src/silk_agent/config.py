@@ -8,9 +8,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +29,22 @@ class ProgressConfig(_Model):
     timezone: str = "Asia/Tokyo"
     max_tools_shown: int = 20
     tool_display: Literal["name", "summary", "verbose"] = "summary"
+
+    @field_validator("heartbeat_interval_seconds")
+    @classmethod
+    def _positive_interval(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("must be greater than 0")
+        return value
+
+    @field_validator("timezone")
+    @classmethod
+    def _known_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as e:
+            raise ValueError(f"unknown time zone {value!r}") from e
+        return value
 
 
 class SlackConfig(_Model):

@@ -24,7 +24,7 @@ class CommandIdentity(StrictModel):
 class CommandStartRequest(CommandIdentity):
     command: StrictStr = Field(min_length=1)
     cwd: StrictStr = ""
-    timeout_seconds: StrictInt = Field(default=0, ge=0)
+    timeout_seconds: StrictInt = Field(default=0, ge=0, le=86400)
 
 
 class CommandStatusRequest(CommandIdentity):

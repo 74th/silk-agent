@@ -1,6 +1,8 @@
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from silk_agent.core.ports import SkillGeneration
 from silk_agent.skills.sources import (
     GcsSkillSource,
@@ -127,3 +129,12 @@ def test_link_skills_points_cwd_to_generation(tmp_path):
     assert (cwd / ".claude/skills").resolve() == (gen2 / ".claude/skills").resolve()
     link_skills(cwd, None)
     assert not (cwd / ".claude/skills").exists()
+
+
+async def test_gcs_source_rejects_an_object_name_that_escapes_the_generation(tmp_path):
+    gcs = FakeGcs()
+    gcs.blobs = [FakeBlob("skills/../../escaped.txt", 1, "x")]
+    s = GcsSkillSource("gs://bkt/skills", tmp_path / "cache", client=gcs)
+    with pytest.raises(ValueError, match="escapes"):
+        await s.refresh()
+    assert not (tmp_path / "escaped.txt").exists()

@@ -150,8 +150,11 @@ class GcsSkillSource(_CachedSource):
             return self._current
 
         def build(dest: Path) -> None:
+            root = dest.resolve()
             for blob in blobs:
-                target = dest / blob.name[len(self._prefix) :]
+                target = (dest / blob.name[len(self._prefix) :]).resolve()
+                if not target.is_relative_to(root):
+                    raise ValueError(f"skill object escapes the generation: {blob.name!r}")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 blob.download_to_filename(str(target))
 
