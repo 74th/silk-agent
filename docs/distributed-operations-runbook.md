@@ -193,6 +193,8 @@ Firestore の操作数は Cloud Monitoring の `firestore.googleapis.com/api/req
 
 **drain（2026-10-18 00:49〜00:58 UTC、会話 `…1792284522.078759`）**: 8 回の `sleep 8` の実行中（00:49:20 開始）に、`silk-agent worker drain-all` を 00:49:42 に実行（担当 Worker は `draining=true`、全体の割当停止も有効）。turn は中断されず最後まで完了し（command_id `264149e69a384fbfa1245c55e10d1ca9` から `d2ed4545d12d4f13ba026425a64ff6b3` までの8件がすべて finished / foreground）、「完了」の返信が出て、00:50:47 に担当が解放された（`reserved=0`）。drain 中の 00:56 に送った追加メッセージは pending のまま待機し（会話は waiting、担当なし）、`undrain-all` の 00:57:22 以降に処理されて 00:58:00 に完了した（command_id `fe19bcabea1e40788ea09c4c1ef5c781`）。
 
+**ノードの drain と Worker の PodDisruptionBudget（2026-10-19、dev）**: Worker 2台が同じノードにある状態で `kubectl drain <node> --ignore-daemonsets --delete-emptydir-data` を実行した。1台目はすぐ退避され、2台目は「Cannot evict pod as it would violate the pod's disruption budget」で5秒ごとに再試行されて待たされた。代わりの Worker が別のノードで Ready になった後（約30秒）に2台目が退避され、drain は成功した。Ready な Worker が0台になる時間はなかった。確認後に `kubectl uncordon` で戻した。
+
 **この受け入れで未確認、または近似になっている点**
 - 許可外ユーザの STOP は未実施。
 - Worker の異常終了は、実プロセスへの SIGKILL ではなく `kubectl delete pod --grace-period=0 --force` で再現した。
