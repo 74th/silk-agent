@@ -3,9 +3,9 @@ automatically.
 
 A conversation is started on a Worker, that Worker's container is killed (the Pod stays, only
 the process ends, as with an OOM kill) and a follow-up arrives. Expected: the conversation
-recovers without a manual `recovery confirm-stopped`, and the agent still knows what it was told. (The evidence, `auto:incarnation-replaced:<pod>`, is
-not kept: the next owner's record replaces it. The Pod is still there, so it cannot be the
-Pod-absence evidence.)
+recovers without a manual `recovery confirm-stopped`, and the agent still knows what it was told.
+(The evidence, `auto:incarnation-replaced:<pod>`, is not kept: the next owner's record replaces
+it. The Pod is still there, so it cannot be the Pod-absence evidence.)
 
     uv run python scripts/acceptance_container_restart.py
 """
@@ -149,8 +149,25 @@ async def main() -> None:
     async def timeline():
         """Print each change of the ownership, with the seconds since the follow-up."""
         record = await e.own.get(key)
-        new_owner = await e.own.get(key)
+        doc = await e.c.collection(f"{P}_ownership").document(e.conv._conversation_id(key)).get()
+        phase = (doc.to_dict() or {}).get("phase")
+        worker = record.worker_id[-5:] if record else None
+        state = f"epoch={record.epoch if record else None} phase={phase} worker=...{worker}"
+        if not seen or seen[-1] != state:
+            seen.append(state)
+            print(f"  +{time.time() - started:4.0f}s {state}", flush=True)
+        return await second()
 
+    outputs = await e.wait(timeline, 420)
+    print("recovered and answered in %.0fs" % (time.time() - started))
+    e.show(outputs, len(outputs) - 3)
+    answer = " ".join(
+        r["payload"]["event"].get("text", "")
+        for r in outputs
+        if r["payload"]["kind"] == "AssistantText"
+    )
+    assert "MANGO" in answer.upper(), answer
+    new_owner = await e.own.get(key)
     print("new owner pod:", new_owner.worker_id if new_owner else None)
 
 
