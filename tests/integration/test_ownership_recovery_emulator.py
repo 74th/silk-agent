@@ -198,3 +198,74 @@ async def test_list_expired_page_covers_every_expired_ownership_in_pages():
         assert cursor is None and seen == expired_keys
     finally:
         env.client.close()
+
+
+async def test_the_allocator_picks_the_worker_with_the_fewest_reservations():
+    env = Env()
+    try:
+        busy = WorkerRecord("worker-busy", "inc-busy", 4, 0, 0, False, env.now)
+        idle = WorkerRecord("worker-idle", "inc-idle", 4, 0, 0, False, env.now)
+        await env.directory.register(busy)
+        await env.directory.register(idle)
+        # Three conversations land on "busy" first (it is the only candidate offered).
+        for number in range(3):
+            await env.assign(f"conversation-fill-{number}", busy, activate=False)
+        busy_now = await env.directory.get_worker("worker-busy")
+        idle_now = await env.directory.get_worker("worker-idle")
+        assert (busy_now.reserved, idle_now.reserved) == (3, 0)
+        # With both offered, busy first, the new conversation goes to the idle one.
+        await env.inbox.accept_input(
+            conversation_key="conversation-new",
+            input_id="input-new",
+            conversation_generation=1,
+            kind="message",
+            payload={"text": "hello"},
+            created_at=env.now,
+        )
+        token = await env.allocator.allocate(
+            allocator_id="test",
+            conversation_key="conversation-new",
+            candidates=(busy_now, idle_now),
+            now=env.now,
+            allocator_lease_expires_at=env.now + timedelta(seconds=30),
+            worker_lease_expires_at=env.now + timedelta(seconds=5),
+        )
+        assert token is not None and token.worker_id == "worker-idle"
+    finally:
+        env.client.close()
+
+
+async def test_holds_ownership_tells_a_renewed_owner_from_a_fenced_one():
+    from silk_agent.stores.firestore.conversations import FirestoreConversationStore
+
+    env = Env()
+    try:
+        conversations = FirestoreConversationStore(env.client, collection_prefix=env.prefix)
+        worker = WorkerRecord("worker-h", "inc-h", 4, 0, 0, False, env.now)
+        await env.directory.register(worker)
+        token = await env.assign("conversation-holds", worker, activate=True)
+        assert await conversations.holds_ownership(token)
+        # A renewal changes only the expiry: the old token is still the holder.
+        renewed = await env.ownership.renew(
+            token, now=env.now, lease_expires_at=env.now + timedelta(minutes=30)
+        )
+        assert renewed is not None and await conversations.holds_ownership(token)
+        # Another epoch took over: the old writer is fenced.
+        taken = token.__class__(
+            token.conversation_key,
+            token.worker_id,
+            token.worker_incarnation,
+            token.epoch + 1,
+            token.conversation_generation,
+            token.expires_at + timedelta(minutes=30),
+        )
+        from silk_agent.stores.firestore.codec import encode_record
+
+        owner_ref = env.inbox._collection("ownership").document(
+            env.inbox._conversation_id("conversation-holds")
+        )
+        await owner_ref.set({**encode_record(taken), "phase": "active"})
+        assert not await conversations.holds_ownership(token)
+        assert await conversations.holds_ownership(taken)
+    finally:
+        env.client.close()

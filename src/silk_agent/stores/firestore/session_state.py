@@ -6,6 +6,7 @@ lost its assignment cannot overwrite the new owner's turn state.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any
 
@@ -13,11 +14,15 @@ from silk_agent.core.distributed_models import OwnershipToken
 from silk_agent.core.ports import ConversationState
 from silk_agent.stores.firestore.conversations import FirestoreConversationStore
 
-_ATTEMPTS = 3
+_ATTEMPTS = 6
 
 
 class OwnershipLostError(RuntimeError):
     """The state write was fenced out; the caller must stop acting as the owner."""
+
+
+class StateConflictError(RuntimeError):
+    """The state write lost every race for the version, but the writer is still the owner."""
 
 
 async def _read_state(
@@ -26,7 +31,7 @@ async def _read_state(
     record = await conversations.get_conversation(conversation_key)
     if record is None:
         return None
-    return ConversationState(
+    state = ConversationState(
         conversation_key=conversation_key,
         agent_session_id=record.get("sdk_session_id"),
         status=record.get("turn_status", "idle"),
@@ -39,6 +44,21 @@ async def _read_state(
         progress_snapshot=dict(record.get("progress_snapshot") or {}),
         history_reset_reason=record.get("history_reset_reason"),
     )
+    state.persisted = _owned_fields(state)
+    return state
+
+
+def _owned_fields(state: ConversationState) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "sdk_session_id": state.agent_session_id,
+        "turn_status": state.status,
+        "turn_id": state.turn_id,
+        "bot_instance_id": state.bot_instance_id,
+        "running_command_ids": list(state.running_command_ids),
+    }
+    if state.history_reset_reason:
+        fields["history_reset_reason"] = state.history_reset_reason
+    return fields
 
 
 class FirestoreSessionStateStore:
@@ -54,16 +74,17 @@ class FirestoreSessionStateStore:
         return await _read_state(self._conversations, conversation_key)
 
     async def put(self, state: ConversationState) -> None:
-        patch: dict[str, Any] = {
-            "sdk_session_id": state.agent_session_id,
-            "turn_status": state.status,
-            "turn_id": state.turn_id,
-            "bot_instance_id": state.bot_instance_id,
-            "running_command_ids": list(state.running_command_ids),
-        }
-        if state.history_reset_reason:
-            patch["history_reset_reason"] = state.history_reset_reason
-        for _ in range(_ATTEMPTS):
+        owned = _owned_fields(state)
+        # Only what changed since the state was read (everything, for one never read).
+        patch = (
+            owned
+            if state.persisted is None
+            else {k: v for k, v in owned.items() if state.persisted.get(k) != v}
+        )
+        if not patch:
+            return
+        owner = None
+        for attempt in range(_ATTEMPTS):
             # Re-read each attempt: a lease renewal can replace the token between tries.
             owner = self._owner_for(state.conversation_key)
             if owner is None:
@@ -78,8 +99,14 @@ class FirestoreSessionStateStore:
                 )
                 is not None
             ):
+                state.persisted = owned
                 return
-        raise OwnershipLostError("conversation state was fenced or changed concurrently")
+            await asyncio.sleep(0.02 * (attempt + 1))  # others are writing: let them finish
+        # The version kept moving, or this writer was fenced out. Only the second means the
+        # caller must stop acting as the owner.
+        if owner is not None and await self._conversations.holds_ownership(owner):
+            raise StateConflictError("conversation state kept changing concurrently")
+        raise OwnershipLostError("conversation state was fenced")
 
     async def list_running(self) -> list[ConversationState]:
         # Distributed recovery is driven by expired ownership, not a scan of running turns.

@@ -121,7 +121,7 @@ class FirestoreAllocator:
                     return None
                 previous_epoch = old_epoch
 
-            selected: tuple[WorkerRecord, firestore.AsyncDocumentReference] | None = None
+            eligible: list[tuple[WorkerRecord, firestore.AsyncDocumentReference]] = []
             for candidate, snapshot, reservation_snapshot, worker_ref in zip(
                 candidates,
                 worker_snapshots,
@@ -142,10 +142,12 @@ class FirestoreAllocator:
                     continue
                 if reservation_snapshot.exists:
                     continue
-                selected = current, worker_ref
-                break
-            if selected is None:
+                eligible.append((current, worker_ref))
+            if not eligible:
                 return None
+            # The Worker with the fewest reservations (the first of equals): filling the first
+            # in the list would pile conversations on one Worker, and on a broken one first.
+            selected = min(eligible, key=lambda item: item[0].reserved)
 
             worker, worker_ref = selected
             reservation_ref = (

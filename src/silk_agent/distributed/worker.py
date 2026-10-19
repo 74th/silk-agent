@@ -244,6 +244,10 @@ class DistributedWorker:
                         if loop.time() >= next_renewal:
                             await self._renew_actors()
                             next_renewal = loop.time() + self._renew_seconds
+                            # The snapshot listener can die without telling us (its error does
+                            # not reach the callback): read the assignments again every
+                            # renewal, so a missed notification costs one interval at most.
+                            changed.set()
                         change_task = asyncio.create_task(changed.wait())
                         stop_task = asyncio.create_task(stop.wait())
                         try:
@@ -365,6 +369,14 @@ class DistributedWorker:
             else:
                 renewal_failed = False
             if renewed is None:
+                if (
+                    renewal_failed
+                    and (token.expires_at - now).total_seconds() > self._renew_seconds
+                ):
+                    # A transient store error is not a lost lease: the lease still outlasts the
+                    # next renewal, so keep the conversation and try again then. Closing here
+                    # would interrupt every conversation of this Worker on one failed call.
+                    continue
                 if not renewal_failed and await self._adopt_stored_successor(token, actor):
                     continue
                 if not renewal_failed:

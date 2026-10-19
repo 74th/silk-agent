@@ -672,6 +672,28 @@ def ownership_matches(
     )
 
 
+def owner_still_holds(
+    owner_data: dict[str, Any], conversation: dict[str, Any], owner: OwnershipToken, now: datetime
+) -> bool:
+    """Is the stored ownership still `owner`'s? A lease renewal changes only the expiry, so
+    this compares who holds it (epoch, incarnation, generation) and that the stored lease is
+    live, rather than the whole token."""
+    try:
+        saved = decode_record(owner_data, OwnershipToken)
+    except (TypeError, ValueError):
+        return False
+    return (
+        owner_data.get("phase") == "active"
+        and saved.conversation_key == owner.conversation_key
+        and saved.worker_id == owner.worker_id
+        and saved.worker_incarnation == owner.worker_incarnation
+        and saved.epoch == owner.epoch
+        and saved.conversation_generation == owner.conversation_generation
+        and saved.expires_at > now
+        and conversation.get("conversation_generation") == owner.conversation_generation
+    )
+
+
 def _validate_utc(value: datetime, field_name: str) -> None:
     if value.tzinfo is None or value.utcoffset() != timedelta(0):
         raise ValueError(f"{field_name} must be timezone-aware UTC")

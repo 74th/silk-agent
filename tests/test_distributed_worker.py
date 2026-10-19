@@ -491,8 +491,7 @@ async def test_worker_undrain_resumes_assignment_processing():
     assert await worker.run_once() == 1
 
 
-@pytest.mark.asyncio
-async def test_renewal_exception_closes_actor_without_releasing_ownership():
+def _unavailable_worker(clock):
     class Unavailable(Ownership):
         async def renew(self, *args, **kwargs):
             raise ConnectionError("store offline")
@@ -501,17 +500,38 @@ async def test_renewal_exception_closes_actor_without_releasing_ownership():
     actors = []
     worker = DistributedWorker(
         ownership,
-        Clock(),
+        clock,
         worker_id="worker-a",
         worker_incarnation="pod-a:boot-1",
         actor_factory=lambda owner: actors.append(Actor(owner)) or actors[-1],
         subscribe=no_watch,
     )
+    return ownership, actors, worker
+
+
+@pytest.mark.asyncio
+async def test_a_transient_renewal_error_keeps_the_actor_while_the_lease_lasts():
+    # 60 s lease, renewed every 20 s: after one failed call 40 s remain, so the next renewal
+    # still comes in time. Closing now would interrupt the conversation for a blip.
+    clock = Clock()
+    ownership, actors, worker = _unavailable_worker(clock)
     await worker.run_once()
+    await worker._renew_actors()
+    assert actors[0].closed == 0
+    assert worker.actors == ("conversation-a",)
+    assert ownership.released == []
+
+
+@pytest.mark.asyncio
+async def test_renewal_errors_close_the_actor_when_the_lease_is_about_to_end():
+    clock = Clock()
+    ownership, actors, worker = _unavailable_worker(clock)
+    await worker.run_once()
+    clock.value += timedelta(seconds=45)  # 15 s left: less than one renewal interval
     await worker._renew_actors()
     assert actors[0].closed == 1
     assert worker.actors == ()
-    assert ownership.released == []
+    assert ownership.released == []  # never released without proof the SDK stopped
 
 
 @pytest.mark.asyncio
@@ -812,3 +832,29 @@ async def test_close_marks_the_worker_draining_before_releasing_any_actor():
     worker._worker_directory = Directory()
     await worker.aclose()
     assert events == [("draining", True), ("release", "conversation-a")]
+
+
+@pytest.mark.asyncio
+async def test_a_silent_watch_costs_one_renewal_interval_not_the_conversation():
+    import asyncio
+
+    clock = Clock()
+    ownership = Ownership([])  # nothing assigned when the Worker starts
+    actors = []
+    worker = DistributedWorker(
+        ownership,
+        clock,
+        worker_id="worker-a",
+        worker_incarnation="pod-a:boot-1",
+        actor_factory=lambda owner: actors.append(Actor(owner)) or actors[-1],
+        subscribe=no_watch,  # the listener is dead: it never reports anything
+        renew_seconds=0.05,
+    )
+    stop = asyncio.Event()
+    task = asyncio.create_task(worker.run(stop))
+    await asyncio.sleep(0.02)
+    ownership.tokens["conversation-a"] = token("conversation-a")  # assigned; no notification
+    await asyncio.sleep(0.3)
+    stop.set()
+    await asyncio.wait_for(task, 2)
+    assert [a.token.conversation_key for a in actors] == ["conversation-a"]
