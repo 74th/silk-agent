@@ -203,3 +203,20 @@ def test_an_incomplete_invocation_is_never_shown_whatever_matched():
     )
     for out in (ignored, masked, harmful):
         assert out.status == "error" and out.text == ""
+
+
+async def test_sanitize_returns_the_error_of_a_partial_invocation_not_an_empty_pass():
+    # interpret() says "error"; sanitize() used to join that chunk as empty text and answer
+    # "pass", so the user got a blank reply and no notice that the check had failed.
+    c = FakeClient([result(ma.InvocationResult.PARTIAL, pi_and_jailbreak=pi())])
+    r = await make(c, ignored_filters={"pi_and_jailbreak"}).sanitize("contact private@example.com")
+    assert r.status == "error" and r.text == ""
+
+
+async def test_one_unchecked_chunk_makes_the_whole_output_unshowable():
+    first = result(sdp=sdp(state=NO_MATCH), pi=pi(NO_MATCH))
+    second = result(ma.InvocationResult.FAILURE, pi=pi(NO_MATCH))
+    c = FakeClient([first, second])
+    r = await make(c, chunk_chars=5).sanitize("aaaaa" + "bbbbb")
+    assert len(c.requests) == 2
+    assert r.status == "error" and r.text == ""  # not "aaaaa" shown with a hole after it

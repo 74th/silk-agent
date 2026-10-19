@@ -585,3 +585,40 @@ async def test_the_user_is_told_when_it_is_unknown_whether_an_added_message_arri
     engines["k"].append = writes_then_breaks
     await orch.handle(msg("do-once"))
     assert MESSAGE_OUTCOME_UNKNOWN in [n.text for n in channel.of(Notice)]
+
+
+async def test_an_unchecked_reply_is_reported_as_a_failed_check_not_delivered_blank(clock, channel):
+    from google.cloud import modelarmor_v1 as ma
+
+    from silk_agent.core.events import AssistantText, GuardBlocked
+    from silk_agent.guards.model_armor import ModelArmorSanitizer
+
+    class Client:
+        async def sanitize_model_response(self, request):
+            filter_result = ma.FilterResult(
+                pi_and_jailbreak_filter_result=ma.PiAndJailbreakFilterResult(
+                    match_state=ma.FilterMatchState.MATCH_FOUND
+                )
+            )
+            return type(
+                "Response",
+                (),
+                {
+                    "sanitization_result": ma.SanitizationResult(
+                        filter_match_state=ma.FilterMatchState.MATCH_FOUND,
+                        filter_results={"pi_and_jailbreak": filter_result},
+                        invocation_result=ma.InvocationResult.PARTIAL,
+                    )
+                },
+            )()
+
+    sanitizer = ModelArmorSanitizer(
+        template="projects/p/locations/l/templates/t",
+        client=Client(),
+        ignored_filters={"pi_and_jailbreak"},
+    )
+    orch, _ = make(clock, channel, [Text("unused")], sanitizer=sanitizer)
+    await orch.emit(AssistantText("k", "t1", "contact private@example.com"))
+    assert channel.of(AssistantText) == []  # no blank (or any) reply
+    blocked = channel.of(GuardBlocked)
+    assert len(blocked) == 1 and blocked[0].stage == "output"
