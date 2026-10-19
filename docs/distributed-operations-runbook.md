@@ -195,6 +195,8 @@ Firestore の操作数は Cloud Monitoring の `firestore.googleapis.com/api/req
 
 **ノードの drain と Worker の PodDisruptionBudget（2026-10-19、dev）**: Worker 2台が同じノードにある状態で `kubectl drain <node> --ignore-daemonsets --delete-emptydir-data` を実行した。1台目はすぐ退避され、2台目は「Cannot evict pod as it would violate the pod's disruption budget」で5秒ごとに再試行されて待たされた。代わりの Worker が別のノードで Ready になった後（約30秒）に2台目が退避され、drain は成功した。Ready な Worker が0台になる時間はなかった。確認後に `kubectl uncordon` で戻した。
 
+**Slack が `ok:false` を返したときの出力の扱い（2026-10-19、dev、実 Slack）**: 存在しないチャンネル（`slack:<team>:CNOSUCH0002:<ts>`）あての会話に入力を1件入れ、Worker が出力した。Slack は `channel_not_found` で拒否し、`TurnStarted` と `AssistantText` の Outbox は `failed`（`attempt_count` 1、再試行なし）になった。会話は止まらず、状態を表す出力と `TurnFinished` は `delivered` になった。Slack には何も投稿されていない。記録には `expire_at` を付けて後始末した。
+
 **この受け入れで未確認、または近似になっている点**
 - 許可外ユーザの STOP は未実施。
 - Worker の異常終了は、実プロセスへの SIGKILL ではなく `kubectl delete pod --grace-period=0 --force` で再現した。
