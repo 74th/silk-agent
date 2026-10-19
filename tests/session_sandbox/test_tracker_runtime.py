@@ -383,7 +383,7 @@ async def test_tracker_passes_only_the_marker_and_the_callers_env_to_the_process
 
     tracker = Tracker(journal, Stub(), generation=1)
 
-    async def consume(command_id, call, marker):
+    async def consume(command_id, call, marker, pgid_path=None):
         return None
 
     monkeypatch.setattr(tracker, "_consume", consume)
@@ -393,6 +393,10 @@ async def test_tracker_passes_only_the_marker_and_the_callers_env_to_the_process
     assert set(env) == {"CALLER_VAR", tracker_module._TRACKER_MARKER_ENV}
     assert env["CALLER_VAR"] == "x"
     assert "AGENT_USER_EMAIL" not in env
+    # the command runs behind a wrapper that records its process group, then becomes it
+    command = list(request.config.command)
+    assert command[:2] == ["/bin/sh", "-c"] and command[-1] == "true"
+    assert command[4] == tracker_module._pgid_path("c1")
 
 
 async def _identity_missing(_pid, _marker):
@@ -629,15 +633,14 @@ async def test_a_group_that_cannot_be_identified_or_signalled_is_unknown(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_a_command_that_ended_before_its_group_was_read_is_checked_by_its_marker(
+async def test_a_command_that_ended_before_its_group_was_read_still_has_its_group_stopped(
     tmp_path, monkeypatch
 ):
-    """A fast command is gone before its identity can be read; its leftovers are found by the
-    marker in their environment instead, and a command with none is simply finished."""
+    """The wrapper records the group id before the command can exit, so a fast command that
+    leaves a child behind is covered even when the child drops its environment."""
     import os
     import signal
     import subprocess
-    import uuid
 
     monkeypatch.setattr(tracker_module, "GROUP_TERM_WAIT_SECONDS", 1.0)
     monkeypatch.setattr(tracker_module, "GROUP_KILL_WAIT_SECONDS", 1.0)
@@ -650,16 +653,39 @@ async def test_a_command_that_ended_before_its_group_was_read_is_checked_by_its_
             return type("Result", (), {"exit_code": done.returncode, "stdout": done.stdout})()
 
     tracker = Tracker(CommandJournal(tmp_path / "commands.json"), Stub(), 1)
-    marker = uuid.uuid4().hex
+    pgid_file = tmp_path / "pgid"
+    pgid_path = str(pgid_file)
 
-    assert await tracker._group_gone_after_exit({}, marker) == (True, "")  # nothing carries it
+    # nothing recorded and no identity: the group is unknown, not "gone"
+    gone, detail = await tracker._group_gone_after_exit({}, pgid_path)
+    assert not gone and "unknown" in detail
 
-    env = {**os.environ, tracker_module._TRACKER_MARKER_ENV: marker}
-    leftover = subprocess.Popen(["sleep", "60"], env=env, start_new_session=True)  # noqa: ASYNC220
+    # a command that ends at once, leaving a child that dropped the tracker's environment
+    shell = subprocess.Popen(  # noqa: ASYNC220
+        [
+            *tracker_module._PGID_WRAPPER,
+            pgid_path,
+            "sh",
+            "-c",
+            f"env -u {tracker_module._TRACKER_MARKER_ENV} sleep 60 &",
+        ],
+        start_new_session=True,
+    )
+    shell.wait(timeout=5)
     try:
-        assert await tracker._group_gone_after_exit({}, marker) == (True, "")
-        assert leftover.wait(timeout=5) == -signal.SIGTERM
+        assert pgid_file.exists()
+        assert await tracker._group_gone_after_exit({}, pgid_path) == (True, "")
+        assert not pgid_file.exists()  # the record is removed
+        for _ in range(20):  # the child is signalled, not merely waited for
+            try:
+                os.killpg(shell.pid, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.1)
+        else:
+            raise AssertionError("the child of the command is still running")
     finally:
-        if leftover.poll() is None:
-            os.killpg(leftover.pid, signal.SIGKILL)
-            leftover.wait()
+        try:
+            os.killpg(shell.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

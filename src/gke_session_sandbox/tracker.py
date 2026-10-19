@@ -29,6 +29,19 @@ from .errors import (
 
 _COMMAND_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _TRACKER_MARKER_ENV = "GKE_SESSION_SANDBOX_TRACKER_MARKER"
+# Records the command's process group id, then becomes the command (same pid, same group).
+_PGID_WRAPPER = (
+    "/bin/sh",
+    "-c",
+    'printf "%s" "$$" > "$1.tmp" && mv "$1.tmp" "$1" && shift && exec "$@"',
+    "tracker-wrapper",
+)
+
+
+def _pgid_path(command_id: str) -> str:
+    return f"/tmp/.tracker-pgid-{command_id}"
+
+
 _SIGNALS = {
     "SIGINT": process_pb2.SIGNAL_SIGINT,
     "SIGTERM": process_pb2.SIGNAL_SIGTERM,
@@ -581,14 +594,21 @@ class Tracker:
         marker = uuid.uuid4().hex
         process_env = dict(record["env"])
         process_env[_TRACKER_MARKER_ENV] = marker
-        config = process_pb2.ProcessConfig(command=record["command"], env_vars=process_env)
+        # sandboxd starts the command as the leader of its own process group, so the shell's own
+        # pid is the group id. Writing it before `exec` records the group even for a command that
+        # ends before /proc can be read, and does not depend on what the command does with its
+        # environment.
+        pgid_path = _pgid_path(command_id)
+        config = process_pb2.ProcessConfig(
+            command=[*_PGID_WRAPPER, pgid_path, *record["command"]], env_vars=process_env
+        )
         if record["cwd"]:
             config.cwd = record["cwd"]
         start = process_pb2.StartRequest(config=config)
         if record["pty"]:
             start.pty.CopyFrom(process_pb2.PTY(cols=record["pty_cols"], rows=record["pty_rows"]))
         call = self.stub.Start(start)
-        stream_task = asyncio.create_task(self._consume(command_id, call, marker))
+        stream_task = asyncio.create_task(self._consume(command_id, call, marker, pgid_path))
         timeout = record["timeout_seconds"] or 120
         try:
             await asyncio.wait_for(asyncio.shield(stream_task), timeout=timeout)
@@ -614,7 +634,9 @@ class Tracker:
         finally:
             self.tasks.pop(command_id, None)
 
-    async def _consume(self, command_id: str, call, marker: str) -> None:
+    async def _consume(
+        self, command_id: str, call, marker: str, pgid_path: str | None = None
+    ) -> None:
         output_failure: Exception | None = None
         async for event in call:
             kind = event.WhichOneof("event")
@@ -663,7 +685,7 @@ class Tracker:
             elif kind == "exit":
                 code = event.exit.exit_code
                 record = await self.journal.get(command_id)
-                gone, group_detail = await self._group_gone_after_exit(record, marker)
+                gone, group_detail = await self._group_gone_after_exit(record, pgid_path)
                 values = {
                     "state": "finished" if gone else "unknown",
                     "exit_code": code,
@@ -688,33 +710,26 @@ class Tracker:
             )
 
     async def _group_gone_after_exit(
-        self, record: dict[str, Any] | None, marker: str | None = None
+        self, record: dict[str, Any] | None, pgid_path: str | None = None
     ) -> tuple[bool, str]:
         """The shell's ExitEvent does not end the command's other processes. Stop what is left
-        of the command (SIGTERM, then SIGKILL after a wait) and confirm it is gone.
+        of its process group (SIGTERM, then SIGKILL after a wait) and confirm it is gone.
 
-        The command's processes are found by its process group when that was read, and
-        otherwise (a command that ended before the group could be read) by the marker in their
-        environment. A command whose leftovers cannot be shown gone is `unknown`, so the Sandbox
-        is not suspended under a process that may still run."""
-        pgid = ((record or {}).get("identity") or {}).get("pgid")
-        by_group = isinstance(pgid, int) and pgid > 1
-        if not by_group and not marker:
-            return False, "the command's process group is unknown (its identity was not read)"
+        The group id is the one the command recorded when it started (`pgid_path`), or the one
+        read from /proc. A command whose group is unknown, or whose leftovers cannot be shown
+        gone, is `unknown`, so the Sandbox is not suspended under a process that may still run."""
+        pgid = await self._recorded_pgid(pgid_path)
+        if pgid is None:
+            pgid = ((record or {}).get("identity") or {}).get("pgid")
+        if not isinstance(pgid, int) or pgid <= 1:
+            return False, "the command's process group is unknown"
 
-        async def remaining() -> tuple[bool, str]:
-            if by_group:
-                return await self._group_present(cast(int, pgid))
-            pids = await self._marked_processes(cast(str, marker))
-            return bool(pids), " ".join(pids)
-
-        async def signal_all(signal_name: str, detail: str) -> int:
-            target = f"-- -{pgid}" if by_group else f"-- {detail}"
+        async def signal_group(signal_name: str) -> int:
             sent = await self.stub.Execute(
                 process_pb2.ExecuteRequest(
                     config=process_pb2.ProcessConfig(
                         # `-s NAME -- ARGS` is the form dash (the image's /bin/sh) accepts.
-                        command=["/bin/sh", "-c", f"kill -s {signal_name} {target}"]
+                        command=["/bin/sh", "-c", f"kill -s {signal_name} -- -{pgid}"]
                     )
                 ),
                 timeout=3,
@@ -726,41 +741,41 @@ class Tracker:
                 ("TERM", GROUP_TERM_WAIT_SECONDS),
                 ("KILL", GROUP_KILL_WAIT_SECONDS),
             ):
-                present, detail = await remaining()
+                present, _detail = await self._group_present(pgid)
                 if not present:
                     return True, ""
-                if (code := await signal_all(signal_name, detail)) not in (0, 1):
-                    return False, f"could not signal the command's processes: {code}"
+                if (code := await signal_group(signal_name)) not in (0, 1):
+                    return False, f"could not signal the command's process group: {code}"
                 deadline = asyncio.get_running_loop().time() + wait
                 while asyncio.get_running_loop().time() < deadline:
                     await asyncio.sleep(0.25)
-                    present, detail = await remaining()
+                    present, _detail = await self._group_present(pgid)
                     if not present:
                         return True, ""
-            present, detail = await remaining()
+            present, detail = await self._group_present(pgid)
             if not present:
                 return True, ""
-            return False, f"processes of the command remain after SIGKILL: {detail}"
+            return False, f"processes of the command's group remain after SIGKILL: {detail}"
         except (grpc.aio.AioRpcError, RuntimeError, OSError) as exc:
-            return False, f"could not confirm the command's processes are gone: {exc}"
+            return False, f"could not confirm the command's process group is gone: {exc}"
 
-    async def _marked_processes(self, marker: str) -> list[str]:
-        """OS pids of the processes that carry this command's marker in their environment."""
-        scan = (
-            "for f in /proc/[0-9]*/environ; do "
-            f"if tr '\\000' '\\n' < \"$f\" 2>/dev/null "
-            f"| grep -Fxq '{_TRACKER_MARKER_ENV}={marker}'; "
-            "then p=${f#/proc/}; printf '%s\\n' \"${p%/environ}\"; fi; done; true"
-        )
-        result = await self.stub.Execute(
-            process_pb2.ExecuteRequest(
-                config=process_pb2.ProcessConfig(command=["/bin/sh", "-c", scan])
-            ),
-            timeout=3,
-        )
-        if result.exit_code != 0:
-            raise RuntimeError("could not scan the command's processes")
-        return [line for line in result.stdout.decode().split() if line.isdigit()]
+    async def _recorded_pgid(self, pgid_path: str | None) -> int | None:
+        """The group id the command wrote before it started, or None if it did not."""
+        if not pgid_path:
+            return None
+        try:
+            result = await self.stub.Execute(
+                process_pb2.ExecuteRequest(
+                    config=process_pb2.ProcessConfig(
+                        command=["/bin/sh", "-c", f'cat "{pgid_path}"; rm -f "{pgid_path}"']
+                    )
+                ),
+                timeout=3,
+            )
+        except grpc.aio.AioRpcError:
+            return None
+        text = result.stdout.decode(errors="replace").strip() if result.exit_code == 0 else ""
+        return int(text) if text.isdigit() else None
 
     async def _handle_output_failure(self, command_id: str, error: Exception) -> None:
         record = await self.journal.get(command_id)

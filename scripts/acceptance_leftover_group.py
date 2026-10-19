@@ -81,6 +81,20 @@ async def main() -> None:
         left = await leftovers()
         print("   sleep processes left afterwards:", left)
         assert left == 0, "the leftover child that ignores TERM was not killed"
+
+        t = time.time()
+        ran = await runtime.run_command(
+            key,
+            "env -u GKE_SESSION_SANDBOX_TRACKER_MARKER sleep 300 & echo started",
+            timeout_seconds=120,
+        )
+        print(
+            f"4. leftover that dropped the tracker's environment: {ran.outcome} in {time.time() - t:.1f}s"
+        )
+        assert ran.outcome == "completed", ran
+        left = await leftovers()
+        print("   sleep processes left afterwards:", left)
+        assert left == 0, "the leftover child that dropped its environment was not stopped"
         print("OK")
     finally:
         saved = await manager.repository.get(sandbox_key)
