@@ -4,6 +4,7 @@ import pytest
 
 from silk_agent.core.distributed_models import InputDeliveryState, OwnershipToken
 from silk_agent.distributed.completion import CompletionInputDelivery
+from silk_agent.testing.fakes import Text
 from tests.fakes.distributed_inbox import FakeInboxStore
 
 
@@ -203,3 +204,51 @@ async def test_queued_completion_is_not_appended_after_a_stop_or_an_owner_change
         "claimed_elsewhere"
     )
     assert session.input_id is None
+
+
+@pytest.mark.asyncio
+async def test_a_completion_whose_append_outcome_is_unknown_is_settled_uncertain_not_resent(
+    clock, channel
+):
+    from silk_agent.core.events import Notice, TurnStarted
+    from silk_agent.core.ports import AppendOutcomeUnknown
+    from silk_agent.core.session import AgentSessionRegistry, SessionSettings
+    from silk_agent.testing.fakes import FakeAgentEngine, Tool
+
+    inbox = FakeInboxStore()
+    now = datetime.now(UTC)
+    owner = OwnershipToken(
+        "conversation", "worker", "incarnation", 1, 1, now + timedelta(minutes=1)
+    )
+    inbox.owners[owner.conversation_key] = owner
+    envelope = await inbox.accept_input(
+        conversation_key=owner.conversation_key,
+        input_id="completion-1",
+        conversation_generation=1,
+        kind="command_finished",
+        payload={"command_id": "cmd-1", "state": "finished", "result": {"output": {}}},
+        created_at=now,
+    )
+    engines = []
+
+    def factory(key):
+        engines.append(FakeAgentEngine(clock, [Tool("bash", duration=300), Text("never")]))
+        return engines[-1]
+
+    registry = AgentSessionRegistry(factory, channel.send, clock, SessionSettings())
+    session = await registry.get_or_create(owner.conversation_key)
+    from silk_agent.core.events import UserMessage
+
+    await session.submit(UserMessage(owner.conversation_key, "u", "work"))
+    await channel.wait_for(TurnStarted)
+
+    async def writes_then_breaks(text):
+        raise AppendOutcomeUnknown("ConnectionError")
+
+    engines[0].append = writes_then_breaks
+    outcome = await CompletionInputDelivery(inbox, owner, session).dispatch(envelope)
+    assert outcome == "uncertain"
+    saved = inbox.inputs[(owner.conversation_key, envelope.input_id)]
+    assert saved.delivery_state is InputDeliveryState.UNCERTAIN
+    assert session._queue.empty()  # not queued: the agent would handle the completion twice
+    assert any("確認できませんでした" in n.text for n in channel.of(Notice))

@@ -73,6 +73,16 @@ class CompletionInputDelivery:
                 new_state=InputDeliveryState.UNCERTAIN,
             )
             return "uncertain"
+        if outcome == "uncertain":
+            # The agent may have the completion already: never send it again.
+            await self._inbox.advance_input(
+                conversation_key=envelope.conversation_key,
+                input_id=envelope.input_id,
+                owner=self._owner,
+                expected=InputDeliveryState.QUEUED,
+                new_state=InputDeliveryState.UNCERTAIN,
+            )
+            return "uncertain"
         if outcome == "held":
             await self._inbox.advance_input(
                 conversation_key=envelope.conversation_key,

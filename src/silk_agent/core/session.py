@@ -193,8 +193,13 @@ class AgentSession:
 
     async def notify(
         self, text: str, *, input_id: str = ""
-    ) -> Literal["appended", "queued", "held"]:
-        """Deliver a system notice without interrupting a running turn."""
+    ) -> Literal["appended", "queued", "held", "uncertain"]:
+        """Deliver a system notice without interrupting a running turn.
+
+        "uncertain": the write to the running turn failed part way, so the agent may already
+        have the notice. It is not queued again (the agent would handle the completion twice
+        and report it twice); the user is told, and the result stays readable with
+        command_status."""
         if self._closing or self._state == "interrupting" or self._last_turn_interrupted:
             if not input_id:
                 # A durable input (distributed) is held and released by the inbox; only the
@@ -209,7 +214,15 @@ class AgentSession:
             try:
                 appended = await self._engine.append(text)
             except AppendOutcomeUnknown:
-                appended = False  # a completion notice is information: a repeat is harmless
+                log.warning("notice append to the running turn of %s: outcome unknown", self.key)
+                await self._sink(
+                    Notice(
+                        self.key,
+                        "バックグラウンド処理の完了を、実行中の処理に伝えられたか確認できませんでした。"
+                        "重複を避けるため再送しません。結果は command_status で確認できます。",
+                    )
+                )
+                return "uncertain"
         if appended:
             if input_id:
                 if input_id not in self._turn_input_ids:

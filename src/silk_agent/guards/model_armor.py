@@ -109,7 +109,9 @@ class ModelArmorSanitizer:
             except Exception as e:
                 log.exception("Model Armor call failed")
                 return SanitizeResult("error", "", f"{type(e).__name__}: {e}")
-            if result.status == "blocked":
+            if result.status in ("blocked", "error"):
+                # One chunk that could not be checked makes the whole output undisplayable:
+                # dropping it and sending the rest would show a reply with a hole in it.
                 return result
             masked = masked or result.status == "masked"
             parts.append(result.text)
