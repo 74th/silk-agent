@@ -157,3 +157,28 @@ async def test_monitor_loop_survives_a_failing_pass_and_stops_on_request():
 
     await asyncio.wait_for(run_monitor_loop(Monitor(), stop, poll_seconds=0.01), 2)
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_status_says_which_output_limit_a_finished_command_hit():
+    commands = Commands(
+        {
+            "big": {
+                "state": "finished",
+                "exit_code": 0,
+                "output_error_code": "session_output_limit",
+            },
+            "wide": {
+                "state": "finished",
+                "exit_code": 0,
+                "output_error_code": "command_output_limit",
+            },
+            "fine": {"state": "finished", "exit_code": 0},
+        }
+    )
+    runtime = ServiceCommandRuntime(Manager(commands))
+    limits = {
+        command_id: (await runtime.command_status("slack:T:C:1", command_id)).output_limit
+        for command_id in ("big", "wide", "fine")
+    }
+    assert limits == {"big": "session", "wide": "command", "fine": None}

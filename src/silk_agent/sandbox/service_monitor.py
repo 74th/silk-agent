@@ -24,6 +24,9 @@ from silk_agent.sandbox.service import _call_and_close, _session_key
 log = logging.getLogger(__name__)
 
 
+_OUTPUT_LIMITS = {"session_output_limit": "session", "command_output_limit": "command"}
+
+
 class ServiceCommandRuntime:
     """CommandStatusReader + OutputPageReader over the Sandbox manager (no ensure/start).
 
@@ -69,7 +72,12 @@ class ServiceCommandRuntime:
             return CommandResult(command_id, "running")
         if state == "finished":
             outcome = "cancelled" if record.get("stop_reason") == "cancelled" else "completed"
-            return CommandResult(command_id, outcome, record.get("exit_code"))
+            return CommandResult(
+                command_id,
+                outcome,
+                record.get("exit_code"),
+                output_limit=_OUTPUT_LIMITS.get(str(record.get("output_error_code"))),
+            )
         return CommandResult(command_id, "unknown")
 
     async def read_output_page(

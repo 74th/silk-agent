@@ -20,6 +20,7 @@ from kubernetes_asyncio import client
 from gke_session_sandbox.errors import FileOperationError
 from silk_agent.core.distributed_models import OwnershipToken
 from silk_agent.core.distributed_ports import ServiceOperationStore
+from silk_agent.distributed.metrics import METRICS
 from silk_agent.sandbox.protocol import (
     CommandControlRequest,
     CommandControlResponse,
@@ -204,7 +205,8 @@ async def _metrics(request: web.Request) -> web.Response:
         lines.append(
             f"silk_agent_sandbox_http_request_duration_seconds_sum{{{labels}}} {duration:.6f}"
         )
-    return web.Response(text="\n".join(lines) + "\n", content_type="text/plain")
+    # The process-wide registry (the command monitor's counters, for one) follows the HTTP series.
+    return web.Response(text="\n".join(lines) + "\n" + METRICS.render(), content_type="text/plain")
 
 
 async def _readiness(request: web.Request) -> web.Response:

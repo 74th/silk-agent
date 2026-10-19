@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from gke_session_sandbox.errors import FileOperationError
 from gke_session_sandbox.types import EventType, SessionState
 from silk_agent.core.distributed_models import OwnershipToken
+from silk_agent.distributed.metrics import METRICS
 from silk_agent.sandbox.service import create_app
 
 
@@ -60,6 +61,12 @@ async def test_health_and_readiness_are_open_and_readiness_is_read_only():
         metrics = await client.get("/metrics")
         assert metrics.status == 200
         assert "silk_agent_sandbox_http_requests_total" in await metrics.text()
+        # the process-wide registry (the monitor's counters) is on the same endpoint
+        METRICS.inc("sandbox_output_limit_total", limit="session")
+        assert (
+            'silk_agent_sandbox_output_limit_total{limit="session"} 1'
+            in await (await client.get("/metrics")).text()
+        )
         assert checks == ["ready"]
     finally:
         await client.close()

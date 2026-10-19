@@ -89,6 +89,8 @@ class CommandResult:
     exit_code: int | None = None
     stdout: str = ""
     stderr: str = ""
+    # "session" / "command" when the command ran into that output limit (its output is cut).
+    output_limit: str | None = None
 
 
 @dataclass(frozen=True)
