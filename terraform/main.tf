@@ -197,6 +197,7 @@ locals {
     "slack_receipts",
     "control_queue",
     "workers",
+    "user_rate_limits",
   ])
   # ユースケースごとの接頭辞つきコレクション。キーは "<ユースケース>/<コレクション>"。
   retention_prefixed_bindings = {

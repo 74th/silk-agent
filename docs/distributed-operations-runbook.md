@@ -214,7 +214,7 @@ Firestore の操作数は Cloud Monitoring の `firestore.googleapis.com/api/req
 
 コマンドは「終了」と「通知が済んだ」の遅い方から数える。バックグラウンドコマンドの通知は、その `command_finished` 入力が completed になった時点で delivered になる（STOP などで取り消された入力は suppressed）。入力が uncertain のまま残ったコマンドは、運用者が確認するまで消えない。
 
-削除してはならないもの: 会話ごとの管理情報（`conversations`、`ownership`、`sandboxes`、`resource_leases`、`user_rate_limits`）。会話の入力がすべて消えても会話は再開できる。試験用の会話（`acceptance:*`、`loadtest:*`）の掃除はこの仕組みの対象外。
+削除してはならないもの: 会話ごとの管理情報（`conversations`、`ownership`、`sandboxes`、`resource_leases`）。会話の入力がすべて消えても会話は再開できる。試験用の会話（`acceptance:*`、`loadtest:*`）の掃除はこの仕組みの対象外。
 
 TTL による削除は、期限から最大24時間ほど遅れる。TTL の削除は Firestore の課金対象の削除操作になる。
 

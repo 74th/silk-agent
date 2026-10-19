@@ -1320,6 +1320,11 @@ async def test_shared_user_rate_limit_is_atomic_and_idempotent():
         assert await store.allow_and_record(
             user_key="T1:U1", input_id="message-3", now=later, per_minute=2
         )
+        records = [
+            d
+            async for d in client.collection(f"{store.collection_prefix}_user_rate_limits").stream()
+        ]
+        assert [r.to_dict()["expire_at"] for r in records] == [later + timedelta(days=1)]
     finally:
         client.close()
 

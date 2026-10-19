@@ -11,6 +11,8 @@ from silk_agent.core.distributed_ports import UserRateLimitStore
 from silk_agent.stores.firestore.errors import convert_firestore_error
 from silk_agent.stores.firestore.ids import document_id
 
+RECORD_RETENTION = timedelta(days=1)
+
 
 class FirestoreUserRateLimitStore:
     def __init__(self, client: firestore.AsyncClient, *, collection_prefix: str = "silk-agent"):
@@ -61,6 +63,8 @@ class FirestoreUserRateLimitStore:
                 {
                     "hits": [*recent, {"input_id": input_id, "at": now}],
                     "updated_at": now,
+                    # Only the last minute of hits counts; an idle user's record expires.
+                    "expire_at": now + RECORD_RETENTION,
                     "schema_version": 1,
                 },
             )
