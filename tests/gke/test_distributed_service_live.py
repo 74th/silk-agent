@@ -74,6 +74,7 @@ async def test_real_commands_files_dedup_cancel_and_owner_fencing_without_slack(
     command_id = f"validation-command-{run_id}"
     cancel_id = f"validation-cancel-{run_id}"
     write_id = f"validation-file-{run_id}"
+    created_ids: list[str] = []  # commands the runtime started with ids of its own
     tenant, session = to_session_key_parts(key)
     sandbox_key = SessionKey(tenant_id=tenant, session_id=session)
     token = None
@@ -265,7 +266,13 @@ async def test_real_commands_files_dedup_cancel_and_owner_fencing_without_slack(
 
         # The runtime ensures the Sandbox in its own request, then starts the command.
         runtime = RemoteSandboxRuntime(remote, current_identity)
-        ran = await runtime.run_command(key, "printf live-ok", timeout_seconds=60)
+
+        async def capture_id(started_id: str) -> None:
+            created_ids.append(started_id)  # recorded as soon as it exists, whatever follows
+
+        ran = await runtime.run_command(
+            key, "printf live-ok", timeout_seconds=60, on_started=capture_id
+        )
         assert (ran.outcome, ran.stdout) == ("completed", "live-ok")
         result["runtime_run_command"] = True
         result["cancel_command_id"] = cancel_id
@@ -321,7 +328,7 @@ async def test_real_commands_files_dedup_cancel_and_owner_fencing_without_slack(
                 async for doc in conversation_ref.collection(name).stream():
                     await doc.reference.delete()
             for name in ("commands", "sandbox_operations"):
-                for identifier in (command_id, cancel_id, write_id):
+                for identifier in (command_id, cancel_id, write_id, *created_ids):
                     kind = "command" if name == "commands" else "operation"
                     await (
                         database.collection(f"{prefix}_{name}")
