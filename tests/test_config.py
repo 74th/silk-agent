@@ -394,3 +394,18 @@ def test_a_relative_skills_source_is_resolved_against_the_config_file(tmp_path, 
     config.skills.source = "missing"
     with pytest.raises(ValueError, match="skills.source"):
         build_skill_source(config, tmp_path / "cache")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("heartbeat_interval_seconds", 0),
+        ("heartbeat_interval_seconds", -5),
+        ("heartbeat_interval_seconds", float("nan")),
+        ("heartbeat_interval_seconds", float("inf")),
+        ("timezone", "Mars/Base"),
+    ],
+)
+def test_progress_config_rejects_unusable_values(field, value):
+    with pytest.raises(ValueError):
+        Config(slack={"progress": {field: value}})
