@@ -94,6 +94,7 @@ class LocalDirSkillSource(_CachedSource):
             return None
         files = [p for p in self._src.rglob("*") if p.is_file()]
         if not files:
+            self._current = None  # emptied on purpose: the next turn runs without Skills
             return None
         gen_id = _digest(
             (str(p.relative_to(self._src)), f"{p.stat().st_size}:{p.stat().st_mtime_ns}")
@@ -144,6 +145,7 @@ class GcsSkillSource(_CachedSource):
             if not b.name.endswith("/")
         ]
         if not blobs:
+            self._current = None  # emptied on purpose: the next turn runs without Skills
             return None
         gen_id = _digest((b.name, str(b.generation)) for b in blobs)
         if self._current is not None and self._current.generation_id == gen_id:

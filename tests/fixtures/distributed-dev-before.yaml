@@ -650,9 +650,11 @@ spec:
           periodSeconds: 10
         resources:
           limits:
+            ephemeral-storage: 4Gi
             memory: 2Gi
           requests:
             cpu: 500m
+            ephemeral-storage: 512Mi
             memory: 1Gi
         securityContext:
           allowPrivilegeEscalation: false
@@ -691,11 +693,14 @@ spec:
       - configMap:
           name: silk-agent-sandbox-service-config-7fk2ht4d55
         name: config
-      - emptyDir: {}
+      - emptyDir:
+          sizeLimit: 256Mi
         name: tmp
-      - emptyDir: {}
+      - emptyDir:
+          sizeLimit: 512Mi
         name: home
-      - emptyDir: {}
+      - emptyDir:
+          sizeLimit: 2Gi
         name: work
       - name: sandbox-token
         projected:

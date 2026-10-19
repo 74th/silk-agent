@@ -203,8 +203,10 @@ spec:
             requests:
               cpu: 500m
               memory: 1Gi
+              ephemeral-storage: 512Mi
             limits:
               memory: 2Gi
+              ephemeral-storage: 4Gi
 
           securityContext:
             allowPrivilegeEscalation: false
@@ -228,12 +230,16 @@ spec:
         - name: config
           configMap:
             name: silk-agent-sandbox-service-config
+        # Bounded: a runaway write evicts this Pod instead of filling the node's disk.
         - name: tmp
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 256Mi
         - name: home
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 512Mi
         - name: work
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 2Gi
         - name: sandbox-token
           projected:
             sources:

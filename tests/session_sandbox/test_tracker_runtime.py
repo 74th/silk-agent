@@ -537,3 +537,40 @@ async def test_a_stream_that_ends_after_init_without_exit_stays_unknown(tmp_path
     tracker = Tracker(journal, object(), generation=1)
     await tracker._consume(record["command_id"], Stream(), "marker")
     assert (await journal.get(record["command_id"]))["state"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_exit_event_is_not_the_end_of_the_command_while_its_group_remains(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(tracker_module, "GROUP_TERM_WAIT_SECONDS", 0.3)
+    monkeypatch.setattr(tracker_module, "GROUP_KILL_WAIT_SECONDS", 0.3)
+    executed: list[str] = []
+
+    class Stub:
+        async def Execute(self, request, timeout):
+            executed.append(request.config.command[-1])
+
+    tracker = Tracker(CommandJournal(tmp_path / "commands.json"), Stub(), 1)
+    with_group = {"identity": {"pgid": 4242}}
+
+    assert await tracker._group_gone_after_exit({}) == (True, "")  # no identity read
+
+    present = iter([(True, "x"), (False, "")])
+
+    async def gone_after_term(_pgid):
+        return next(present)
+
+    tracker._group_present = gone_after_term
+    assert await tracker._group_gone_after_exit(with_group) == (True, "")
+    assert executed == ["kill -TERM -- -4242"]
+
+    executed.clear()
+
+    async def never_gone(_pgid):
+        return True, "4243 4242 sleep"
+
+    tracker._group_present = never_gone
+    gone, detail = await tracker._group_gone_after_exit(with_group)
+    assert not gone and "remain after SIGKILL" in detail
+    assert executed == ["kill -TERM -- -4242", "kill -KILL -- -4242"]

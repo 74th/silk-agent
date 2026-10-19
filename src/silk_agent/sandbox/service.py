@@ -583,6 +583,8 @@ async def _sync_skills(request: web.Request) -> web.Response:
             await _call_and_close(handle.files, "write", f".skills/{relative_path}", content)
         except Exception:
             failed_paths.append(relative_path)
+    if not failed_paths:
+        failed_paths += await _remove_stale_skill_files(handle, {path for path, _ in decoded})
     response = SkillsSyncResponse(
         request_id=sync_request.request_id,
         sandbox_generation=handle.generation,
@@ -593,6 +595,35 @@ async def _sync_skills(request: web.Request) -> web.Response:
     return web.json_response(
         response.model_dump(mode="json"), status=200 if not failed_paths else 207
     )
+
+
+async def _remove_stale_skill_files(handle: Any, wanted: set[str]) -> list[str]:
+    """Delete what an earlier generation left in `.skills/` and this one no longer has.
+
+    Returns the paths that could not be removed (a leftover file is a failed sync, not a silent
+    difference between what the Worker holds and what the Sandbox runs)."""
+    failed: list[str] = []
+    pending = [".skills"]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = await _call_and_close(handle.files, "list", directory)
+        except Exception:
+            if directory == ".skills":
+                return []  # nothing was ever written here
+            failed.append(directory.removeprefix(".skills/"))
+            continue
+        for entry in entries:
+            path = str(entry.path)
+            relative = path.removeprefix(".skills/")
+            if entry.type == "directory":
+                pending.append(path)
+            elif relative not in wanted:
+                try:
+                    await _call_and_close(handle.files, "delete", path)
+                except Exception:
+                    failed.append(relative)
+    return failed
 
 
 async def _owned_handle(request: web.Request, identity: Any) -> tuple[Any, OwnershipToken]:

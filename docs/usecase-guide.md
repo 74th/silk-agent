@@ -82,6 +82,8 @@ USER 1000:1000
 - **システムプロンプト**: `prompts/agent-system.md`を、`agent.system_prompt_file`で指す。本体の汎用のプロンプト（`src/silk_agent/resources/agent-system.md`）をコピーして役割を書き足すのが安全。Sandboxのツールの使い方、`<system-notice>`の扱い、バックグラウンド実行の扱いの指示は残す。指定したファイルがなければBotは起動しない（気づかずに汎用のものへ戻らない）。指定しなければ汎用のプロンプトを使う。
 - **入力ガードの基準**: `policies/input-guard.md`を`input_guard.policy_file`で指す。同様に汎用の基準に足す。
 - **Skills**: `skills/<名前>/SKILL.md`（と付属のファイル）。`skills.source`にBotのイメージ内のディレクトリ（`/app/usecase/skills`）かGCS（`gs://...`）を指定する。GCSなら、同期間隔（既定5分）以内に、以後に始まるturnへ反映される。イメージに含めたSkillsは、イメージを作り直すまで変わらない。Skillに付属のファイル（スクリプトなど）は、Sandboxの`/workspace/.skills/<Skill名>/`にコピーされる。エージェントに使わせるときは、`SKILL.md`にこの絶対パスで書く（コマンドの作業ディレクトリはSkillの場所ではない）。Sandboxのイメージに同じファイルを入れて、別のパス（`/app/usecase/skills/...`など）で使わせてもよい（bigquery-analysisはこの方式）。
+  - **分散構成の上限**: Skills全体で**1000ファイル、合計8MiB**まで（超えるとSandboxへの同期が拒否され、turnが始まらない）。
+  - **Skillsを減らす・空にする**: 同期のたびに、Sandboxの`.skills/`から、今回の世代にないファイルを削除する。ソースを空にすると、以後のturnはSkillsなしで動く（古い世代は使わない）。削除できないファイルがあれば同期は失敗として扱う。
 - **MCP**: `config/mcp.json`（HTTP / SSEのサーバのみ、`${ENV}`を展開）。
 
 ### 2.4 フック
@@ -160,6 +162,8 @@ USECASE_NAME=my-usecase IMAGE_REPOSITORY=<repo> PUSH=1 \
 KUSTOMIZE_DIR=usecases/my-usecase/k8s ./k8s/deploy.sh   # Slackトークンの Secret、apply、rollout待ち
 ```
 
+**注意**: この単一Pod構成のテンプレートは、本体の`k8s/base/`と同じ名前（Deployment `silk-agent`、namespace `session-sandbox-system`）を使う。開発用のBot（`k8s/overlays/dev`）と同じクラスタに適用すると、それを**上書き**する。本番の配置は分散構成（4章）を使う。
+
 `kubectl kustomize usecases/my-usecase/k8s`で、適用前にマニフェストを確認できる。Deploymentの構成（レプリカ1、`Recreate`、PVC、ServiceAccountとRBAC）は本体の`k8s/base/`のままで、ユースケースは設定（ConfigMap）とイメージだけを差し替える。
 
 ### 2.7 本体の更新の取り込み
@@ -217,6 +221,8 @@ Sandboxのイメージを変えても、すでにある会話のSandboxは、次
    - `kustomization.yaml`: 2つのnamespace（`silk-agent-namespaces`のリテラル）、Botのイメージ、ClusterRoleBindingの名前の接尾辞。
    共通の定義（`k8s/distributed/base/`、`k8s/distributed/platform/`）にはプロジェクト、イメージ、接頭辞、バケットの値を書かない。変更が必要なら本体のリポジトリで直す。
 5. **配置（bootstrap → 起動）**: 本体のチェックアウトから`deploy.sh`を分散構成のモードで実行する。初回はbootstrap（3つの役割のレプリカが0）を適用し、運用runbook（`docs/distributed-operations-runbook.md` §2）の順序で役割を起動し、確認後にsteadyを適用する。
+
+**MCPを足すとき（分散構成）**: `config/mcp.json`の`${ENV}`は**Workerの環境変数**から展開する。Workerの Deployment（`silk-agent-worker`）にその環境変数（Secretから）を足すパッチを`steady/kustomization.yaml`に書く。Workerのegressは既定で443だけなので、MCPサーバが443以外のポートなら、そのPod宛てのNetworkPolicy（egress）を足す。`usecases/bigquery-analysis/k8s/distributed/steady/echo-mcp.yaml`が、ingress・Workerのegress・サーバ自身のegress禁止の3つを持つ例。
 
 Slackのトークンは、Secret Manager（Terraformが作った`<名前>-slack-bot-token`、`<名前>-slack-app-token`）に先に登録する。`.env`も、k8sのSecretも使わない。
 
