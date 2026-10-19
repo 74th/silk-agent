@@ -81,7 +81,7 @@ USER 1000:1000
 
 - **システムプロンプト**: `prompts/agent-system.md`を、`agent.system_prompt_file`で指す。本体の汎用のプロンプト（`src/silk_agent/resources/agent-system.md`）をコピーして役割を書き足すのが安全。Sandboxのツールの使い方、`<system-notice>`の扱い、バックグラウンド実行の扱いの指示は残す。指定したファイルがなければBotは起動しない（気づかずに汎用のものへ戻らない）。指定しなければ汎用のプロンプトを使う。
 - **入力ガードの基準**: `policies/input-guard.md`を`input_guard.policy_file`で指す。同様に汎用の基準に足す。
-- **Skills**: `skills/<名前>/SKILL.md`（と付属のファイル）。`skills.source`にBotのイメージ内のディレクトリ（`/app/usecase/skills`）かGCS（`gs://...`）を指定する。GCSなら、同期間隔（既定5分）以内に、以後に始まるturnへ反映される。イメージに含めたSkillsは、イメージを作り直すまで変わらない。
+- **Skills**: `skills/<名前>/SKILL.md`（と付属のファイル）。`skills.source`にBotのイメージ内のディレクトリ（`/app/usecase/skills`）かGCS（`gs://...`）を指定する。GCSなら、同期間隔（既定5分）以内に、以後に始まるturnへ反映される。イメージに含めたSkillsは、イメージを作り直すまで変わらない。Skillに付属のファイル（スクリプトなど）は、Sandboxの`/workspace/.skills/<Skill名>/`にコピーされる。エージェントに使わせるときは、`SKILL.md`にこの絶対パスで書く（コマンドの作業ディレクトリはSkillの場所ではない）。Sandboxのイメージに同じファイルを入れて、別のパス（`/app/usecase/skills/...`など）で使わせてもよい（bigquery-analysisはこの方式）。
 - **MCP**: `config/mcp.json`（HTTP / SSEのサーバのみ、`${ENV}`を展開）。
 
 ### 2.4 フック

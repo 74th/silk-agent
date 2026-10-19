@@ -322,3 +322,31 @@ def test_deleting_one_use_case_leaves_the_cluster_scoped_resources_of_the_other(
     assert dev and bigquery
     assert not dev & bigquery
     assert not {kind for kind, _ in dev | bigquery} & {"ClusterRole"}
+
+
+@needs_kubectl
+def test_one_worker_at_a_time_can_be_evicted_by_a_drain_or_a_scale_down():
+    budgets = [
+        i for i in kustomize("k8s/distributed/overlays/dev") if i["kind"] == "PodDisruptionBudget"
+    ]
+    # Only the Worker has one: with a single replica a budget would block every drain of the node.
+    assert [b["metadata"]["name"] for b in budgets] == ["silk-agent-worker"]
+    budget = budgets[0]
+    assert budget["spec"]["maxUnavailable"] == 1
+    worker = _deployments()["silk-agent-worker"]
+    labels = worker["spec"]["template"]["metadata"]["labels"]
+    assert budget["spec"]["selector"]["matchLabels"].items() <= labels.items()
+
+
+def test_the_distributed_use_case_configs_keep_the_audit_hooks_of_the_single_process_template():
+    for path, package in (
+        ("usecases/template/k8s/distributed/steady/config/silk-agent-distributed.yaml", "template"),
+        (
+            "usecases/bigquery-analysis/k8s/distributed/steady/config/silk-agent-distributed.yaml",
+            "bigquery_analysis",
+        ),
+    ):
+        hooks = yaml.safe_load(Path(path).read_text())["hooks"]
+        assert "silk_agent.hooks:json_lines" in hooks, path
+        factories = [h["factory"] for h in hooks if isinstance(h, dict)]
+        assert factories == [f"silk_usecase_{package}.hooks:create"], path

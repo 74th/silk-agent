@@ -355,6 +355,11 @@ class RemoteSandboxRuntime:
     ) -> CommandResult:
         command_id = uuid.uuid4().hex
         identity = await self._identity(conversation_key)
+        # A cold start of the Sandbox can take as long as this client waits. Do it in its own
+        # request, before the command exists: if it times out nothing has run, whereas a start
+        # that times out while the service goes on would run the command that a retry then
+        # runs again.
+        await self.sessions.ensure(conversation_key)
         response = await self.sessions.start_command(
             conversation_key,
             command,

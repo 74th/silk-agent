@@ -367,7 +367,9 @@ async def _command_status(request: web.Request) -> web.Response:
     except Exception:
         record = {"state": "unknown"}
     raw_state = record.get("state") if isinstance(record, Mapping) else None
-    if raw_state == "running":
+    # "reserved": the tracker took the command and has not reported the process yet (a command
+    # that has just been started). It is on its way, not of unknown outcome.
+    if raw_state in {"running", "reserved"}:
         state = "running"
     elif raw_state == "finished":
         state = "cancelled" if record.get("stop_reason") == "cancelled" else "finished"
@@ -444,7 +446,11 @@ async def _command_handle(
     operation = await store.get_operation(command_id)
     if operation is None or operation.get("operation_kind") != "command_start":
         raise ServiceError(404, "unknown_command", "command operation was not found")
-    for field in ("conversation_key", "conversation_generation", "turn_id", "origin_seq"):
+    # Status, output and cancel belong to the conversation and Sandbox generation, not to the
+    # turn that started the command: after a Worker change the new owner has another turn_id and
+    # origin_seq, and must still be able to read and cancel the commands it took over. The
+    # start (turn_id, origin_seq) is fenced by the stop barrier; these are not starts.
+    for field in ("conversation_key", "conversation_generation"):
         if operation.get(field) != getattr(identity, field):
             raise ServiceError(409, "command_identity_mismatch", "command identity does not match")
     if operation.get("sandbox_generation") != handle.generation:
@@ -689,6 +695,8 @@ async def _existing_command_state(handle: Any, command_id: str) -> CommandStartS
         # between recovery states. Never turn that uncertainty into a resend.
         return "unknown"
     state = record.get("state") if isinstance(record, Mapping) else None
+    if state == "reserved":
+        return "accepted"  # taken by the tracker, not running yet
     if state == "running":
         return "running"
     if state == "finished":

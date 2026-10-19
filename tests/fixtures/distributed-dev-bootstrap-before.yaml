@@ -699,6 +699,19 @@ spec:
               expirationSeconds: 3600
               path: silk-sandbox
 ---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
+  name: silk-agent-worker
+  namespace: session-sandbox-system
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: silk-agent-worker
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

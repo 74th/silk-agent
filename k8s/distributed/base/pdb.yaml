@@ -1,0 +1,13 @@
+# Worker: a node drain or an autoscaler scale-down evicts one Worker at a time, so the other keeps
+# its conversations while the evicted one saves and releases its own (SIGTERM drains it).
+# The single-replica roles (Gateway, Control, Sandbox Service) have no budget: a budget that
+# allows no disruption would block every drain of their node.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: silk-agent-worker
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: silk-agent-worker

@@ -7,6 +7,7 @@ kind: Kustomization
 resources:
   - sandbox-service.yaml
   - roles.yaml
+  - pdb.yaml
 labels:
   - pairs:
       app.kubernetes.io/part-of: silk-agent-distributed

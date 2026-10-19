@@ -778,6 +778,7 @@ async def test_command_status_output_and_cancel_use_the_recorded_sandbox_generat
         "origin_seq": 8,
     }
     canceled = []
+    tracker = {"state": "running"}
 
     class Operations:
         records = {"cmd-1": operation}
@@ -797,7 +798,7 @@ async def test_command_status_output_and_cancel_use_the_recorded_sandbox_generat
 
     class Commands:
         async def get(self, _command_id):
-            return {"state": "running", "exit_code": None}
+            return {"state": tracker["state"], "exit_code": None}
 
         async def read_output(self, _command_id, *, stream, cursor, limit):
             assert stream == "stdout" and cursor == 0 and limit == 128
@@ -846,6 +847,32 @@ async def test_command_status_output_and_cancel_use_the_recorded_sandbox_generat
             headers=headers,
         )
         assert (await response.json())["state"] == "running"
+
+        # A command the tracker has just taken (not yet reported as running) is on its way.
+        tracker["state"] = "reserved"
+        response = await client.post(
+            "/v1/commands/cmd-1/status",
+            json={**identity, "request_id": "cmd-1"},
+            headers=headers,
+        )
+        assert (await response.json())["state"] == "running"
+        tracker["state"] = "running"
+
+        # After a Worker change the new owner has another turn and origin sequence; it still
+        # reads (and cancels) the commands of the conversation.
+        successor = {**identity, "turn_id": "turn-9", "origin_seq": 2}
+        response = await client.post(
+            "/v1/commands/cmd-1/status",
+            json={**successor, "request_id": "cmd-1"},
+            headers=headers,
+        )
+        assert response.status == 200 and (await response.json())["state"] == "running"
+        response = await client.post(
+            "/v1/commands/cmd-1/output",
+            json={**successor, "request_id": "cmd-1", "cursor": 0, "limit_bytes": 128},
+            headers=headers,
+        )
+        assert response.status == 200
 
         response = await client.post(
             "/v1/commands/cmd-1/output",
@@ -1146,3 +1173,24 @@ async def test_ensure_without_an_owner_email_passes_no_environment():
     request = SimpleNamespace(app={MANAGER_KEY: Manager(), ENV_PROVIDER_KEY: no_email})
     assert await _ensure_handle(request, "slack:T:C:123") == "handle"
     assert ensured == [{}]  # no `env`: a conversation without an owner e-mail stays as before
+
+
+async def test_a_command_the_tracker_has_just_taken_is_accepted_not_unknown():
+    from silk_agent.sandbox.service import _existing_command_state
+
+    class Commands:
+        def __init__(self, record):
+            self.record = record
+
+        async def get(self, _command_id):
+            return self.record
+
+        async def close(self):
+            pass
+
+    async def state_of(record):
+        return await _existing_command_state(SimpleNamespace(commands=Commands(record)), "c")
+
+    assert await state_of({"state": "reserved"}) == "accepted"  # was "unknown": a resend risk
+    assert await state_of({"state": "running"}) == "running"
+    assert await state_of({"state": "weird"}) == "unknown"

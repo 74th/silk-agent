@@ -23,6 +23,12 @@ distributed:
     terminal_days: 30  # 入力・制御要求・出力・コマンド・quiesce 要求
     receipt_days: 7    # Slack の受信記録（再送の重複排除に使う）
     worker_days: 7     # 最後の heartbeat から
+hooks:
+  # Audit log of the conversation's events (the same hooks as the single-process template).
+  - factory: silk_usecase_template.hooks:create
+    options:
+      include_content: false       # true: also log (masked) text, tool input and results
+  - silk_agent.hooks:json_lines    # the standard hook: one JSON line per event on stdout
 slack:
   app_token_secret: projects/your-gcp-project/secrets/your-usecase-slack-app-token
   bot_token_secret: projects/your-gcp-project/secrets/your-usecase-slack-bot-token
