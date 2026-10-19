@@ -43,6 +43,11 @@ spec:
       app.kubernetes.io/name: silk-agent-gateway
   template:
     metadata:
+      annotations:
+        # One replica: the cluster autoscaler must not scale its node down and evict it (Slack
+        # intake, Outbox delivery, recovery or Sandbox management stops until it is back). A
+        # node upgrade or repair still drains it.
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
         app.kubernetes.io/name: silk-agent-gateway
     spec:
@@ -253,6 +258,11 @@ spec:
       app.kubernetes.io/name: silk-agent-control
   template:
     metadata:
+      annotations:
+        # One replica: the cluster autoscaler must not scale its node down and evict it (Slack
+        # intake, Outbox delivery, recovery or Sandbox management stops until it is back). A
+        # node upgrade or repair still drains it.
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
       labels:
         app.kubernetes.io/name: silk-agent-control
     spec:

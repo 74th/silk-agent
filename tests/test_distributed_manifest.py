@@ -350,3 +350,22 @@ def test_the_distributed_use_case_configs_keep_the_audit_hooks_of_the_single_pro
         assert "silk_agent.hooks:json_lines" in hooks, path
         factories = [h["factory"] for h in hooks if isinstance(h, dict)]
         assert factories == [f"silk_usecase_{package}.hooks:create"], path
+
+
+def test_single_replica_roles_are_not_evicted_by_the_autoscaler_but_the_worker_still_can_be():
+    key = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+    rendered = {
+        item["metadata"]["name"]: item
+        for item in kustomize("k8s/distributed/overlays/dev")
+        if item["kind"] == "Deployment"
+    }
+    notes = {
+        name: item["spec"]["template"]["metadata"].get("annotations", {}).get(key)
+        for name, item in rendered.items()
+    }
+    assert notes == {
+        "silk-agent-gateway": "false",
+        "silk-agent-control": "false",
+        "silk-agent-sandbox-service": "false",
+        "silk-agent-worker": None,  # two replicas and a PodDisruptionBudget: it may move
+    }
