@@ -164,6 +164,10 @@ class ConversationState:
     progress_snapshot: dict[str, Any] = field(default_factory=dict)
     # Set when the conversation continued without its stored history (e.g. "expired").
     history_reset_reason: str | None = None
+    # The persisted fields as read. A store that has it writes only what changed since, so a
+    # read-modify-write of one field (the tracked command ids) cannot undo a concurrent change
+    # of another (the turn status). None for a state that was never read.
+    persisted: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
 
 # Environment variable that carries the e-mail address of the user who started the

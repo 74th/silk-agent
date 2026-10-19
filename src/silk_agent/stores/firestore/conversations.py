@@ -14,7 +14,7 @@ from silk_agent.core.distributed_models import OwnershipToken
 from silk_agent.core.distributed_ports import ConversationStore
 from silk_agent.stores.firestore.errors import convert_firestore_error
 from silk_agent.stores.firestore.ids import document_id
-from silk_agent.stores.firestore.ownership import ownership_matches
+from silk_agent.stores.firestore.ownership import owner_still_holds, ownership_matches
 
 _PATCH_FIELDS = frozenset(
     {
@@ -126,6 +126,23 @@ class FirestoreConversationStore:
             return await append(transaction)
         except Exception as exc:
             raise convert_firestore_error("append_guard_history", exc) from None
+
+    async def holds_ownership(self, owner: OwnershipToken) -> bool:
+        """Is `owner` still the live holder (a renewal changes only the expiry)?
+
+        Tells a fenced-out writer from one that merely lost a race for the version.
+        """
+        conversation_id = self._conversation_id(owner.conversation_key)
+        try:
+            ownership = await self._collection("ownership").document(conversation_id).get()
+            conversation = await self._collection("conversations").document(conversation_id).get()
+        except Exception as exc:
+            raise convert_firestore_error("holds_ownership", exc) from None
+        if not ownership.exists or not conversation.exists:
+            return False
+        return owner_still_holds(
+            ownership.to_dict() or {}, conversation.to_dict() or {}, owner, datetime.now(UTC)
+        )
 
     async def commit_turn_state(
         self,

@@ -27,7 +27,7 @@ from silk_agent.stores.firestore.command_monitor import (
 )
 from silk_agent.stores.firestore.errors import FirestoreStoreError, convert_firestore_error
 from silk_agent.stores.firestore.ids import document_id
-from silk_agent.stores.firestore.ownership import ownership_matches
+from silk_agent.stores.firestore.ownership import owner_still_holds, ownership_matches
 from silk_agent.stores.firestore.retention import (
     RetentionPolicy,
     control_expiry,
@@ -604,7 +604,7 @@ class FirestoreInboxStore:
                     if not owner_snapshot.exists or not conversation_snapshot.exists:
                         return "lost"
                     conversation = conversation_snapshot.to_dict() or {}
-                    if conversation.get("reset_pending") or not _still_holds(
+                    if conversation.get("reset_pending") or not owner_still_holds(
                         owner_snapshot.to_dict() or {}, conversation, owner, datetime.now(UTC)
                     ):
                         # Not "nothing to move": this owner can no longer move anything.
@@ -705,7 +705,7 @@ class FirestoreInboxStore:
             if not owner_snapshot.exists or not snapshot.exists:
                 return
             conversation = snapshot.to_dict() or {}
-            if not _still_holds(
+            if not owner_still_holds(
                 owner_snapshot.to_dict() or {}, conversation, owner, datetime.now(UTC)
             ):
                 return
@@ -1230,28 +1230,6 @@ class FirestoreInboxStore:
         return self._collection("control_queue").document(
             document_id(conversation_key, input_id, prefix="control")
         )
-
-
-def _still_holds(
-    owner_data: dict[str, Any], conversation: dict[str, Any], owner: OwnershipToken, now: datetime
-) -> bool:
-    """Is the stored ownership still `owner`'s? A lease renewal changes only the expiry, so
-    this compares who holds it (epoch, incarnation, generation) and that the stored lease is
-    live, rather than the whole token."""
-    try:
-        saved = decode_record(owner_data, OwnershipToken)
-    except (TypeError, ValueError):
-        return False
-    return (
-        owner_data.get("phase") == "active"
-        and saved.conversation_key == owner.conversation_key
-        and saved.worker_id == owner.worker_id
-        and saved.worker_incarnation == owner.worker_incarnation
-        and saved.epoch == owner.epoch
-        and saved.conversation_generation == owner.conversation_generation
-        and saved.expires_at > now
-        and conversation.get("conversation_generation") == owner.conversation_generation
-    )
 
 
 def _validate_time(value: datetime, field_name: str) -> None:
