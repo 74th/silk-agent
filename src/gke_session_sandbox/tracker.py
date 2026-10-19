@@ -40,6 +40,11 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+# How long the processes left in a command's group get after each signal.
+GROUP_TERM_WAIT_SECONDS = 5.0
+GROUP_KILL_WAIT_SECONDS = 2.0
+
+
 class CommandJournal:
     """Atomic JSON journal persisted on the session workspace volume."""
 
@@ -615,7 +620,12 @@ class Tracker:
             kind = event.WhichOneof("event")
             if kind == "init":
                 pid = event.init.process_id
-                identity = await self._read_identity(pid, marker)
+                identity = None
+                for _attempt in range(3):  # a transient RPC failure must not lose the group id
+                    identity = await self._read_identity(pid, marker)
+                    if identity:
+                        break
+                    await asyncio.sleep(0.2)
                 values: dict[str, Any] = {
                     "state": "running",
                     "process_id": pid,
@@ -653,15 +663,20 @@ class Tracker:
             elif kind == "exit":
                 code = event.exit.exit_code
                 record = await self.journal.get(command_id)
+                gone, group_detail = await self._group_gone_after_exit(record)
                 values = {
-                    "state": "finished",
+                    "state": "finished" if gone else "unknown",
                     "exit_code": code,
                     "finished_at": _now(),
                     "output_complete": output_failure is None
                     and (record or {}).get("output_complete", True),
                 }
+                if not gone:
+                    values["error"] = group_detail
                 if output_failure is not None:
                     values["error"] = str(output_failure)
+                elif not gone:
+                    pass
                 elif record and record.get("check") and code:
                     values["error"] = f"command exited with status {code}"
                 await self.journal.update(command_id, **values)
@@ -671,6 +686,48 @@ class Tracker:
             await self._mark_failed_or_unknown(
                 command_id, "sandboxd Start stream ended without an exit event"
             )
+
+    async def _group_gone_after_exit(self, record: dict[str, Any] | None) -> tuple[bool, str]:
+        """The shell's ExitEvent does not end the command's other processes. Stop what is left
+        of its process group (SIGTERM, then SIGKILL after 5 seconds) and confirm it is gone.
+
+        A command whose group cannot be confirmed gone is `unknown`, so the Sandbox is not
+        suspended under a process that may still run."""
+        pgid = ((record or {}).get("identity") or {}).get("pgid")
+        if not isinstance(pgid, int) or pgid <= 1:
+            # Without the group's id its disappearance cannot be shown.
+            return False, "the command's process group is unknown (its identity was not read)"
+        try:
+            for signal_name, wait in (
+                ("TERM", GROUP_TERM_WAIT_SECONDS),
+                ("KILL", GROUP_KILL_WAIT_SECONDS),
+            ):
+                present, _detail = await self._group_present(pgid)
+                if not present:
+                    return True, ""
+                sent = await self.stub.Execute(
+                    process_pb2.ExecuteRequest(
+                        config=process_pb2.ProcessConfig(
+                            # `-s NAME -- -PGID` is the form dash (the image's /bin/sh) accepts.
+                            command=["/bin/sh", "-c", f"kill -s {signal_name} -- -{pgid}"]
+                        )
+                    ),
+                    timeout=3,
+                )
+                if sent.exit_code not in (0, 1):  # 1: the group is already gone
+                    return False, f"could not signal the command's process group: {sent.exit_code}"
+                deadline = asyncio.get_running_loop().time() + wait
+                while asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(0.25)
+                    present, _detail = await self._group_present(pgid)
+                    if not present:
+                        return True, ""
+            present, detail = await self._group_present(pgid)
+            if not present:
+                return True, ""
+            return False, f"processes of the command's group remain after SIGKILL: {detail}"
+        except (grpc.aio.AioRpcError, RuntimeError, OSError) as exc:
+            return False, f"could not confirm the command's process group is gone: {exc}"
 
     async def _handle_output_failure(self, command_id: str, error: Exception) -> None:
         record = await self.journal.get(command_id)

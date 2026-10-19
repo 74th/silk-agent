@@ -1,7 +1,8 @@
 """Command monitoring inside the Sandbox Service, independent of any Worker or API request.
 
 The Service can read a command's state for a conversation whose Worker ownership has been
-released; a Worker can not (its calls require a live owner). It never starts a Sandbox.
+released; a Worker can not (its calls require a live owner). Reading a command's state never
+starts a Sandbox (`observe_commands` only looks at one that exists).
 """
 
 from __future__ import annotations

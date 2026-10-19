@@ -44,6 +44,10 @@ fi
 
 if [[ -n "${distributed_dir}" ]]; then
   : "${SYSTEM_NAMESPACE:?Set SYSTEM_NAMESPACE to the management namespace (<name>-system)}"
+  if [[ "${SYSTEM_NAMESPACE}" != *-system ]]; then
+    echo "refusing to deploy: SYSTEM_NAMESPACE ${SYSTEM_NAMESPACE} is not a management namespace (<name>-system); the Sandbox namespace is not one" >&2
+    exit 4
+  fi
   rendered="$(kubectl kustomize "${distributed_dir}")"
   if ! grep -qx "  name: ${SYSTEM_NAMESPACE}" <<<"$(grep -A2 -x 'kind: Namespace' <<<"${rendered}")"; then
     echo "refusing to deploy: ${distributed_dir} does not define namespace ${SYSTEM_NAMESPACE}" >&2

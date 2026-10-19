@@ -72,13 +72,18 @@ class WorkerControlHandler:
         elif kind == "reset_candidate":
             seq = control.get("seq")
             if not isinstance(seq, int) or isinstance(seq, bool):
-                raise ValueError("reset control has no sequence")
+                # It can never succeed: close it rather than fail on every scan.
+                log.warning("closing a reset control without a sequence for %s", key)
+                await self._close(owner, input_id)
+                return
             new_owner = await self._reset(owner, seq)
             if new_owner is not None:
                 await self._close(new_owner, input_id)
                 self._observe_latency("reset", control)
         else:
-            log.warning("ignoring unsupported control kind for %s", key)
+            # Nothing here will ever handle it: close it so the reader does not rescan it.
+            log.warning("closing an unsupported control kind for %s", key)
+            await self._close(owner, input_id)
 
     def _observe_latency(self, kind: str, control: Mapping[str, Any]) -> None:
         created = control.get("created_at")

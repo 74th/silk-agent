@@ -1194,3 +1194,54 @@ async def test_a_command_the_tracker_has_just_taken_is_accepted_not_unknown():
     assert await state_of({"state": "reserved"}) == "accepted"  # was "unknown": a resend risk
     assert await state_of({"state": "running"}) == "running"
     assert await state_of({"state": "weird"}) == "unknown"
+
+
+async def test_skills_sync_removes_files_an_earlier_generation_left_behind():
+    from silk_agent.sandbox.service import _remove_stale_skill_files
+
+    tree = {
+        ".skills": [
+            SimpleNamespace(path=".skills/keep", type="directory"),
+            SimpleNamespace(path=".skills/old", type="directory"),
+            SimpleNamespace(path=".skills/top.md", type="file"),
+        ],
+        ".skills/keep": [
+            SimpleNamespace(path=".skills/keep/SKILL.md", type="file"),
+            SimpleNamespace(path=".skills/keep/removed.sh", type="file"),
+        ],
+        ".skills/old": [SimpleNamespace(path=".skills/old/SKILL.md", type="file")],
+    }
+    deleted = []
+
+    class Files:
+        async def list(self, path):
+            return tree[path]
+
+        async def delete(self, path):
+            if path == ".skills/old/SKILL.md":
+                raise OSError("cannot delete")
+            deleted.append(path)
+
+    failed = await _remove_stale_skill_files(SimpleNamespace(files=Files()), {"keep/SKILL.md"})
+    assert sorted(deleted) == [".skills/keep/removed.sh", ".skills/top.md"]
+    assert failed == ["old/SKILL.md"]  # a leftover that stays is reported, not ignored
+
+
+async def test_a_failed_listing_of_the_skills_root_is_a_failed_sync_not_an_empty_one():
+    from silk_agent.sandbox.service import _remove_stale_skill_files
+
+    class Missing:
+        async def list(self, path):
+            raise FileOperationError("missing", path=path, status=404)
+
+    class Broken:
+        async def list(self, path):
+            raise OSError("temporary list failure")
+
+    class BadStatus:
+        async def list(self, path):
+            raise FileOperationError("server error", path=path, status=500)
+
+    assert await _remove_stale_skill_files(SimpleNamespace(files=Missing()), set()) == []
+    for files in (Broken(), BadStatus()):
+        assert await _remove_stale_skill_files(SimpleNamespace(files=files), set()) == [".skills"]

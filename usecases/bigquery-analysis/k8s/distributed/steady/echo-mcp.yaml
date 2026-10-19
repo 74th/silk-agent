@@ -114,3 +114,19 @@ spec:
       ports:
         - protocol: TCP
           port: 8000
+---
+# echo-mcp calls nothing: no egress at all, so it cannot reach the Sandboxes (8080 / 8081) or
+# anything else if it is compromised.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    # Selects the resource for the platform component's namespace replacement.
+    app.kubernetes.io/part-of: silk-agent-distributed
+  name: echo-mcp-no-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: echo-mcp
+  policyTypes: [Egress]
+  egress: []

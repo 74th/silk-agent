@@ -138,3 +138,24 @@ async def test_gcs_source_rejects_an_object_name_that_escapes_the_generation(tmp
     with pytest.raises(ValueError, match="escapes"):
         await s.refresh()
     assert not (tmp_path / "escaped.txt").exists()
+
+
+async def test_emptying_the_source_drops_the_old_generation(tmp_path):
+    src, cache = tmp_path / "src", tmp_path / "cache"
+    write_skill(src, "report", "v1")
+    s = LocalDirSkillSource(src, cache)
+    assert await s.refresh() is not None
+    for path in sorted(src.rglob("*"), reverse=True):
+        path.unlink() if path.is_file() else path.rmdir()
+    assert await s.refresh() is None and s.current() is None
+
+
+async def test_removing_the_source_directory_drops_the_old_generation(tmp_path):
+    import shutil
+
+    src, cache = tmp_path / "src", tmp_path / "cache"
+    write_skill(src, "report", "v1")
+    s = LocalDirSkillSource(src, cache)
+    assert await s.refresh() is not None
+    shutil.rmtree(src)
+    assert await s.refresh() is None and s.current() is None
