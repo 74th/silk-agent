@@ -2897,3 +2897,64 @@ async def test_oldest_waiting_conversation_and_workers_with_a_slightly_fast_cloc
         assert not await directory.list_available(now=now - timedelta(minutes=5))
     finally:
         client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_second_command_notice_does_not_restart_the_wait_for_a_worker():
+    emulator_host = os.environ.get("SILK_AGENT_FIRESTORE_EMULATOR_HOST")
+    if not emulator_host:
+        pytest.skip("set SILK_AGENT_FIRESTORE_EMULATOR_HOST to run the Firestore emulator test")
+
+    prefix = f"test-{uuid.uuid4().hex[:12]}"
+    client = create_firestore_client(
+        DistributedExecutionConfig(firestore_project=f"silk-agent-test-{uuid.uuid4().hex[:12]}"),
+        emulator_host=emulator_host,
+    )
+    store = FirestoreCommandMonitorStore(client, collection_prefix=prefix)
+    t0 = datetime.now(UTC)
+    key = "conversation-waiting-since"
+    try:
+
+        async def finish(at):
+            command_id = f"command-{uuid.uuid4().hex}"
+            await (
+                client.collection(f"{prefix}_commands")
+                .document(document_id(command_id, prefix="command"))
+                .set(
+                    {
+                        "command_id": command_id,
+                        "conversation_key": key,
+                        "conversation_generation": 1,
+                        "sandbox_generation": 1,
+                        "state": "running",
+                        "delivery_mode": "foreground",
+                        "notification_state": "none",
+                        "next_attempt_at": at,
+                    }
+                )
+            )
+            claim = await store.claim(
+                command_id, monitor_id="m", now=at, lease_expires_at=at + timedelta(seconds=10)
+            )
+            assert claim is not None
+            await store.detach(command_id, now=at)
+            done = await store.observe_terminal(
+                command_id,
+                claim_token=claim["monitor_lease_token"],
+                expected=CommandExecutionState.RUNNING,
+                terminal=CommandExecutionState.FINISHED,
+                result={"exit_code": 0},
+                now=at,
+            )
+            assert done is not None and done["decision"] == "notify"
+
+        conversation = client.collection(f"{prefix}_conversations").document(
+            conversation_document_id(key)
+        )
+        await finish(t0)
+        first = (await conversation.get()).to_dict()
+        assert first["allocation_state"] == "waiting" and first["waiting_since"] == t0
+        await finish(t0 + timedelta(seconds=60))  # still waiting: the clock keeps running
+        assert (await conversation.get()).to_dict()["waiting_since"] == t0
+    finally:
+        client.close()
