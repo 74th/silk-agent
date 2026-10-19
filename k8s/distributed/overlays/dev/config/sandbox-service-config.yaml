@@ -6,7 +6,7 @@ workspace_storage_class: session-workspace-rwo
 workspace_storage: 10Gi
 runtime:
   container_name: sandboxd
-  image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/session-runtime@sha256:99c1e3f8410c03af3523f8f924acad14eaaf159808b55832617284cd84b87acc
+  image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/session-runtime@sha256:b298b0fafd95185aedaf7fa082572051c41c5a528c8d89c19f59ba3ac64f0818
   rest_port: 8080
   tracker_port: 8081
   grpc_port: 9090

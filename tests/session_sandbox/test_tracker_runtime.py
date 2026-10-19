@@ -383,7 +383,7 @@ async def test_tracker_passes_only_the_marker_and_the_callers_env_to_the_process
 
     tracker = Tracker(journal, Stub(), generation=1)
 
-    async def consume(command_id, call, marker):
+    async def consume(command_id, call, marker, pgid_path=None):
         return None
 
     monkeypatch.setattr(tracker, "_consume", consume)
@@ -393,6 +393,10 @@ async def test_tracker_passes_only_the_marker_and_the_callers_env_to_the_process
     assert set(env) == {"CALLER_VAR", tracker_module._TRACKER_MARKER_ENV}
     assert env["CALLER_VAR"] == "x"
     assert "AGENT_USER_EMAIL" not in env
+    # the command runs behind a wrapper that records its process group, then becomes it
+    command = list(request.config.command)
+    assert command[:2] == ["/bin/sh", "-c"] and command[-1] == "true"
+    assert command[4] == tracker_module._pgid_path("c1")
 
 
 async def _identity_missing(_pid, _marker):
@@ -440,7 +444,9 @@ async def test_process_group_probe_excludes_its_reused_own_pgid(tmp_path):
         async def Execute(self, request, timeout):
             command = request.config.command
             assert command[0:2] == ["/bin/sh", "-c"]
-            assert command[2].startswith('[ "$$" -ne 42 ] || exit 1; ps -eo pid=,pgid=,comm= | awk')
+            assert command[2].startswith(
+                '[ "$$" -ne 42 ] || exit 1; ps -eo pid=,pgid=,stat=,comm= | awk'
+            )
 
             class Response:
                 exit_code = 1
@@ -624,3 +630,77 @@ async def test_a_group_that_cannot_be_identified_or_signalled_is_unknown(tmp_pat
     assert not gone and "unknown" in detail
     gone, detail = await tracker._group_gone_after_exit({"identity": {"pgid": 4242}})
     assert not gone and "could not signal" in detail
+
+
+@pytest.mark.asyncio
+async def test_a_command_that_ended_before_its_group_was_read_still_has_its_group_stopped(
+    tmp_path, monkeypatch
+):
+    """The wrapper records the group id before the command can exit, so a fast command that
+    leaves a child behind is covered even when the child drops its environment."""
+    import os
+    import signal
+    import subprocess
+
+    monkeypatch.setattr(tracker_module, "GROUP_TERM_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(tracker_module, "GROUP_KILL_WAIT_SECONDS", 1.0)
+
+    class Stub:
+        async def Execute(self, request, timeout):
+            done = subprocess.run(  # noqa: ASYNC221
+                list(request.config.command), capture_output=True, check=False
+            )
+            return type("Result", (), {"exit_code": done.returncode, "stdout": done.stdout})()
+
+    tracker = Tracker(CommandJournal(tmp_path / "commands.json"), Stub(), 1)
+    pgid_file = tmp_path / "pgid"
+    pgid_path = str(pgid_file)
+
+    # nothing recorded and no identity: the group is unknown, not "gone"
+    gone, detail = await tracker._group_gone_after_exit({}, pgid_path)
+    assert not gone and "unknown" in detail
+
+    # a command that ends at once, leaving a child that dropped the tracker's environment
+    shell = subprocess.Popen(  # noqa: ASYNC220
+        [
+            *tracker_module._PGID_WRAPPER,
+            pgid_path,
+            "sh",
+            "-c",
+            f"env -u {tracker_module._TRACKER_MARKER_ENV} sleep 60 &",
+        ],
+        start_new_session=True,
+    )
+    shell.wait(timeout=5)
+    try:
+        assert pgid_file.exists()
+        assert await tracker._group_gone_after_exit({}, pgid_path) == (True, "")
+        assert not pgid_file.exists()  # the record is removed
+        for _ in range(20):  # the child is signalled, not merely waited for
+            try:
+                os.killpg(shell.pid, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.1)
+        else:
+            raise AssertionError("the child of the command is still running")
+    finally:
+        try:
+            os.killpg(shell.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_the_wrapper_runs_the_command_even_when_the_callers_path_has_no_tools(tmp_path):
+    import subprocess
+
+    pgid_file = tmp_path / "pgid"
+    done = subprocess.run(
+        [*tracker_module._PGID_WRAPPER, str(pgid_file), "/bin/echo", "ok"],
+        env={"PATH": "/nonexistent"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (done.returncode, done.stdout.strip()) == (0, "ok"), done.stderr
+    assert pgid_file.read_text().isdigit()
