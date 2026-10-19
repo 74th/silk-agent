@@ -30,6 +30,7 @@ async def test_allow():
     assert call["model"] == "gemini-3.8-flash"
     assert call["config"].response_schema is InputVerdict
     assert "審査" in call["config"].system_instruction
+    assert call["config"].http_options.timeout == 30000  # an explicit call timeout (ms)
 
 
 async def test_block_with_reason():

@@ -28,6 +28,7 @@ class GeminiPolicyGuard:
         project: str,
         location: str = "global",
         client: Any | None = None,
+        timeout_seconds: float = 30.0,
     ) -> None:
         if policy is None:
             if policy_file is None:
@@ -38,6 +39,7 @@ class GeminiPolicyGuard:
         self._project = project
         self._location = location
         self._client = client
+        self._timeout_ms = int(timeout_seconds * 1000)
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -64,6 +66,7 @@ class GeminiPolicyGuard:
             response_mime_type="application/json",
             response_schema=InputVerdict,
             temperature=0.0,
+            http_options=types.HttpOptions(timeout=self._timeout_ms),
         )
         response = await self._get_client().aio.models.generate_content(
             model=self._model,

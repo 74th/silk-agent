@@ -174,7 +174,7 @@ class SlackBot:
         except Exception:
             log.exception("closing Socket Mode failed")
         if self.channel is not None:
-            await self.channel.wait_idle()
+            await self.channel.wait_idle(self._grace)
         if self.services is not None:
             await self.services.aclose(self._grace)
 
