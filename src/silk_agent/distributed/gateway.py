@@ -201,7 +201,7 @@ class SlackEventNormalizer:
         if event_type not in {"app_mention", "message"}:
             return None
         if event.get("user") == self._bot_user_id or event.get("bot_id"):
-            return None
+            return None  # the Bot's own (or another bot's) message: never an input
         team = str(callback.get("team_id") or event.get("team") or "")
         channel = str(event.get("channel") or "")
         message_ts = str(event.get("ts") or "")
@@ -209,6 +209,12 @@ class SlackEventNormalizer:
         if not all((team, channel, message_ts, event_id)):
             raise ValueError("Slack event callback is missing a stable identity")
         channel_type = event.get("channel_type")
+        log.info(
+            "Slack %s event (channel_type=%s, in_thread=%s)",
+            event_type,
+            channel_type,
+            isinstance(event.get("thread_ts"), str),
+        )
         mark_participating = False
         if is_mention:
             thread_ts = str(event.get("thread_ts") or message_ts)
@@ -218,10 +224,14 @@ class SlackEventNormalizer:
         else:
             thread_value = event.get("thread_ts")
             if not isinstance(thread_value, str) or thread_value == message_ts:
+                # Not in a thread: a message in the channel without a mention is not for the Bot.
+                log.info("ignored a Slack message outside a thread (no mention)")
                 return None
             thread_ts = thread_value
             conversation_key = make_key(team, channel, thread_ts)
             if not await self._is_participating(conversation_key):
+                # The Bot has not been mentioned in this thread, so it does not take part in it.
+                log.info("ignored a Slack thread message: the Bot does not take part in the thread")
                 return None
         conversation_key = make_key(team, channel, None if thread_ts == "-" else thread_ts)
         generation = (
