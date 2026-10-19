@@ -14,6 +14,7 @@ import statistics
 import subprocess
 import sys
 import time
+from datetime import timedelta
 
 sys.path.insert(0, __import__("os").path.dirname(__file__))
 from acceptance_common import *  # noqa: E402,F403
@@ -104,13 +105,16 @@ async def one_pass(e, keys, seconds: int, label: str) -> list[float]:
 
 
 async def suppress_outputs(e, prefix: str) -> None:
+    expire_at = datetime.now(UTC) + timedelta(days=1)  # test records are not kept
     async for doc in e.c.collection(f"{P}_outbox").stream():
         data = doc.to_dict()
         if (
             data.get("conversation_key", "").startswith(prefix)
             and data.get("status") != "delivered"
         ):
-            await doc.reference.update({"status": "delivered", "suppressed_reason": "load-test"})
+            await doc.reference.update(
+                {"status": "delivered", "suppressed_reason": "load-test", "expire_at": expire_at}
+            )
 
 
 async def main() -> None:
