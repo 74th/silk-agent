@@ -212,7 +212,7 @@ data:
     workspace_storage: 10Gi
     runtime:
       container_name: sandboxd
-      image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/session-runtime@sha256:99c1e3f8410c03af3523f8f924acad14eaaf159808b55832617284cd84b87acc
+      image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/session-runtime@sha256:6a1bb379048e2caf88855544664f51a6e53313360bfe56da32ecb8bc6178461b
       rest_port: 8080
       tracker_port: 8081
       grpc_port: 9090
@@ -283,7 +283,7 @@ kind: ConfigMap
 metadata:
   labels:
     app.kubernetes.io/part-of: silk-agent-distributed
-  name: silk-agent-sandbox-service-config-7fk2ht4d55
+  name: silk-agent-sandbox-service-config-ff52g26gtb
   namespace: session-sandbox-system
 ---
 apiVersion: v1
@@ -393,7 +393,7 @@ spec:
       terminationGracePeriodSeconds: 45
       volumes:
       - configMap:
-          name: silk-agent-sandbox-service-config-7fk2ht4d55
+          name: silk-agent-sandbox-service-config-ff52g26gtb
         name: config
       - emptyDir: {}
         name: tmp
@@ -492,7 +492,7 @@ spec:
       terminationGracePeriodSeconds: 45
       volumes:
       - configMap:
-          name: silk-agent-sandbox-service-config-7fk2ht4d55
+          name: silk-agent-sandbox-service-config-ff52g26gtb
         name: config
       - emptyDir: {}
         name: tmp
@@ -580,7 +580,7 @@ spec:
       terminationGracePeriodSeconds: 35
       volumes:
       - configMap:
-          name: silk-agent-sandbox-service-config-7fk2ht4d55
+          name: silk-agent-sandbox-service-config-ff52g26gtb
         name: config
       - emptyDir: {}
         name: tmp
@@ -691,7 +691,7 @@ spec:
       terminationGracePeriodSeconds: 60
       volumes:
       - configMap:
-          name: silk-agent-sandbox-service-config-7fk2ht4d55
+          name: silk-agent-sandbox-service-config-ff52g26gtb
         name: config
       - emptyDir:
           sizeLimit: 256Mi

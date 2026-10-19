@@ -440,7 +440,9 @@ async def test_process_group_probe_excludes_its_reused_own_pgid(tmp_path):
         async def Execute(self, request, timeout):
             command = request.config.command
             assert command[0:2] == ["/bin/sh", "-c"]
-            assert command[2].startswith('[ "$$" -ne 42 ] || exit 1; ps -eo pid=,pgid=,comm= | awk')
+            assert command[2].startswith(
+                '[ "$$" -ne 42 ] || exit 1; ps -eo pid=,pgid=,stat=,comm= | awk'
+            )
 
             class Response:
                 exit_code = 1
@@ -624,3 +626,40 @@ async def test_a_group_that_cannot_be_identified_or_signalled_is_unknown(tmp_pat
     assert not gone and "unknown" in detail
     gone, detail = await tracker._group_gone_after_exit({"identity": {"pgid": 4242}})
     assert not gone and "could not signal" in detail
+
+
+@pytest.mark.asyncio
+async def test_a_command_that_ended_before_its_group_was_read_is_checked_by_its_marker(
+    tmp_path, monkeypatch
+):
+    """A fast command is gone before its identity can be read; its leftovers are found by the
+    marker in their environment instead, and a command with none is simply finished."""
+    import os
+    import signal
+    import subprocess
+    import uuid
+
+    monkeypatch.setattr(tracker_module, "GROUP_TERM_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(tracker_module, "GROUP_KILL_WAIT_SECONDS", 1.0)
+
+    class Stub:
+        async def Execute(self, request, timeout):
+            done = subprocess.run(  # noqa: ASYNC221
+                list(request.config.command), capture_output=True, check=False
+            )
+            return type("Result", (), {"exit_code": done.returncode, "stdout": done.stdout})()
+
+    tracker = Tracker(CommandJournal(tmp_path / "commands.json"), Stub(), 1)
+    marker = uuid.uuid4().hex
+
+    assert await tracker._group_gone_after_exit({}, marker) == (True, "")  # nothing carries it
+
+    env = {**os.environ, tracker_module._TRACKER_MARKER_ENV: marker}
+    leftover = subprocess.Popen(["sleep", "60"], env=env, start_new_session=True)  # noqa: ASYNC220
+    try:
+        assert await tracker._group_gone_after_exit({}, marker) == (True, "")
+        assert leftover.wait(timeout=5) == -signal.SIGTERM
+    finally:
+        if leftover.poll() is None:
+            os.killpg(leftover.pid, signal.SIGKILL)
+            leftover.wait()
