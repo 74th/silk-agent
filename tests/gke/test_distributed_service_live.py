@@ -35,10 +35,11 @@ from silk_agent.sandbox.remote import (
 )
 from silk_agent.stores.firestore.client import create_firestore_client
 from silk_agent.stores.firestore.command_monitor import FirestoreCommandMonitorStore
-from silk_agent.stores.firestore.ids import conversation_document_id, document_id
+from silk_agent.stores.firestore.ids import conversation_document_id
 from silk_agent.stores.firestore.inbox import FirestoreInboxStore
 from silk_agent.stores.firestore.ownership import FirestoreOwnershipStore
 from silk_agent.stores.firestore.workers import FirestoreWorkerDirectory
+from tests.gke.cleanup import delete_records_of_conversation
 
 pytestmark = pytest.mark.gke
 
@@ -74,7 +75,6 @@ async def test_real_commands_files_dedup_cancel_and_owner_fencing_without_slack(
     command_id = f"validation-command-{run_id}"
     cancel_id = f"validation-cancel-{run_id}"
     write_id = f"validation-file-{run_id}"
-    created_ids: list[str] = []  # commands the runtime started with ids of its own
     tenant, session = to_session_key_parts(key)
     sandbox_key = SessionKey(tenant_id=tenant, session_id=session)
     token = None
@@ -267,12 +267,7 @@ async def test_real_commands_files_dedup_cancel_and_owner_fencing_without_slack(
         # The runtime ensures the Sandbox in its own request, then starts the command.
         runtime = RemoteSandboxRuntime(remote, current_identity)
 
-        async def capture_id(started_id: str) -> None:
-            created_ids.append(started_id)  # recorded as soon as it exists, whatever follows
-
-        ran = await runtime.run_command(
-            key, "printf live-ok", timeout_seconds=60, on_started=capture_id
-        )
+        ran = await runtime.run_command(key, "printf live-ok", timeout_seconds=60)
         assert (ran.outcome, ran.stdout) == ("completed", "live-ok")
         result["runtime_run_command"] = True
         result["cancel_command_id"] = cancel_id
@@ -327,14 +322,9 @@ async def test_real_commands_files_dedup_cancel_and_owner_fencing_without_slack(
             for name in ("inputs", "controls"):
                 async for doc in conversation_ref.collection(name).stream():
                     await doc.reference.delete()
-            for name in ("commands", "sandbox_operations"):
-                for identifier in (command_id, cancel_id, write_id, *created_ids):
-                    kind = "command" if name == "commands" else "operation"
-                    await (
-                        database.collection(f"{prefix}_{name}")
-                        .document(document_id(identifier, prefix=kind))
-                        .delete()
-                    )
+            # By conversation key, not by command id: a start whose response was lost still left
+            # its records.
+            await delete_records_of_conversation(database, prefix, key)
             if token is not None:
                 await owners.release(token, now=clock.now())
             worker_ref = directory._worker_ref(worker_id)
