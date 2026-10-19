@@ -18,11 +18,13 @@ from gke_session_sandbox.errors import (
     StaleGenerationError,
 )
 from silk_agent.core.ports import CommandResult
-from silk_agent.distributed.metrics import METRICS
 from silk_agent.sandbox.output_archive import OutputPage
 from silk_agent.sandbox.service import _call_and_close, _session_key
 
 log = logging.getLogger(__name__)
+
+
+_OUTPUT_LIMITS = {"session_output_limit": "session", "command_output_limit": "command"}
 
 
 class ServiceCommandRuntime:
@@ -69,9 +71,13 @@ class ServiceCommandRuntime:
         if state == "running":
             return CommandResult(command_id, "running")
         if state == "finished":
-            _note_output_limit(command_id, record)
             outcome = "cancelled" if record.get("stop_reason") == "cancelled" else "completed"
-            return CommandResult(command_id, outcome, record.get("exit_code"))
+            return CommandResult(
+                command_id,
+                outcome,
+                record.get("exit_code"),
+                output_limit=_OUTPUT_LIMITS.get(str(record.get("output_error_code"))),
+            )
         return CommandResult(command_id, "unknown")
 
     async def read_output_page(
@@ -96,19 +102,6 @@ class ServiceCommandRuntime:
         )
         complete = bool(page.complete)
         return OutputPage(page.data, page.cursor, complete, complete and not page.output_complete)
-
-
-_OUTPUT_LIMITS = {"session_output_limit": "session", "command_output_limit": "command"}
-
-
-def _note_output_limit(command_id: str, record: Any) -> None:
-    """Make a command that ran into an output limit visible: its output is cut short and, for the
-    session limit, the next commands of the session fail the same way until old output expires."""
-    limit = _OUTPUT_LIMITS.get(str(record.get("output_error_code")))
-    if limit is None:
-        return
-    METRICS.inc("sandbox_output_limit_total", limit=limit)
-    log.warning("command %s hit the %s output limit; its output is incomplete", command_id, limit)
 
 
 async def run_monitor_loop(

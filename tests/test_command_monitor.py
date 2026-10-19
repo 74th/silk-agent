@@ -713,3 +713,64 @@ async def test_monitor_does_not_finish_command_when_output_archive_fails():
     assert await monitor.poll_once() == 1
     assert store.commands["archive-failure"]["state"] is CommandExecutionState.RUNNING
     assert store.inputs == {}
+
+
+async def test_an_output_limit_is_counted_once_when_the_terminal_state_commits(caplog):
+    from silk_agent.distributed.metrics import METRICS
+
+    class LimitedRuntime(OutputRuntime):
+        async def command_status(self, conversation_key, command_id):
+            result = await super().command_status(conversation_key, command_id)
+            return CommandResult(command_id, result.outcome, output_limit="session")
+
+    class FlakyObjects(MemoryOutputStore):
+        fail = True
+
+        async def put(self, **kwargs):
+            if self.fail:
+                raise OSError("upload unavailable")
+            return await super().put(**kwargs)
+
+    METRICS.reset()
+    now = datetime(2026, 10, 14, tzinfo=UTC)
+    clock = MutableClock(now)
+    store = FakeSharedStore()
+    owner = OwnershipToken(
+        "conversation", "worker", "incarnation", 1, 1, now + timedelta(minutes=5)
+    )
+    store.owners["conversation"] = owner
+    store.ownership_phases["conversation"] = "active"
+    await store.create_intent(
+        command_id="limited",
+        request_hash="hash",
+        conversation_key="conversation",
+        conversation_generation=1,
+        sandbox_generation=4,
+        origin_turn="turn-1",
+        origin_epoch=1,
+        origin_seq=1,
+        owner=owner,
+        created_at=now,
+    )
+    store.commands["limited"]["state"] = CommandExecutionState.RUNNING
+    objects = FlakyObjects()
+    monitor = CommandMonitor(
+        store,
+        LimitedRuntime("completed"),
+        clock,
+        monitor_id="monitor",
+        lease_seconds=10,
+        output_archiver=CommandOutputArchiver(objects, clock=clock),
+    )
+
+    with caplog.at_level("WARNING"):
+        await monitor.poll_once()  # the archive fails: the command is read again later
+        assert METRICS.value("sandbox_output_limit_total", limit="session") is None
+        objects.fail = False
+        clock.value = now + timedelta(seconds=11)  # the lease of the failed poll has expired
+        await monitor.poll_once()
+        await monitor.poll_once()  # it is finished: not read, not counted again
+    assert store.commands["limited"]["state"] is CommandExecutionState.FINISHED
+    assert METRICS.value("sandbox_output_limit_total", limit="session") == 1
+    assert caplog.text.count("hit the session output limit") == 1
+    METRICS.reset()

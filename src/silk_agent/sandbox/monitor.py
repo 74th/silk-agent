@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
 from typing import Protocol
@@ -9,11 +10,14 @@ from typing import Protocol
 from silk_agent.core.distributed_models import CommandExecutionState
 from silk_agent.core.distributed_ports import CommandMonitorStore
 from silk_agent.core.ports import CommandResult
+from silk_agent.distributed.metrics import METRICS
 from silk_agent.sandbox.output_archive import (
     CommandOutputArchiver,
     OutputObjectReader,
     OutputPageReader,
 )
+
+log = logging.getLogger(__name__)
 
 
 class CommandStatusReader(Protocol):
@@ -271,7 +275,7 @@ class CommandMonitor:
                     # A terminal tracker result is not complete until both streams have
                     # been durably archived. Let this lease expire and retry by ID.
                     return
-            await self._store.observe_terminal(
+            committed = await self._store.observe_terminal(
                 command_id,
                 claim_token=claim_token,
                 expected=current,
@@ -279,6 +283,15 @@ class CommandMonitor:
                 result=result_data,
                 now=self._clock.now(),
             )
+            if committed and result.output_limit is not None:
+                # Once per command: only the poll that commits the terminal state counts, not a
+                # retried read (an archive failure, a lost claim).
+                METRICS.inc("sandbox_output_limit_total", limit=result.output_limit)
+                log.warning(
+                    "command %s hit the %s output limit; its output is incomplete",
+                    command_id,
+                    result.output_limit,
+                )
             return
         await self._store.record_observation(
             command_id,

@@ -160,10 +160,7 @@ async def test_monitor_loop_survives_a_failing_pass_and_stops_on_request():
 
 
 @pytest.mark.asyncio
-async def test_a_command_that_hit_an_output_limit_is_counted_and_logged(caplog):
-    from silk_agent.distributed.metrics import METRICS
-
-    METRICS.reset()
+async def test_the_status_says_which_output_limit_a_finished_command_hit():
     commands = Commands(
         {
             "big": {
@@ -180,10 +177,8 @@ async def test_a_command_that_hit_an_output_limit_is_counted_and_logged(caplog):
         }
     )
     runtime = ServiceCommandRuntime(Manager(commands))
-    with caplog.at_level("WARNING"):
-        for command_id in ("big", "wide", "fine"):
-            assert (await runtime.command_status("slack:T:C:1", command_id)).outcome == "completed"
-    assert METRICS.value("sandbox_output_limit_total", limit="session") == 1
-    assert METRICS.value("sandbox_output_limit_total", limit="command") == 1
-    assert "hit the session output limit" in caplog.text and "fine" not in caplog.text
-    METRICS.reset()
+    limits = {
+        command_id: (await runtime.command_status("slack:T:C:1", command_id)).output_limit
+        for command_id in ("big", "wide", "fine")
+    }
+    assert limits == {"big": "session", "wide": "command", "fine": None}
