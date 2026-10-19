@@ -24,6 +24,7 @@ from silk_agent.core.events import (
 from silk_agent.core.ports import (
     AgentEngine,
     AgentEngineFactory,
+    AppendOutcomeUnknown,
     Clock,
     ConversationState,
     EventSink,
@@ -34,7 +35,7 @@ from silk_agent.core.ports import (
 log = logging.getLogger(__name__)
 
 SessionState = Literal["idle", "running", "interrupting"]
-SubmissionOutcome = Literal["queued", "appended", "rejected"]
+SubmissionOutcome = Literal["queued", "appended", "rejected", "uncertain"]
 InputCompletion = Callable[[str], Awaitable[None]]
 InputStart = Callable[[str], Awaitable[bool]]
 InputQueue = Callable[[str], Awaitable[bool]]
@@ -162,12 +163,20 @@ class AgentSession:
         self._last_turn_interrupted = False
         self._cancel_idle_timer()
         running = self._state != "idle"
+        appended = False
         if (
             self._state == "running"
             and self._settings.interrupt_mode == "append"
             and self._engine is not None
-            and await self._engine.append(message.text)
         ):
+            try:
+                appended = await self._engine.append(message.text)
+            except AppendOutcomeUnknown:
+                # The text may already be with the agent: queueing it would run it twice.
+                # The caller records it as unknown and tells the user; it is never resent.
+                log.warning("append to the running turn of %s: outcome unknown", self.key)
+                return "uncertain"
+        if appended:
             # Shown in the progress message, not as a separate post.
             if message.input_id and message.input_id not in self._turn_input_ids:
                 self._turn_input_ids.append(message.input_id)
@@ -195,11 +204,13 @@ class AgentSession:
                 Notice(self.key, "バックグラウンド処理が完了しました。結果は保留中です。")
             )
             return "held"
-        if (
-            self._state == "running"
-            and self._engine is not None
-            and await self._engine.append(text)
-        ):
+        appended = False
+        if self._state == "running" and self._engine is not None:
+            try:
+                appended = await self._engine.append(text)
+            except AppendOutcomeUnknown:
+                appended = False  # a completion notice is information: a repeat is harmless
+        if appended:
             if input_id:
                 if input_id not in self._turn_input_ids:
                     self._turn_input_ids.append(input_id)
@@ -534,6 +545,9 @@ class AgentSession:
             or self._engine is not None
             or not self._queue.empty()
             or self._held_notices
+            # A stop holds back background completions until the user writes again. That gate
+            # lives in this object; a fresh session would start without it.
+            or self._last_turn_interrupted
         ):
             return
         await self._cancel_worker()

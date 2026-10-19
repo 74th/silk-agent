@@ -187,8 +187,19 @@ def test_no_match_from_an_incomplete_invocation_is_not_a_pass():
         assert out.text == ""
 
 
-def test_a_match_is_still_acted_on_when_the_invocation_was_partial():
-    out = ModelArmorSanitizer.interpret(
+def test_an_incomplete_invocation_is_never_shown_whatever_matched():
+    # An ignored filter matching, an SDP match (masked text), a harmful match: none of them
+    # makes the text safe to show when other filters did not run.
+    ignored = ModelArmorSanitizer.interpret(
+        result(ma.InvocationResult.PARTIAL, pi_and_jailbreak=pi()),
+        "contact private@example.com",
+        ignored_filters={"pi_and_jailbreak"},
+    )
+    masked = ModelArmorSanitizer.interpret(
         result(ma.InvocationResult.PARTIAL, sdp=sdp("MASKED")), "secret"
     )
-    assert (out.status, out.text) == ("masked", "MASKED")
+    harmful = ModelArmorSanitizer.interpret(
+        result(ma.InvocationResult.FAILURE, malicious_uris=uri()), "http://bad.example"
+    )
+    for out in (ignored, masked, harmful):
+        assert out.status == "error" and out.text == ""

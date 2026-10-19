@@ -1,6 +1,7 @@
 import asyncio
 from pathlib import Path
 
+import pytest
 from claude_agent_sdk import (
     AssistantMessage,
     MirrorErrorMessage,
@@ -24,7 +25,7 @@ from silk_agent.core.events import (
     TurnFailed,
     TurnFinished,
 )
-from silk_agent.core.ports import TurnRequest
+from silk_agent.core.ports import AppendOutcomeUnknown, TurnRequest
 
 
 def result(**kw):
@@ -699,6 +700,26 @@ async def test_an_interrupt_before_the_query_stops_the_turn_without_sending_it(c
     assert FakeSDKClient.instances[0].queries == []  # nothing was sent
 
 
+async def test_an_append_that_fails_part_way_is_an_unknown_outcome_not_a_refusal(clock, tmp_path):
+    from silk_agent.core.ports import AppendOutcomeUnknown
+
+    eng = make(clock, tmp_path, lambda n: [("block",), ("msg", text("done")), ("msg", result())])
+    turn = asyncio.create_task(run(eng))
+    await asyncio.sleep(0.05)
+    client = FakeSDKClient.instances[0]
+
+    async def writes_then_breaks(prompt):
+        client.queries.append(prompt)  # the agent has it...
+        raise ConnectionError("pipe closed")  # ...and the caller learns only that it failed
+
+    client.query = writes_then_breaks  # type: ignore[method-assign]
+    with pytest.raises(AppendOutcomeUnknown):
+        await eng.append("do-once")
+    assert client.queries[-1] == "do-once"
+    await eng.interrupt()
+    await asyncio.wait_for(turn, 2)
+
+
 async def test_a_failed_append_is_not_counted_so_the_turn_can_still_end(clock, tmp_path):
     eng = make(
         clock,
@@ -713,7 +734,8 @@ async def test_a_failed_append_is_not_counted_so_the_turn_can_still_end(clock, t
         raise ConnectionError("pipe closed")
 
     client.query = broken_query  # type: ignore[method-assign]
-    assert await eng.append("one more thing") is False  # the caller queues it instead
+    with pytest.raises(AppendOutcomeUnknown):
+        await eng.append("one more thing")
     await eng.interrupt()
     events = await asyncio.wait_for(turn, 2)  # still ends: _sent was rolled back
     assert not any(isinstance(e, TurnFailed) for e in events)
