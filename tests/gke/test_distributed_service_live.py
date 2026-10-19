@@ -251,6 +251,23 @@ async def test_real_commands_files_dedup_cancel_and_owner_fencing_without_slack(
                 break
             await asyncio.sleep(0.25)
         assert cancelled["state"] == "cancelled"
+
+        # A successor Worker has another turn and origin sequence: it still reads and cancels
+        # the commands of the conversation (they belong to the conversation, not to a turn).
+        successor = {**identity, "turn_id": f"successor-{run_id}", "origin_seq": 99}
+        successor_status = await remote.command_status(key, command_id, **successor)
+        assert successor_status["state"] == "finished"
+        successor_page = await remote.command_output(
+            key, command_id, stream="stdout", cursor=0, **successor
+        )
+        assert base64.b64decode(successor_page["data_base64"]) == b"once\n"
+        result["successor_reads_commands"] = True
+
+        # The runtime ensures the Sandbox in its own request, then starts the command.
+        runtime = RemoteSandboxRuntime(remote, current_identity)
+        ran = await runtime.run_command(key, "printf live-ok", timeout_seconds=60)
+        assert (ran.outcome, ran.stdout) == ("completed", "live-ok")
+        result["runtime_run_command"] = True
         result["cancel_command_id"] = cancel_id
         result["cancel_state"] = cancelled
         result["elapsed_seconds"] = round(time.monotonic() - started, 3)
