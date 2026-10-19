@@ -562,6 +562,13 @@ class FirestoreCommandMonitorStore:
                             "conversation_generation": generation,
                             "next_input_seq": seq + 1,
                             "allocation_state": "waiting",
+                            # Only a change to waiting starts the clock: one that was already
+                            # waiting keeps how long it has waited.
+                            **(
+                                {}
+                                if conversation_data.get("allocation_state") == "waiting"
+                                else {"waiting_since": now}
+                            ),
                             "version": version + 1,
                             "schema_version": 1,
                         },

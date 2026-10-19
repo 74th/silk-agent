@@ -15,6 +15,10 @@ from silk_agent.stores.firestore.errors import convert_firestore_error
 from silk_agent.stores.firestore.ids import document_id
 from silk_agent.stores.firestore.retention import RetentionPolicy, worker_expiry
 
+# A Worker whose clock runs slightly ahead writes a heartbeat in the future; that is not a
+# reason to stop giving it conversations.
+HEARTBEAT_FUTURE_TOLERANCE = timedelta(seconds=30)
+
 
 class FirestoreWorkerDirectory:
     def __init__(
@@ -114,7 +118,7 @@ class FirestoreWorkerDirectory:
                 if (
                     not record.draining
                     and record.heartbeat_at >= cutoff
-                    and record.heartbeat_at <= now
+                    and record.heartbeat_at <= now + HEARTBEAT_FUTURE_TOLERANCE
                     and record.reserved < record.capacity
                 ):
                     available.append(record)

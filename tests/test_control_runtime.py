@@ -183,3 +183,29 @@ async def test_sender_loop_resumes_after_the_last_page_and_starts_over_at_the_en
     for _ in range(4):
         await loop.run_once()
     assert asked == [None, "p1", "p2", None]
+
+
+@pytest.mark.asyncio
+async def test_control_allocator_reports_the_oldest_wait_and_whether_the_count_is_capped():
+    from datetime import timedelta
+
+    from silk_agent.distributed.metrics import METRICS
+
+    METRICS.reset()
+
+    class Conversations(FakeConversations):
+        async def oldest_waiting_since(self):
+            return datetime(2026, 10, 14, tzinfo=UTC) - timedelta(seconds=90)
+
+    runtime = ControlAllocatorLoop(
+        Conversations(("room-1", "room-2")),
+        FakeWorkers(()),
+        FakeAllocator(),
+        FakeClock(),
+        allocator_id="control-a",
+        batch_size=2,
+    )
+    await runtime.run_once()
+    assert METRICS.value("control_oldest_waiting_seconds") == 90
+    assert METRICS.value("control_waiting_conversations_capped") == 1  # the page is full
+    METRICS.reset()

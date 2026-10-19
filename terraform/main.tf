@@ -66,6 +66,26 @@ resource "google_firestore_index" "unfinished_inputs" {
   depends_on = [google_firestore_database.silk_agent]
 }
 
+# The Control's observation of how long the longest-waiting conversation has waited.
+resource "google_firestore_index" "waiting_conversations" {
+  for_each    = var.usecases
+  project     = var.project_id
+  database    = var.firestore_database_id
+  collection  = "${each.value.firestore_prefix}_conversations"
+  query_scope = "COLLECTION"
+
+  fields {
+    field_path = "allocation_state"
+    order      = "ASCENDING"
+  }
+  fields {
+    field_path = "waiting_since"
+    order      = "ASCENDING"
+  }
+
+  depends_on = [google_firestore_database.silk_agent]
+}
+
 # Due nonterminal command query used by the distributed command Monitor.
 resource "google_firestore_index" "due_commands" {
   for_each    = var.usecases
@@ -92,6 +112,34 @@ resource "google_firestore_index" "stop_commands" {
   project     = var.project_id
   database    = var.firestore_database_id
   collection  = "${each.value.firestore_prefix}_commands"
+  query_scope = "COLLECTION"
+
+  fields {
+    field_path = "conversation_key"
+    order      = "ASCENDING"
+  }
+  fields {
+    field_path = "conversation_generation"
+    order      = "ASCENDING"
+  }
+  fields {
+    field_path = "state"
+    order      = "ASCENDING"
+  }
+  fields {
+    field_path = "origin_seq"
+    order      = "ASCENDING"
+  }
+
+  depends_on = [google_firestore_database.silk_agent]
+}
+
+# The Sandbox Service's stop barrier enumerates accepted operations the same way.
+resource "google_firestore_index" "stop_sandbox_operations" {
+  for_each    = var.usecases
+  project     = var.project_id
+  database    = var.firestore_database_id
+  collection  = "${each.value.firestore_prefix}_sandbox_operations"
   query_scope = "COLLECTION"
 
   fields {

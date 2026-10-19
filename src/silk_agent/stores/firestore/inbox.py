@@ -330,6 +330,11 @@ class FirestoreInboxStore:
                     "conversation_generation": conversation_generation,
                     "next_input_seq": next_seq + 1,
                     **({} if owned else {"allocation_state": "waiting"}),
+                    **(
+                        {"waiting_since": created_at}
+                        if not owned and conversation_data.get("allocation_state") != "waiting"
+                        else {}
+                    ),
                     **({"participating": True} if participating else {}),
                     **({"control_only": False} if sender_id is None else {}),
                     "version": current_version + 1,

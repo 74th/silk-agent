@@ -326,6 +326,22 @@ class ControlAllocatorLoop:
         waiting = await self._conversations.list_waiting(limit=self._batch_size)
         # Observable even with no Worker: that is exactly when the queue matters.
         METRICS.set("control_waiting_conversations", len(waiting))
+        # The page is bounded, so the count above stops at the batch size; say so, and report
+        # how long the oldest has waited (which the bound does not hide).
+        METRICS.set("control_waiting_conversations_capped", int(len(waiting) >= self._batch_size))
+        oldest = getattr(self._conversations, "oldest_waiting_since", None)
+        if oldest is not None:
+            try:
+                since = await oldest()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("Oldest waiting lookup failed (%s)", type(exc).__name__)
+            else:
+                METRICS.set(
+                    "control_oldest_waiting_seconds",
+                    max(0.0, (now - since).total_seconds()) if since is not None else 0,
+                )
         METRICS.set("control_available_workers", len(candidates))
         if not candidates:
             return 0
