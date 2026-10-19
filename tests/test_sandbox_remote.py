@@ -102,6 +102,9 @@ async def test_remote_runtime_wait_cancellation_does_not_cancel_the_command():
     class Sessions:
         canceled = []
 
+        async def ensure(self, conversation_key):
+            return {"ready": True}
+
         async def start_command(self, conversation_key, command, **kwargs):
             return {"command_id": kwargs["request_id"], "state": "running"}
 
@@ -144,3 +147,43 @@ async def test_remote_runtime_wait_cancellation_does_not_cancel_the_command():
     assert (await runtime.command_status("conversation-a", started[0])).outcome == "running"
     await runtime.cancel_commands("conversation-a")
     assert sessions.canceled == [started[0]]
+
+
+async def test_the_sandbox_is_ensured_in_its_own_request_before_the_command_is_started():
+    calls = []
+
+    class Sessions:
+        async def ensure(self, conversation_key):
+            calls.append("ensure")
+            return {"ready": True}
+
+        async def start_command(self, conversation_key, command, **kwargs):
+            calls.append("start")
+            return {"command_id": kwargs["request_id"], "state": "unknown"}
+
+    async def identity(_key):
+        return {"owner_epoch": 1, "conversation_generation": 1, "turn_id": "t", "origin_seq": 1}
+
+    runtime = RemoteSandboxRuntime(Sessions(), identity, poll_interval=0.01)
+    await runtime.run_command("conversation-a", "ls")
+    assert calls == ["ensure", "start"]
+
+
+async def test_a_cold_start_that_times_out_leaves_no_command_behind():
+    started = []
+
+    class Sessions:
+        async def ensure(self, conversation_key):
+            raise TimeoutError("the Sandbox did not become ready in time")
+
+        async def start_command(self, conversation_key, command, **kwargs):
+            started.append(kwargs["request_id"])
+            return {"state": "running"}
+
+    async def identity(_key):
+        return {"owner_epoch": 1, "conversation_generation": 1, "turn_id": "t", "origin_seq": 1}
+
+    runtime = RemoteSandboxRuntime(Sessions(), identity)
+    with pytest.raises(TimeoutError):
+        await runtime.run_command("conversation-a", "make build")
+    assert started == []  # nothing ran, so a retry cannot run it twice

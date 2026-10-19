@@ -15,6 +15,12 @@ distributed:
   lease_clock_skew_seconds: 5
   max_active_sdks_per_worker: 4
   idle_close_seconds: 600
+hooks:
+  # Audit log of the conversation's events (the same hooks as the single-process template).
+  - factory: silk_usecase_bigquery_analysis.hooks:create
+    options:
+      include_content: false       # true: also log (masked) text, tool input and results
+  - silk_agent.hooks:json_lines    # the standard hook: one JSON line per event on stdout
 slack:
   app_token_secret: projects/nnyn-dev/secrets/bigquery-analysis-slack-app-token
   bot_token_secret: projects/nnyn-dev/secrets/bigquery-analysis-slack-bot-token

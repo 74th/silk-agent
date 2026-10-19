@@ -339,7 +339,7 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:3f0bbb61aa4db278dc3e5012216bccf3a39018e874beac11992fa963f4c1cb6d
+        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:012433b560f889280b18e00b9ebb3631278668edd7b738dca43acef9d5495722
         livenessProbe:
           failureThreshold: 3
           httpGet:
@@ -436,7 +436,7 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:3f0bbb61aa4db278dc3e5012216bccf3a39018e874beac11992fa963f4c1cb6d
+        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:012433b560f889280b18e00b9ebb3631278668edd7b738dca43acef9d5495722
         livenessProbe:
           failureThreshold: 3
           httpGet:
@@ -532,7 +532,7 @@ spec:
             secretKeyRef:
               key: environment-fingerprint-key
               name: silk-agent-sandbox
-        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:3f0bbb61aa4db278dc3e5012216bccf3a39018e874beac11992fa963f4c1cb6d
+        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:012433b560f889280b18e00b9ebb3631278668edd7b738dca43acef9d5495722
         livenessProbe:
           httpGet:
             path: /healthz
@@ -626,7 +626,7 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.uid
-        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:3f0bbb61aa4db278dc3e5012216bccf3a39018e874beac11992fa963f4c1cb6d
+        image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/silk-agent@sha256:012433b560f889280b18e00b9ebb3631278668edd7b738dca43acef9d5495722
         livenessProbe:
           failureThreshold: 3
           httpGet:
@@ -698,6 +698,19 @@ spec:
               audience: silk-agent-sandbox-service
               expirationSeconds: 3600
               path: silk-sandbox
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app.kubernetes.io/part-of: silk-agent-distributed
+  name: silk-agent-worker
+  namespace: session-sandbox-system
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: silk-agent-worker
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
