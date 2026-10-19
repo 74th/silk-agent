@@ -313,7 +313,22 @@ async def test_pending_recovery_gauge_ignores_ownerships_nobody_waits_on():
     await recovery.run_once()
     assert METRICS.value("control_recovery_pending") == 0  # expired, but no input is waiting
     waiting["value"] = True
-    recovery._schedule.clear()
+    clock = recovery._clock
+    clock.value += timedelta(seconds=31)  # past the idle re-check
     await recovery.run_once()
     assert METRICS.value("control_recovery_pending") == 1  # a user waits for stop evidence
+    assert recovery._coordinator.calls == 1
+    for _ in range(3):  # backing off: no retry, yet the wait is still reported
+        await recovery.run_once()
+        assert METRICS.value("control_recovery_pending") == 1
+    assert recovery._coordinator.calls == 1
+    recovery._ownership.expired = None  # released or renewed: nothing is expired any more
+    recovery._ownership.list_expired = _no_expired
+    clock.value += timedelta(seconds=600)
+    await recovery.run_once()
+    assert METRICS.value("control_recovery_pending") == 0
     METRICS.reset()
+
+
+async def _no_expired(*, before, limit):
+    return ()

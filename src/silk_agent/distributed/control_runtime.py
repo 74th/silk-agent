@@ -56,7 +56,9 @@ class RecoveryLoop:
         self._schedule: dict[str, tuple[int, datetime]] = {}  # key -> (failures, next attempt)
         self._cursor: Any | None = None
         self._cycle_seen: set[str] = set()
-        self._cycle_pending = 0
+        # Waiting for stop evidence, kept apart from the retry schedule: a back-off must not
+        # make the wait look resolved.
+        self._blocked: set[str] = set()
         self._pod_gone = pod_gone
         self._current_incarnation = current_incarnation
         self._auto_after = timedelta(seconds=auto_recover_after_seconds)
@@ -91,11 +93,9 @@ class RecoveryLoop:
             for key in tuple(self._schedule):
                 if key not in self._cycle_seen:
                     del self._schedule[key]  # released or renewed: forget its backoff
-
-        waiting_for_evidence = 0
+            self._blocked &= self._cycle_seen
 
         async def recover(token: Any) -> int:
-            nonlocal waiting_for_evidence
             key = token.conversation_key
             failures, next_at = self._schedule.get(key, (0, now))
             if next_at > now:
@@ -103,10 +103,12 @@ class RecoveryLoop:
             try:
                 if self._has_demand is not None and not await self._has_demand(token):
                     self._schedule[key] = (failures, now + self._idle_check)
+                    self._blocked.discard(key)
                     return 0
                 release = getattr(self._ownership, "release_unactivated", None)
                 if release is not None and await release(token, now=self._clock.now()):
                     METRICS.inc("control_recovery_total", result="unactivated")
+                    self._blocked.discard(key)
                     return 1
 
                 result = await self._coordinator.recover(
@@ -124,21 +126,22 @@ class RecoveryLoop:
                 auto = await self._released_with_evidence(token)
                 if auto is not None:
                     METRICS.inc("control_recovery_total", result=auto)
+                    self._blocked.discard(key)
                     return 1
-                waiting_for_evidence += 1
+                self._blocked.add(key)
                 await self._tell_user(token)
                 self._back_off(key, failures)
+            if state != "blocked":
+                self._blocked.discard(key)
             METRICS.inc("control_recovery_total", result=state)
             return 1 if state == "released" else 0
 
         released = sum(await asyncio.gather(*(recover(token) for token in expired)))
-        # Only the ones waiting for stop evidence (recovery_blocked): an expired ownership that
-        # nobody is waiting on is not an alarm.
-        self._cycle_pending += waiting_for_evidence
         if self._cursor is None:
-            METRICS.set("control_recovery_pending", self._cycle_pending)
+            # Only ownerships waiting for stop evidence (recovery_blocked), whether or not this
+            # pass retried them: an expired ownership nobody waits on is not an alarm.
+            METRICS.set("control_recovery_pending", len(self._blocked & self._cycle_seen))
             self._cycle_seen.clear()
-            self._cycle_pending = 0
         return released
 
     def _back_off(self, key: str, failures: int) -> None:
