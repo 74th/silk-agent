@@ -11,6 +11,7 @@ from silk_agent.core.distributed_ports import UserRateLimitStore
 from silk_agent.stores.firestore.errors import convert_firestore_error
 from silk_agent.stores.firestore.ids import document_id
 
+RATE_LIMIT_WINDOW = timedelta(seconds=60)
 RECORD_RETENTION = timedelta(days=1)
 
 
@@ -43,7 +44,7 @@ class FirestoreUserRateLimitStore:
             hits = data.get("hits", [])
             if not isinstance(hits, list):
                 hits = []
-            cutoff = now - timedelta(seconds=60)
+            cutoff = now - RATE_LIMIT_WINDOW
             recent = [
                 hit
                 for hit in hits

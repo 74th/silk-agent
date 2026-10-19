@@ -220,14 +220,14 @@ TTL による削除は、期限から最大24時間ほど遅れる。TTL の削�
 
 ### 11.2 Terraform（TTL ポリシー）
 
-`terraform/main.tf` が、対象のコレクションの `expire_at` に TTL ポリシーを設定する（コレクショングループ: `inputs`、`controls`。接頭辞つき: `outbox`、`commands`、`sandbox_operations`、`quiesce_requests`、`slack_receipts`、`control_queue`、`workers`）。`expire_at` は索引から外してある。コレクション名の接頭辞は `firestore_prefix`（既定 `silk-agent`）で、設定ファイルの `distributed.firestore_prefix` と一致させる。
+`terraform/main.tf` が、対象のコレクションの `expire_at` に TTL ポリシーを設定する（コレクショングループ: `inputs`、`controls`。接頭辞つき: `outbox`、`commands`、`sandbox_operations`、`quiesce_requests`、`slack_receipts`、`control_queue`、`workers`、`user_rate_limits`）。`expire_at` は索引から外してある。コレクション名の接頭辞は `firestore_prefix`（既定 `silk-agent`）で、設定ファイルの `distributed.firestore_prefix` と一致させる。
 
 ```sh
 cd terraform
 terraform plan   # TTL の追加だけが出ること（既存の索引に差分がないこと）
 terraform apply
 gcloud firestore fields ttls list --database=silk-agent --project=nnyn-dev \
-  --format="table(name.scope(collectionGroups),ttlConfig.state)"   # 9 件が ACTIVE になるまで数分〜
+  --format="table(name.scope(collectionGroups),ttlConfig.state)"   # 件数 = 2 + 8 × ユースケース数（terraform の usecases。ユースケース1つなら 10 件）が ACTIVE になるまで数分〜
 ```
 
 `inputs` の TTL は `moved` で新しいリソース名に引き継がれる（再作成されない）。
