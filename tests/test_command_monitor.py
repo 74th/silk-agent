@@ -510,7 +510,7 @@ async def _running_command(store, now, command_id="stale-command", created_at=No
     await store.detach(command_id, now=now)
 
 
-async def test_a_command_that_stays_unreadable_for_hours_is_ended_not_polled_for_ever():
+async def test_a_command_that_stays_unreadable_for_hours_is_given_up_not_polled_for_ever():
     now = datetime(2026, 10, 14, tzinfo=UTC)
     clock = MutableClock(now)
     store = FakeSharedStore()
@@ -518,28 +518,75 @@ async def test_a_command_that_stays_unreadable_for_hours_is_ended_not_polled_for
     runtime = StatusRuntime("unknown")  # e.g. its Sandbox is idle-suspended
     monitor = CommandMonitor(store, runtime, clock, monitor_id="monitor", stale_after_seconds=3600)
 
-    assert await monitor.poll_once() == 1  # claimed and read, still unknown
+    assert await monitor.poll_once() == 1  # claimed and read: unreadable since now
+    record = store.commands["stale-command"]
+    assert record["state"] is CommandExecutionState.RUNNING
+    assert record["unreadable_since"] == now
+    clock.value += timedelta(minutes=30)
+    await monitor.poll_once()
     assert store.commands["stale-command"]["state"] is CommandExecutionState.RUNNING
-    clock.value += timedelta(hours=2)
+    clock.value += timedelta(minutes=45)  # unreadable for 75 minutes without a break
     assert await monitor.poll_once() == 1
     record = store.commands["stale-command"]
     assert record["state"] is CommandExecutionState.UNKNOWN
-    assert record["result"]["sandbox_lost"] is True
+    # Given up on, not known to be lost: the record does not claim the Sandbox is gone.
+    assert record["result"]["unreadable_given_up"] is True
+    assert "sandbox_lost" not in record["result"]
     clock.value += timedelta(minutes=5)
     assert await monitor.poll_once() == 0  # terminal: not read again
 
 
-async def test_a_recent_command_with_an_unreadable_state_is_not_given_up_on():
+async def test_one_unreadable_moment_never_ends_a_command_that_ran_for_hours():
+    # The review's reproduction: it ran fine for over six hours, then one read fails.
     now = datetime(2026, 10, 14, tzinfo=UTC)
     clock = MutableClock(now)
     store = FakeSharedStore()
     await _running_command(store, now)
+    runtime = StatusRuntime("running")
     monitor = CommandMonitor(
-        store, StatusRuntime("unknown"), clock, monitor_id="monitor", stale_after_seconds=3600
+        store, runtime, clock, monitor_id="monitor", stale_after_seconds=6 * 3600
     )
-    clock.value += timedelta(minutes=30)
+    assert await monitor.poll_once() == 1  # observed running when it was created
+    clock.value += timedelta(hours=6, minutes=1)
+    runtime.outcome = "unknown"  # a single failed read (the tracker was unreachable)
     await monitor.poll_once()
-    assert store.commands["stale-command"]["state"] is CommandExecutionState.RUNNING
+    record = store.commands["stale-command"]
+    assert record["state"] is CommandExecutionState.RUNNING  # not given up on
+    clock.value += timedelta(seconds=40)
+    runtime.outcome = "completed"  # and it recovers
+    assert await monitor.poll_once() == 1
+    record = store.commands["stale-command"]
+    assert record["state"] is CommandExecutionState.FINISHED
+    assert "unreadable_since" not in record
+
+
+async def test_a_good_read_starts_the_unreadable_count_over():
+    now = datetime(2026, 10, 14, tzinfo=UTC)
+    clock = MutableClock(now)
+    store = FakeSharedStore()
+    await _running_command(store, now)
+    runtime = StatusRuntime("unknown")
+    monitor = CommandMonitor(store, runtime, clock, monitor_id="monitor", stale_after_seconds=3600)
+    await monitor.poll_once()  # unreadable since `now`
+    clock.value += timedelta(minutes=50)
+    runtime.outcome = "running"
+    await monitor.poll_once()  # readable again
+    assert "unreadable_since" not in store.commands["stale-command"]
+    clock.value += timedelta(minutes=50)
+    runtime.outcome = "unknown"
+    await monitor.poll_once()  # unreadable again: 100 minutes after the first failure, but
+    assert store.commands["stale-command"]["state"] is CommandExecutionState.RUNNING  # new count
+
+
+async def test_a_lost_sandbox_is_still_ended_at_once_and_marked_lost():
+    now = datetime(2026, 10, 14, tzinfo=UTC)
+    store = FakeSharedStore()
+    await _running_command(store, now)
+    monitor = CommandMonitor(store, StatusRuntime("lost"), MutableClock(now), monitor_id="monitor")
+    assert await monitor.poll_once() == 1
+    record = store.commands["stale-command"]
+    assert record["state"] is CommandExecutionState.UNKNOWN
+    assert record["result"]["sandbox_lost"] is True
 
 
 async def test_monitor_reads_archived_output_with_a_combined_cursor():

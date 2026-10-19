@@ -90,3 +90,50 @@ async def test_a_failed_output_leaves_the_listing_and_gets_a_ttl():
         assert keys == ()
     finally:
         client.close()
+
+
+async def test_the_first_unreadable_time_is_stored_fenced_by_the_claim_and_can_be_cleared():
+    from datetime import UTC, datetime, timedelta
+
+    from silk_agent.stores.firestore.command_monitor import FirestoreCommandMonitorStore
+
+    host = os.environ.get("SILK_AGENT_FIRESTORE_EMULATOR_HOST")
+    if not host:
+        pytest.skip("set SILK_AGENT_FIRESTORE_EMULATOR_HOST to run the Firestore emulator test")
+    client = create_firestore_client(
+        DistributedExecutionConfig(firestore_project=f"silk-agent-test-{uuid.uuid4().hex[:12]}"),
+        emulator_host=host,
+    )
+    prefix = f"test-{uuid.uuid4().hex[:12]}"
+    store = FirestoreCommandMonitorStore(client, collection_prefix=prefix)
+    now = datetime.now(UTC)
+    command_id = f"command-{uuid.uuid4().hex}"
+    ref = client.collection(f"{prefix}_commands").document(
+        document_id(command_id, prefix="command")
+    )
+    try:
+        await ref.set(
+            {
+                "command_id": command_id,
+                "conversation_key": "conversation-unreadable",
+                "conversation_generation": 1,
+                "sandbox_generation": 1,
+                "state": "running",
+                "next_attempt_at": now,
+            }
+        )
+        claim = await store.claim(
+            command_id,
+            monitor_id="monitor-a",
+            now=now,
+            lease_expires_at=now + timedelta(seconds=30),
+        )
+        token = claim["monitor_lease_token"]
+        assert not await store.set_unreadable_since(command_id, claim_token="stale", since=now)
+        assert "unreadable_since" not in (await ref.get()).to_dict()  # fenced by the claim
+        assert await store.set_unreadable_since(command_id, claim_token=token, since=now)
+        assert (await ref.get()).to_dict()["unreadable_since"] == now
+        assert await store.set_unreadable_since(command_id, claim_token=token, since=None)
+        assert "unreadable_since" not in (await ref.get()).to_dict()
+    finally:
+        client.close()

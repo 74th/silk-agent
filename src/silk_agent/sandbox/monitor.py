@@ -46,9 +46,11 @@ class CommandMonitor:
     ) -> None:
         if stale_after_seconds <= 0:
             raise ValueError("stale_after_seconds must be positive")
-        # A command whose state cannot be read for this long after it was created is over: a
-        # Sandbox that is idle-suspended had no running command, a lost one has none either.
-        # Without a limit its record is polled (and logged) every pass for ever.
+        # A command whose state could not be read, without a break, for this long is given up:
+        # an idle-suspended Sandbox had no running command, a lost one has none either. Without
+        # a limit its record is polled (and logged) every pass for ever. The time is counted
+        # from the first failed read (stored on the record) and starts over after any good read,
+        # so a long-running command that is unreadable for one moment is never given up.
         self._stale_after = timedelta(seconds=stale_after_seconds)
         if not monitor_id or lease_seconds <= 0 or retry_seconds <= 0 or batch_size <= 0:
             raise ValueError("monitor_id and positive lease/retry/batch values are required")
@@ -194,16 +196,20 @@ class CommandMonitor:
         )
         return data.decode("utf-8", errors="replace"), offset + next_stream_cursor
 
-    def _is_stale(self, claim: Mapping[str, object], now: datetime) -> bool:
-        created = claim.get("created_at")
-        if isinstance(created, str):
+    async def _note_unreadable(
+        self, claim: Mapping[str, object], claim_token: str, command_id: str, now: datetime
+    ) -> bool:
+        """Remember when the state first became unreadable; True once it has been for too long."""
+        since = claim.get("unreadable_since")
+        if isinstance(since, str):
             try:
-                created = datetime.fromisoformat(created)
+                since = datetime.fromisoformat(since)
             except ValueError:
-                return False
-        if not isinstance(created, datetime) or created.tzinfo is None:
+                since = None
+        if not isinstance(since, datetime) or since.tzinfo is None:
+            await self._store.set_unreadable_since(command_id, claim_token=claim_token, since=now)
             return False
-        return now - created > self._stale_after
+        return now - since > self._stale_after
 
     async def _poll_claim(
         self, command_id: str, claim: Mapping[str, object], now: datetime
@@ -225,8 +231,15 @@ class CommandMonitor:
             # The claim expires naturally; the next monitor retries the read, never start.
             return
         observed = _observed_state(result, current)
-        if observed is None and result.outcome == "unknown" and self._is_stale(claim, now):
-            observed = CommandExecutionState.UNKNOWN
+        stale = False
+        if result.outcome == "unknown":
+            stale = await self._note_unreadable(claim, claim_token, command_id, now)
+            if stale:
+                observed = CommandExecutionState.UNKNOWN
+        elif claim.get("unreadable_since") is not None:
+            await self._store.set_unreadable_since(
+                command_id, claim_token=claim_token, since=None
+            )  # readable again: the count starts over
         if observed in {
             CommandExecutionState.FINISHED,
             CommandExecutionState.CANCELLED,
@@ -234,7 +247,9 @@ class CommandMonitor:
         }:
             result_data: dict[str, object] = {"exit_code": result.exit_code}
             if observed is CommandExecutionState.UNKNOWN:
-                result_data["sandbox_lost"] = True  # nothing left to archive
+                # Nothing left to archive. "lost" is a fact (the Sandbox is gone); an
+                # unreadable command that was given up on is only recorded as such.
+                result_data["sandbox_lost" if not stale else "unreadable_given_up"] = True
             elif self._output_archiver is not None:
                 if not isinstance(self._runtime, OutputPageReader):
                     raise TypeError("command runtime does not support paged output reads")

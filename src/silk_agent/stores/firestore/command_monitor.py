@@ -213,6 +213,33 @@ class FirestoreCommandMonitorStore:
         except Exception as exc:
             raise convert_firestore_error("claim_command", exc) from None
 
+    async def set_unreadable_since(
+        self, command_id: str, *, claim_token: str, since: datetime | None
+    ) -> bool:
+        if since is not None:
+            _validate_time(since, "since")
+        ref = self._ref(command_id)
+        transaction = self.client.transaction()
+
+        @async_transactional
+        async def update(transaction: firestore.AsyncTransaction) -> bool:
+            snapshot = await ref.get(transaction=transaction)
+            if not snapshot.exists:
+                return False
+            data = snapshot.to_dict() or {}
+            if data.get("monitor_lease_token") != claim_token:
+                return False
+            transaction.update(
+                ref,
+                {"unreadable_since": since if since is not None else firestore.DELETE_FIELD},
+            )
+            return True
+
+        try:
+            return await update(transaction)
+        except Exception as exc:
+            raise convert_firestore_error("set_command_unreadable_since", exc) from None
+
     async def record_observation(
         self,
         command_id: str,
