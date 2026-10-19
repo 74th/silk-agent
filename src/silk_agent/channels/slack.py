@@ -102,16 +102,15 @@ class SlackChannel:
     async def wait_idle(self, grace_seconds: float | None = None) -> None:
         """Wait for in-flight event handlers (used by tests and graceful shutdown).
 
-        With grace_seconds, stop waiting when it passes; the handlers keep running."""
-
-        async def drain() -> None:
-            while self._tasks:
-                await asyncio.gather(*list(self._tasks), return_exceptions=True)
-
-        try:
-            await asyncio.wait_for(drain(), grace_seconds)
-        except TimeoutError:
-            log.warning("event handlers still running after %.0fs", grace_seconds)
+        With grace_seconds, stop waiting when it passes. The handlers are not cancelled."""
+        loop = asyncio.get_running_loop()
+        deadline = None if grace_seconds is None else loop.time() + grace_seconds
+        while self._tasks:
+            remaining = None if deadline is None else deadline - loop.time()
+            if remaining is not None and remaining <= 0:
+                log.warning("event handlers still running after %.0fs", grace_seconds)
+                return
+            await asyncio.wait(list(self._tasks), timeout=remaining)
 
     # ------------------------------------------------------------ outbound
 

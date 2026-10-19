@@ -173,10 +173,13 @@ class SlackBot:
             await self._socket.close_async()
         except Exception:
             log.exception("closing Socket Mode failed")
+        # One deadline for the whole shutdown (the Pod's termination grace period is shared).
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._grace
         if self.channel is not None:
             await self.channel.wait_idle(self._grace)
         if self.services is not None:
-            await self.services.aclose(self._grace)
+            await self.services.aclose(max(0.0, deadline - loop.time()))
 
 
 async def run_from_environment(config: Config) -> None:  # pragma: no cover

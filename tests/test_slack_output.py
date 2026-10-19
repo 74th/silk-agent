@@ -511,5 +511,7 @@ async def test_wait_idle_gives_up_after_the_grace_period():
     channel._tasks.add(blocked)
     try:
         await asyncio.wait_for(channel.wait_idle(0.05), 2)
+        await asyncio.sleep(0)
+        assert not blocked.cancelled()  # giving up the wait leaves the handler running
     finally:
         blocked.cancel()
