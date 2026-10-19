@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -33,8 +34,8 @@ class ProgressConfig(_Model):
     @field_validator("heartbeat_interval_seconds")
     @classmethod
     def _positive_interval(cls, value: float) -> float:
-        if value <= 0:
-            raise ValueError("must be greater than 0")
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("must be a finite number greater than 0")
         return value
 
     @field_validator("timezone")

@@ -401,6 +401,8 @@ def test_a_relative_skills_source_is_resolved_against_the_config_file(tmp_path, 
     [
         ("heartbeat_interval_seconds", 0),
         ("heartbeat_interval_seconds", -5),
+        ("heartbeat_interval_seconds", float("nan")),
+        ("heartbeat_interval_seconds", float("inf")),
         ("timezone", "Mars/Base"),
     ],
 )
