@@ -1,4 +1,5 @@
 import asyncio
+import os
 import uuid
 from datetime import UTC, datetime
 
@@ -13,7 +14,8 @@ from silk_agent.stores.firestore.inbox import FirestoreInboxStore
 from silk_agent.stores.firestore.ownership import FirestoreOwnershipStore
 from silk_agent.stores.firestore.workers import FirestoreWorkerDirectory
 
-P = "silk-agent"
+P = os.environ.get("ACCEPTANCE_PREFIX", "silk-agent")  # another use case: its prefix
+TEAM = os.environ.get("ACCEPTANCE_TEAM", "T")  # a use case may allow only its own workspace
 SENDER = {"email": "acceptance@example.com", "is_guest": False, "is_external": False, "team": "T"}
 
 
@@ -44,7 +46,7 @@ class Env:
             input_id=f"in-{n}-{uuid.uuid4().hex[:6]}",
             conversation_generation=gen,
             kind="message",
-            payload={"text": text, "user": "UACC", "team": "T", "channel": "C", "sender": SENDER},
+            payload={"text": text, "user": "UACC", "team": TEAM, "channel": "C", "sender": SENDER},
             created_at=datetime.now(UTC),
         )
         # "UACC" is made up: the Gateway would look it up in Slack, fail for good and block the
