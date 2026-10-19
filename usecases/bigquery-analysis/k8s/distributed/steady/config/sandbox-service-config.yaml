@@ -8,7 +8,7 @@ workspace_storage: 10Gi
 runtime:
   container_name: sandboxd
   # This use case's Sandbox image (sandbox/Dockerfile), pinned by digest.
-  image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/bigquery-analysis-sandbox@sha256:8de08897882f6fde372526db0a26507b0f5341373c7592882364dc725a7a8107
+  image: us-central1-docker.pkg.dev/nnyn-dev/silk-agent-images/bigquery-analysis-sandbox@sha256:68d2b6ec381361748fb74095f5e7bbbf5a272e777cc2683c6de9a28562633c94
   rest_port: 8080
   tracker_port: 8081
   grpc_port: 9090
