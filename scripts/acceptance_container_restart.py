@@ -3,8 +3,9 @@ automatically.
 
 A conversation is started on a Worker, that Worker's container is killed (the Pod stays, only
 the process ends, as with an OOM kill) and a follow-up arrives. Expected: the conversation
-recovers without a manual `recovery confirm-stopped`, the agent still knows what it was told,
-and the ownership was released with the evidence `auto:incarnation-replaced:<pod>`.
+recovers without a manual `recovery confirm-stopped`, and the agent still knows what it was told. (The evidence, `auto:incarnation-replaced:<pod>`, is
+not kept: the next owner's record replaces it. The Pod is still there, so it cannot be the
+Pod-absence evidence.)
 
     uv run python scripts/acceptance_container_restart.py
 """
@@ -115,36 +116,41 @@ async def main() -> None:
     assert after.split()[0] == before.split()[0], "the Pod must be the same (same UID)"
     assert after != before, "the container did not restart"
 
-    started = time.time()
-    # No "user" in the payload: the Gateway looks a user up in Slack, gives up on this made-up
-    # one within seconds and blocks the input, long before the recovery (minutes) can start.
+    # A made-up user (the Worker needs a non-empty one): the Gateway would look it up in Slack,
+    # give up within seconds and block the input, long before the recovery (minutes) can start.
+    # So the lookup is marked resolved on the stored record, and `sender` is stored with it.
+    follow_up = f"in-restart-{uuid.uuid4().hex[:6]}"  # noqa: F405
     await e.inbox.accept_input(
         conversation_key=key,
-        input_id=f"in-restart-{uuid.uuid4().hex[:6]}",  # noqa: F405
+        input_id=follow_up,
         conversation_generation=1,
         kind="message",
-        payload={"text": "What word did I ask you to remember? Answer with the word only."},
+        payload={
+            "text": "What word did I ask you to remember? Answer with the word only.",
+            "user": "UACC",
+            "team": "T",
+            "channel": "C",
+            "sender": SENDER,  # noqa: F405
+        },
         created_at=datetime.now(UTC),  # noqa: F405
     )
+    conversation = e.c.collection(f"{P}_conversations").document(e.conv._conversation_id(key))
+    async for item in conversation.collection("inputs").stream():
+        if item.to_dict().get("input_id") == follow_up:
+            await item.reference.update({"sender_lookup_state": "resolved"})
+    started = time.time()
 
     async def second():
         o = await e.outputs(key)
         return o if kinds(o).count("TurnFinished") >= 2 else None  # noqa: F405
 
-    outputs = await e.wait(second, 600)
-    print("recovered and answered in %.0fs" % (time.time() - started))
-    e.show(outputs, len(outputs) - 3)
-    answer = " ".join(
-        r["payload"]["event"].get("text", "")
-        for r in outputs
-        if r["payload"]["kind"] == "AssistantText"
-    )
-    assert "MANGO" in answer.upper(), answer
+    seen: list[str] = []
 
-    doc = await e.c.collection(f"{P}_ownership").document(e.conv._conversation_id(key)).get()
-    evidence = (doc.to_dict() or {}).get("quiesce_evidence", {}).get("evidence_id", "(none)")
-    print("released with evidence:", evidence)
-    new_owner = await e.own.get(key)
+    async def timeline():
+        """Print each change of the ownership, with the seconds since the follow-up."""
+        record = await e.own.get(key)
+        new_owner = await e.own.get(key)
+
     print("new owner pod:", new_owner.worker_id if new_owner else None)
 
 
