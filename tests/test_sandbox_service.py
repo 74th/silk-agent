@@ -1225,3 +1225,23 @@ async def test_skills_sync_removes_files_an_earlier_generation_left_behind():
     failed = await _remove_stale_skill_files(SimpleNamespace(files=Files()), {"keep/SKILL.md"})
     assert sorted(deleted) == [".skills/keep/removed.sh", ".skills/top.md"]
     assert failed == ["old/SKILL.md"]  # a leftover that stays is reported, not ignored
+
+
+async def test_a_failed_listing_of_the_skills_root_is_a_failed_sync_not_an_empty_one():
+    from silk_agent.sandbox.service import _remove_stale_skill_files
+
+    class Missing:
+        async def list(self, path):
+            raise FileOperationError("missing", path=path, status=404)
+
+    class Broken:
+        async def list(self, path):
+            raise OSError("temporary list failure")
+
+    class BadStatus:
+        async def list(self, path):
+            raise FileOperationError("server error", path=path, status=500)
+
+    assert await _remove_stale_skill_files(SimpleNamespace(files=Missing()), set()) == []
+    for files in (Broken(), BadStatus()):
+        assert await _remove_stale_skill_files(SimpleNamespace(files=files), set()) == [".skills"]

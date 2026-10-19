@@ -105,7 +105,8 @@ async def test_tracker_stream_records_output_and_check_failure(tmp_path):
             return Response()
 
     tracker = Tracker(journal, Stub(), generation=1)
-    tracker._read_identity = _identity_missing
+    tracker._read_identity = _identity_read
+    tracker._group_present = _group_absent
     await journal.update(record["command_id"], state="running", process_id=51)
     await tracker._consume(record["command_id"], Stream(), "marker")
     saved = await journal.get(record["command_id"])
@@ -214,7 +215,8 @@ async def test_tracker_stops_on_output_limit_but_keeps_consuming_until_exit(tmp_
             return Stream()
 
     tracker = Tracker(journal, Stub(), generation=1)
-    tracker._read_identity = _identity_missing
+    tracker._read_identity = _identity_read
+    tracker._group_present = _group_absent
     stops = []
 
     async def stop(command_id, reason):
@@ -279,7 +281,8 @@ async def test_tracker_reports_output_file_write_failure_separately_from_quota(
             return Stream()
 
     tracker = Tracker(journal, Stub(), generation=1)
-    tracker._read_identity = _identity_missing
+    tracker._read_identity = _identity_read
+    tracker._group_present = _group_absent
     stops = []
 
     async def stop(command_id, reason):
@@ -394,6 +397,14 @@ async def test_tracker_passes_only_the_marker_and_the_callers_env_to_the_process
 
 async def _identity_missing(_pid, _marker):
     return None
+
+
+async def _identity_read(_pid, _marker):
+    return {"process_id": 1, "pid": 4242, "pgid": 4242, "start_time": 1, "boot_id": "b"}
+
+
+async def _group_absent(_pgid):
+    return False, ""
 
 
 @pytest.mark.asyncio
@@ -543,34 +554,73 @@ async def test_a_stream_that_ends_after_init_without_exit_stays_unknown(tmp_path
 async def test_exit_event_is_not_the_end_of_the_command_while_its_group_remains(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(tracker_module, "GROUP_TERM_WAIT_SECONDS", 0.3)
-    monkeypatch.setattr(tracker_module, "GROUP_KILL_WAIT_SECONDS", 0.3)
-    executed: list[str] = []
+    """Signals go through the real /bin/sh of this machine (dash on Debian, like the image)."""
+    import os
+    import signal
+    import subprocess
+
+    monkeypatch.setattr(tracker_module, "GROUP_TERM_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(tracker_module, "GROUP_KILL_WAIT_SECONDS", 1.0)
 
     class Stub:
         async def Execute(self, request, timeout):
-            executed.append(request.config.command[-1])
+            done = subprocess.run(  # noqa: ASYNC221
+                list(request.config.command), capture_output=True, check=False
+            )
+            return type("Result", (), {"exit_code": done.returncode})()
 
     tracker = Tracker(CommandJournal(tmp_path / "commands.json"), Stub(), 1)
-    with_group = {"identity": {"pgid": 4242}}
 
-    assert await tracker._group_gone_after_exit({}) == (True, "")  # no identity read
+    # a child left behind in its own process group
+    leftover = subprocess.Popen(["sleep", "60"], start_new_session=True)  # noqa: ASYNC220
+    gone_checks = []
 
-    present = iter([(True, "x"), (False, "")])
+    async def group_present(pgid):
+        gone_checks.append(pgid)
+        return leftover.poll() is None, ""
 
-    async def gone_after_term(_pgid):
-        return next(present)
+    tracker._group_present = group_present
+    try:
+        assert await tracker._group_gone_after_exit({"identity": {"pgid": leftover.pid}}) == (
+            True,
+            "",
+        )
+        assert leftover.wait(timeout=5) == -signal.SIGTERM  # it was signalled, not just waited on
+    finally:
+        if leftover.poll() is None:
+            os.killpg(leftover.pid, signal.SIGKILL)
+            leftover.wait()
 
-    tracker._group_present = gone_after_term
-    assert await tracker._group_gone_after_exit(with_group) == (True, "")
-    assert executed == ["kill -TERM -- -4242"]
+    # a group that ignores TERM is killed
+    stubborn = subprocess.Popen(  # noqa: ASYNC220
+        ["sh", "-c", "trap '' TERM; while :; do sleep 1; done"], start_new_session=True
+    )
+    leftover = stubborn
+    try:
+        assert (await tracker._group_gone_after_exit({"identity": {"pgid": stubborn.pid}}))[0]
+        assert stubborn.wait(timeout=5) == -signal.SIGKILL
+    finally:
+        if stubborn.poll() is None:
+            os.killpg(stubborn.pid, signal.SIGKILL)
+            stubborn.wait()
 
-    executed.clear()
 
-    async def never_gone(_pgid):
-        return True, "4243 4242 sleep"
+@pytest.mark.asyncio
+async def test_a_group_that_cannot_be_identified_or_signalled_is_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(tracker_module, "GROUP_TERM_WAIT_SECONDS", 0.2)
+    monkeypatch.setattr(tracker_module, "GROUP_KILL_WAIT_SECONDS", 0.2)
 
-    tracker._group_present = never_gone
-    gone, detail = await tracker._group_gone_after_exit(with_group)
-    assert not gone and "remain after SIGKILL" in detail
-    assert executed == ["kill -TERM -- -4242", "kill -KILL -- -4242"]
+    class Stub:
+        async def Execute(self, request, timeout):
+            return type("Result", (), {"exit_code": 2})()  # e.g. the shell rejects the command
+
+    tracker = Tracker(CommandJournal(tmp_path / "commands.json"), Stub(), 1)
+
+    async def present(_pgid):
+        return True, "x"
+
+    tracker._group_present = present
+    gone, detail = await tracker._group_gone_after_exit({})  # identity was never read
+    assert not gone and "unknown" in detail
+    gone, detail = await tracker._group_gone_after_exit({"identity": {"pgid": 4242}})
+    assert not gone and "could not signal" in detail

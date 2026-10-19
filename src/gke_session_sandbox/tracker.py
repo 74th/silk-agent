@@ -620,7 +620,12 @@ class Tracker:
             kind = event.WhichOneof("event")
             if kind == "init":
                 pid = event.init.process_id
-                identity = await self._read_identity(pid, marker)
+                identity = None
+                for _attempt in range(3):  # a transient RPC failure must not lose the group id
+                    identity = await self._read_identity(pid, marker)
+                    if identity:
+                        break
+                    await asyncio.sleep(0.2)
                 values: dict[str, Any] = {
                     "state": "running",
                     "process_id": pid,
@@ -690,7 +695,8 @@ class Tracker:
         suspended under a process that may still run."""
         pgid = ((record or {}).get("identity") or {}).get("pgid")
         if not isinstance(pgid, int) or pgid <= 1:
-            return True, ""  # no identity was read: nothing to inspect
+            # Without the group's id its disappearance cannot be shown.
+            return False, "the command's process group is unknown (its identity was not read)"
         try:
             for signal_name, wait in (
                 ("TERM", GROUP_TERM_WAIT_SECONDS),
@@ -699,14 +705,17 @@ class Tracker:
                 present, _detail = await self._group_present(pgid)
                 if not present:
                     return True, ""
-                await self.stub.Execute(
+                sent = await self.stub.Execute(
                     process_pb2.ExecuteRequest(
                         config=process_pb2.ProcessConfig(
-                            command=["/bin/sh", "-c", f"kill -{signal_name} -- -{pgid}"]
+                            # `-s NAME -- -PGID` is the form dash (the image's /bin/sh) accepts.
+                            command=["/bin/sh", "-c", f"kill -s {signal_name} -- -{pgid}"]
                         )
                     ),
                     timeout=3,
                 )
+                if sent.exit_code not in (0, 1):  # 1: the group is already gone
+                    return False, f"could not signal the command's process group: {sent.exit_code}"
                 deadline = asyncio.get_running_loop().time() + wait
                 while asyncio.get_running_loop().time() < deadline:
                     await asyncio.sleep(0.25)

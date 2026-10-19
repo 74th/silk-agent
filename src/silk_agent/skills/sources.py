@@ -91,6 +91,7 @@ class LocalDirSkillSource(_CachedSource):
 
     def _sync(self) -> SkillGeneration | None:
         if not self._src.is_dir():
+            self._current = None  # removed or unmounted: the next turn runs without Skills
             return None
         files = [p for p in self._src.rglob("*") if p.is_file()]
         if not files:

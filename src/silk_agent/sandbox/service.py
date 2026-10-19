@@ -608,9 +608,12 @@ async def _remove_stale_skill_files(handle: Any, wanted: set[str]) -> list[str]:
         directory = pending.pop()
         try:
             entries = await _call_and_close(handle.files, "list", directory)
-        except Exception:
-            if directory == ".skills":
+        except FileOperationError as exc:
+            if directory == ".skills" and exc.status == 404:
                 return []  # nothing was ever written here
+            failed.append(directory.removeprefix(".skills/"))
+            continue
+        except Exception:
             failed.append(directory.removeprefix(".skills/"))
             continue
         for entry in entries:
