@@ -42,7 +42,14 @@ class CommandMonitor:
         batch_size: int = 100,
         output_archiver: CommandOutputArchiver | None = None,
         output_reader: OutputObjectReader | None = None,
+        stale_after_seconds: float = 6 * 3600,
     ) -> None:
+        if stale_after_seconds <= 0:
+            raise ValueError("stale_after_seconds must be positive")
+        # A command whose state cannot be read for this long after it was created is over: a
+        # Sandbox that is idle-suspended had no running command, a lost one has none either.
+        # Without a limit its record is polled (and logged) every pass for ever.
+        self._stale_after = timedelta(seconds=stale_after_seconds)
         if not monitor_id or lease_seconds <= 0 or retry_seconds <= 0 or batch_size <= 0:
             raise ValueError("monitor_id and positive lease/retry/batch values are required")
         self._store = store
@@ -187,6 +194,17 @@ class CommandMonitor:
         )
         return data.decode("utf-8", errors="replace"), offset + next_stream_cursor
 
+    def _is_stale(self, claim: Mapping[str, object], now: datetime) -> bool:
+        created = claim.get("created_at")
+        if isinstance(created, str):
+            try:
+                created = datetime.fromisoformat(created)
+            except ValueError:
+                return False
+        if not isinstance(created, datetime) or created.tzinfo is None:
+            return False
+        return now - created > self._stale_after
+
     async def _poll_claim(
         self, command_id: str, claim: Mapping[str, object], now: datetime
     ) -> None:
@@ -207,6 +225,8 @@ class CommandMonitor:
             # The claim expires naturally; the next monitor retries the read, never start.
             return
         observed = _observed_state(result, current)
+        if observed is None and result.outcome == "unknown" and self._is_stale(claim, now):
+            observed = CommandExecutionState.UNKNOWN
         if observed in {
             CommandExecutionState.FINISHED,
             CommandExecutionState.CANCELLED,

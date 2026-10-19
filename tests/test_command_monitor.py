@@ -488,6 +488,60 @@ async def test_a_command_whose_sandbox_is_lost_is_ended_once_and_not_polled_agai
     assert len(runtime.status_calls) == 1
 
 
+async def _running_command(store, now, command_id="stale-command", created_at=None):
+    owner = OwnershipToken(
+        "conversation", "worker", "incarnation", 1, 1, now + timedelta(minutes=1)
+    )
+    store.owners["conversation"] = owner
+    store.ownership_phases["conversation"] = "active"
+    await store.create_intent(
+        command_id=command_id,
+        request_hash="hash",
+        conversation_key="conversation",
+        conversation_generation=1,
+        sandbox_generation=1,
+        origin_turn="turn-1",
+        origin_epoch=1,
+        origin_seq=1,
+        owner=owner,
+        created_at=created_at or now,
+    )
+    store.commands[command_id]["state"] = CommandExecutionState.RUNNING
+    await store.detach(command_id, now=now)
+
+
+async def test_a_command_that_stays_unreadable_for_hours_is_ended_not_polled_for_ever():
+    now = datetime(2026, 10, 14, tzinfo=UTC)
+    clock = MutableClock(now)
+    store = FakeSharedStore()
+    await _running_command(store, now)
+    runtime = StatusRuntime("unknown")  # e.g. its Sandbox is idle-suspended
+    monitor = CommandMonitor(store, runtime, clock, monitor_id="monitor", stale_after_seconds=3600)
+
+    assert await monitor.poll_once() == 1  # claimed and read, still unknown
+    assert store.commands["stale-command"]["state"] is CommandExecutionState.RUNNING
+    clock.value += timedelta(hours=2)
+    assert await monitor.poll_once() == 1
+    record = store.commands["stale-command"]
+    assert record["state"] is CommandExecutionState.UNKNOWN
+    assert record["result"]["sandbox_lost"] is True
+    clock.value += timedelta(minutes=5)
+    assert await monitor.poll_once() == 0  # terminal: not read again
+
+
+async def test_a_recent_command_with_an_unreadable_state_is_not_given_up_on():
+    now = datetime(2026, 10, 14, tzinfo=UTC)
+    clock = MutableClock(now)
+    store = FakeSharedStore()
+    await _running_command(store, now)
+    monitor = CommandMonitor(
+        store, StatusRuntime("unknown"), clock, monitor_id="monitor", stale_after_seconds=3600
+    )
+    clock.value += timedelta(minutes=30)
+    await monitor.poll_once()
+    assert store.commands["stale-command"]["state"] is CommandExecutionState.RUNNING
+
+
 async def test_monitor_reads_archived_output_with_a_combined_cursor():
     now = datetime(2026, 10, 14, tzinfo=UTC)
     clock = MutableClock(now)

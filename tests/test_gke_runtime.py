@@ -299,6 +299,41 @@ async def test_cancel_command_after_a_restart_goes_through_the_session():
     assert cmds.cancelled == ["cmd-from-before"]
 
 
+async def test_a_turn_stop_keeps_the_handle_of_a_command_that_ignores_the_cancel():
+    # cancel_commands (the turn stop) used to drop the handle as soon as the tracker accepted the
+    # cancel, though a command that ignores SIGTERM was still running.
+    rt, mgr = make(cancel_confirm_seconds=0.3)
+    key = "slack:T1:C1:1.0"
+    await rt.run_command(key, "warm")
+    cmds = mgr.handles[("T1", "C1:1.0")].commands
+    cmds.mode = "block"
+    cmds.ignores_cancel = True
+    task = asyncio.create_task(rt.run_command(key, "trap '' TERM; sleep 300"))
+    await asyncio.sleep(0.05)
+    command_id = cmds.runs[-1][3]
+    await rt.cancel_commands(key)
+    assert cmds.cancelled == [command_id]
+    assert command_id in rt._running[key]  # still tracked: it can be cancelled again
+    assert (await rt.command_status(key, command_id)).outcome == "running"
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_a_turn_stop_cancels_every_command_at_once_and_forgets_the_finished_ones():
+    rt, mgr = make(cancel_confirm_seconds=0.3)
+    key = "slack:T1:C1:1.0"
+    await rt.run_command(key, "warm")
+    cmds = mgr.handles[("T1", "C1:1.0")].commands
+    cmds.mode = "block"
+    tasks = [asyncio.create_task(rt.run_command(key, f"sleep {n}")) for n in (100, 200)]
+    await asyncio.sleep(0.05)
+    ids = [run[3] for run in cmds.runs[-2:]]
+    await rt.cancel_commands(key)
+    assert sorted(cmds.cancelled) == sorted(ids)
+    assert not rt._running.get(key)
+    await asyncio.gather(*tasks)
+
+
 async def test_status_and_output():
     rt, _ = make()
     st = await rt.command_status("slack:T1:C1:1.0", "cmd-1")

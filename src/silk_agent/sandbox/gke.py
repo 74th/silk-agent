@@ -218,15 +218,13 @@ class GkeSessionSandboxRuntime:
             await asyncio.sleep(0.25)
 
     async def cancel_commands(self, conversation_key: str) -> None:
-        """Ask the tracker to stop the running commands (SIGTERM, then SIGKILL)."""
-        for command_id, handle in list(self._running.get(conversation_key, {}).items()):
-            self._cancelled.setdefault(conversation_key, set()).add(command_id)
-            try:
-                await handle.commands.cancel(command_id)
-            except Exception:
-                log.exception("cancelling command %s failed", command_id)
-            else:
-                self._running.get(conversation_key, {}).pop(command_id, None)
+        """Ask the tracker to stop every running command of the conversation (all at once).
+
+        Each goes through `cancel_command`: its handle is dropped only once the tracker reports
+        the command finished. A cancel that was merely accepted (the process may ignore
+        SIGTERM) leaves the handle, so the command can still be cancelled and followed."""
+        ids = list(self._running.get(conversation_key, {}))
+        await asyncio.gather(*(self.cancel_command(conversation_key, cid) for cid in ids))
 
     # ------------------------------------------------------------ files
 
